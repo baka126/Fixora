@@ -1,2 +1,5 @@
-- [Home](README.md)
-- [Deployment](deployment.md)
+- **Getting Started**
+  - [Overview](README.md)
+  
+- **Administration**
+  - [Deployment & Setup](deployment.md)
