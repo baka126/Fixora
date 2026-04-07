@@ -2,4 +2,4 @@
   - [Overview](/)
   
 - **Administration**
-  - [Deployment & Setup](deployment)
+  - [Deployment & Setup](deployment.md)

@@ -4,6 +4,11 @@
 
 Fixora is a Read-Only Slackbot and diagnostic platform tailored for DevOps and platform teams. It focuses exclusively on diagnosing and safely remediating `OOMKilled` (Exit 137) and `CrashLoopBackOff` events in Kubernetes.
 
+## 🚀 Quick Links
+
+* [**Deployment Guide**](deployment.md) - Get Fixora running in your cluster.
+* [**Overview**](/) - Learn about the core architecture and features.
+
 ## Features
 
 - **Zero-Trust Security**: No inbound access required.
@@ -12,4 +17,3 @@ Fixora is a Read-Only Slackbot and diagnostic platform tailored for DevOps and p
 - **GitOps Ready**: Automated PR/MR generation via GitHub/GitLab.
 - **ArgoCD Integrated**: Automatic repository discovery.
 
-[Get Started](deployment)

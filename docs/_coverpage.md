@@ -9,6 +9,7 @@ Fixora analyzes critical cluster failures in real-time and generates automated, 
 * 🛠️ **Automated Root Cause Remediation:** Native GitOps integration for instantaneous fixes.
 
 [Get Started](#/)
+[Deployment](#/deployment)
 [View on GitHub](https://github.com/baka126/Fixora)
 
 ---
