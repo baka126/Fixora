@@ -8,8 +8,8 @@ Fixora analyzes critical cluster failures in real-time and generates automated, 
 * 🕰️ **Historical Pattern Analysis:** Contextualizes failures using deep event histories.
 * 🛠️ **Automated Root Cause Remediation:** Native GitOps integration for instantaneous fixes.
 
-[Get Started](#/README)
-[View on GitHub](https://github.com/baka126/fixora)
+[Get Started](#/)
+[View on GitHub](https://github.com/baka126/Fixora)
 
 ---
 

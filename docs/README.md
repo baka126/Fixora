@@ -12,4 +12,4 @@ Fixora is a Read-Only Slackbot and diagnostic platform tailored for DevOps and p
 - **GitOps Ready**: Automated PR/MR generation via GitHub/GitLab.
 - **ArgoCD Integrated**: Automatic repository discovery.
 
-[Get Started](deployment.md)
+[Get Started](deployment)

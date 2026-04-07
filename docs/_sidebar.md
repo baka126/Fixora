@@ -1,5 +1,5 @@
 - **Getting Started**
-  - [Overview](README.md)
+  - [Overview](/)
   
 - **Administration**
-  - [Deployment & Setup](deployment.md)
+  - [Deployment & Setup](deployment)
