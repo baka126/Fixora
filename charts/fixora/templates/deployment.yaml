@@ -37,11 +37,41 @@ spec:
           command: ["/fixora"]
           env:
             - name: SLACK_TOKEN
-              value: {{ .Values.slack.token }}
+              value: {{ .Values.slack.token | quote }}
             - name: SLACK_CHANNEL
-              value: {{ .Values.slack.channel }}
+              value: {{ .Values.slack.channel | quote }}
+            - name: PROMETHEUS_URL
+              value: {{ .Values.prometheus.url | quote }}
+            - name: ALERTMANAGER_URL
+              value: {{ .Values.alertmanager.url | quote }}
+            - name: AI_PROVIDER
+              value: {{ .Values.ai.provider | quote }}
+            - name: AI_API_KEY
+              value: {{ .Values.ai.apiKey | quote }}
+            - name: GITHUB_TOKEN
+              value: {{ .Values.vcs.github.token | quote }}
+            - name: GITLAB_TOKEN
+              value: {{ .Values.vcs.gitlab.token | quote }}
+            - name: GITLAB_BASE_URL
+              value: {{ .Values.vcs.gitlab.baseUrl | quote }}
+            - name: WEBHOOK_TOKEN
+              value: {{ .Values.webhook.token | quote }}
+            - name: WEBHOOK_USER
+              value: {{ .Values.webhook.user | quote }}
+            - name: WEBHOOK_PASSWORD
+              value: {{ .Values.webhook.password | quote }}
             - name: FIXORA_MODE
-              value: {{ .Values.mode }}
+              value: {{ .Values.mode | quote }}
+            - name: ARGOCD_ENABLED
+              value: {{ .Values.features.argocd.enabled | quote }}
+            - name: ARGOCD_NAMESPACE
+              value: {{ .Values.features.argocd.namespace | quote }}
+            - name: ARGOCD_URL
+              value: {{ .Values.features.argocd.url | quote }}
+            - name: ARGOCD_TOKEN
+              value: {{ .Values.features.argocd.token | quote }}
+            - name: PREDICTIVE_ENABLED
+              value: {{ .Values.features.predictive.enabled | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       nodeSelector:

@@ -37,7 +37,39 @@ slack:
   token: ""
   channel: ""
 
+prometheus:
+  url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+
+alertmanager:
+  url: "http://alertmanager-operated.monitoring.svc.cluster.local:9093"
+
+ai:
+  provider: "gemini" # "gemini", "openai", "anthropic"
+  apiKey: ""
+
 mode: "auto-fix"
+
+webhook:
+  token: ""
+  user: ""
+  password: ""
+
+# Feature Toggles
+features:
+  argocd:
+    enabled: false
+    namespace: "argocd"
+    url: ""
+    token: ""
+  predictive:
+    enabled: true
+
+vcs:
+  github:
+    token: ""
+  gitlab:
+    token: ""
+    baseUrl: ""
 
 service:
   type: ClusterIP

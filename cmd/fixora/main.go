@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
@@ -35,11 +36,16 @@ func main() {
 		log.Fatalf("Error creating clientset: %s", err.Error())
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(k8sConfig)
+	if err != nil {
+		log.Fatalf("Error creating dynamic client: %s", err.Error())
+	}
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	ctrl := controller.NewController(clientset, cfg)
-	srv := server.New(ctrl)
+	ctrl := controller.NewController(clientset, dynamicClient, cfg)
+	srv := server.New(ctrl, cfg)
 	go srv.Start()
 
 	go ctrl.Run(stopCh)

@@ -1,1 +1,12 @@
-GEMINI.md
+# Binaries
+fixora
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+bin/
+pkg/
+vendor/
+.gemini/
