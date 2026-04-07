@@ -6,5 +6,5 @@
 - Historical Pattern
 - Root Cause
 
-[GitHub](https://github.com/your-org/fixora)
+[GitHub](https://github.com/baka126/fixora)
 [Get Started](#fixora)
