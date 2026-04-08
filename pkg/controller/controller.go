@@ -99,7 +99,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		ghProvider: ghProvider,
 		glProvider: glProvider,
 		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:    newHistoryCache(),
+		history:    newHistoryCache(cfg.HistoryFilePath),
 	}
 }
 
@@ -238,9 +238,18 @@ func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
 func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string) {
 	slog.Info("Diagnosing Pod", "namespace", pod.Namespace, "name", pod.Name, "reason", reason)
 
+	var historyStr string
 	historySummary := "This is the first time we've diagnosed this pod."
 	if prev, exists := c.history.Get(pod.Namespace, pod.Name); exists {
-		historySummary = fmt.Sprintf("Recurring Issue: This pod has crashed %d times recently. Last Root Cause: %s", prev.Count, prev.RootCause)
+		historySummary = fmt.Sprintf("Recurring Issue: This pod has crashed %d times previously.", len(prev.Incidents))
+		var sb strings.Builder
+		for _, inc := range prev.Incidents {
+			sb.WriteString(fmt.Sprintf("- [%s] Reason: %s, RootCause: %s\n", inc.Timestamp.Format(time.RFC3339), inc.Reason, inc.RootCause))
+			if inc.AppliedFix != "" {
+				sb.WriteString(fmt.Sprintf("  Applied Fix:\n%s\n", inc.AppliedFix))
+			}
+		}
+		historyStr = sb.String()
 	}
 
 	evidence := notifications.EvidenceChain{
@@ -288,6 +297,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			Logs:      logs,
 			Events:    events,
 			Metrics:   evidence.MetricProof,
+			History:   historyStr,
 		}
 
 		rootCause, err = c.aiProvider.PerformForensics(ctx, forensicCtx)
@@ -296,7 +306,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			evidence.RootCause = "Forensic analysis failed: " + err.Error()
 		} else {
 			evidence.RootCause = rootCause
-			c.history.Update(pod.Namespace, pod.Name, rootCause)
+			c.history.Update(pod.Namespace, pod.Name, reason, rootCause)
 		}
 	} else {
 		evidence.RootCause = "AI Provider not configured"
@@ -394,6 +404,8 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		slog.Error("Failed to generate patch", "pod", pod.Name, "error", err)
 		return
 	}
+
+	c.history.UpdatePatch(pod.Namespace, pod.Name, string(newContent))
 
 	branchName := fmt.Sprintf("fixora/patch-%s-%d", pod.Name, time.Now().Unix())
 	opts := vcs.PullRequestOptions{

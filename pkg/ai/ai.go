@@ -9,7 +9,7 @@ const (
 	PromptAnalyzeLog       = "You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the log failure. No jargon, no extra text.\n\nLogs:\n%s"
 	PromptAnalyzeEvents    = "You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the pod events. No jargon, no extra text.\n\nEvents:\n%s"
 	PromptAnalyzeRootCause = "Based on the following evidence chain, determine the root cause and suggest a fix:\n\n%s"
-	PromptForensics        = "You are a Kubernetes forensic expert. Analyze failure for pod %s/%s. Reason: %s\nMetrics: %s\nEvents: %s\nLogs: %s\n\nProvide a clear, 3-sentence summary: 1. Root Cause, 2. Proof, 3. Recommended fix."
+	PromptForensics        = "You are a Kubernetes forensic expert. Analyze failure for pod %s/%s. Reason: %s\nMetrics: %s\nEvents: %s\nLogs: %s\nPast History:\n%s\n\nProvide a clear, 3-sentence summary: 1. Root Cause, 2. Proof, 3. Recommended fix. Use Past History to run predictive analysis, give future prediction, and offer a long-term solution if this is a recurring issue."
 	PromptGeneratePatch    = "You are a Kubernetes GitOps expert. Generate ONLY the complete new file content. No markdown.\n\n[CURRENT CONTENT]\n%s\n\n[EVIDENCE]\n%s"
 )
 
@@ -20,6 +20,7 @@ type ForensicContext struct {
 	Logs      string
 	Events    string
 	Metrics   string
+	History   string
 }
 
 type Provider interface {

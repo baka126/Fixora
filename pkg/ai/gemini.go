@@ -75,7 +75,7 @@ func (g *GeminiProvider) AnalyzeRootCause(ctx context.Context, evidence string) 
 func (g *GeminiProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (string, error) {
 	prompt := fmt.Sprintf(PromptForensics,
 		forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
-		forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs)
+		forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)
 
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {

@@ -96,7 +96,7 @@ func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 					Role: openai.ChatMessageRoleUser,
 					Content: fmt.Sprintf(PromptForensics,
 						forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
-						forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs),
+						forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History),
 				},
 			},
 		},
