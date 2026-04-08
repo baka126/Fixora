@@ -47,8 +47,15 @@
     </div>
 
   </div>
-</div>
 
-[Get Started](#/)
-[Deployment](#/deployment?id=_1-system-prerequisites)
-[View on GitHub](https://github.com/baka126/Fixora)
+  <!-- Styled HTML Buttons -->
+  <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
+    <a href="#getting-started" style="padding: 10px 20px; background-color: #326CE5; color: white; text-decoration: none; border-radius: 6px; font-weight: bold;">Get Started</a>
+    
+    <!-- Deployment Link Fixed -->
+    <a href="deployment.md" style="padding: 10px 20px; background-color: transparent; color: #326CE5; text-decoration: none; border: 1px solid #326CE5; border-radius: 6px; font-weight: bold;">Deployment</a>
+    
+    <a href="https://github.com/baka126/Fixora" target="_blank" style="padding: 10px 20px; background-color: transparent; color: #333; text-decoration: none; border: 1px solid #ccc; border-radius: 6px; font-weight: bold;">View on GitHub</a>
+  </div>
+
+</div>
