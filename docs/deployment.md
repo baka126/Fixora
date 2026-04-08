@@ -9,9 +9,11 @@ Fixora is an enterprise-grade diagnostic platform that acts as an intelligent we
 Ensure your infrastructure meets the following requirements before initiating the deployment:
 
 ### A. Communication & Alerting
-* **Slack Workspace:** Create a Slack App via [api.slack.com](https://api.slack.com/apps).
+* **Slack Workspace (Optional):** Create a Slack App via [api.slack.com](https://api.slack.com/apps).
     * Requires `chat:write` OAuth scope.
-    * Capture the **Bot User OAuth Token** (`xoxb-...`).
+    * Capture the **Bot User OAuth Token** (`xoxb-...`) and the **Signing Secret** for request verification.
+* **Google Workspace (Optional):** Enable a **Webhook** in a Google Chat space.
+    * Capture the **Webhook URL**.
 * **Prometheus Stack:** A functional `kube-prometheus-stack` or standalone Alertmanager instance routing to your cluster.
 
 ### B. LLM Provider Credentials
@@ -45,11 +47,16 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | Helm Value | Environment Variable | Type | Description |
 | :--- | :--- | :--- | :--- |
 | `slack.token` | `SLACK_TOKEN` | `string` | Slack Bot User OAuth Token (`xoxb-`). |
+| `slack.signingSecret` | `SLACK_SIGNING_SECRET` | `secret` | Slack App Signing Secret for request verification. |
 | `slack.channel` | `SLACK_CHANNEL` | `string` | Target Slack channel ID or name (e.g., `#ops-diagnostics`). |
+| `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL. |
+| `mode` | `FIXORA_MODE` | `string` | Operating mode: `auto-fix`, `click-to-fix`, or `dry-run`. |
 | `ai.apiKey` | `AI_API_KEY` | `secret` | API Key for your designated LLM provider. |
 | `ai.provider` | `AI_PROVIDER` | `string` | Selected engine: `gemini`, `openai`, or `anthropic`. |
+| `ai.model` | `AI_MODEL` | `string` | (Optional) Specific model version (e.g., `gpt-4o-mini`). |
 | `webhook.token` | `WEBHOOK_TOKEN` | `secret` | (Optional) Bearer token for securing the Alertmanager endpoint. |
 | `features.argocd.enabled` | `ARGOCD_ENABLED` | `boolean` | Toggles automatic repository discovery via ArgoCD API. |
+| `features.history.crdEnabled`| `HISTORY_CRD_ENABLED` | `boolean` | Persists incident history in Kubernetes CRDs for predictive analysis. |
 
 ---
 
@@ -66,13 +73,19 @@ cd fixora
 cat <<EOF > fixora-values.yaml
 slack:
   token: "xoxb-your-token"
+  signingSecret: "your-signing-secret"
   channel: "#ops-diagnostics"
+googleChat:
+  webhookUrl: "https://chat.googleapis.com/v1/spaces/..."
 ai:
   provider: "gemini"
   apiKey: "your-ai-api-key"
+mode: "click-to-fix"
 features:
   argocd:
     enabled: true
+  history:
+    crdEnabled: true
 EOF
 
 # 3. Deploy the chart
@@ -144,4 +157,9 @@ You should see:
 `{"level":"info","msg":"Informer cache synced successfully"}`
 `{"level":"info","msg":"Webhook listener active","port":8080}`
 
-When an alert fires, Fixora will post a Slack message with the **Evidence Chain** and a link to the remediation PR.
+When an alert fires, Fixora will post a message to **Slack** and/or **Google Chat** with the **Evidence Chain**. 
+
+Depending on your `mode`:
+- **`auto-fix`**: Fixora will automatically create a remediation Pull Request.
+- **`click-to-fix`**: Fixora will provide an "Approve" button in the chat to trigger PR creation.
+- **`dry-run`**: Fixora will only report the findings without taking action.
