@@ -40,6 +40,7 @@ type Config struct {
 
 	// Feature Toggles
 	PredictiveEnabled bool
+	HistoryCRDEnabled bool
 }
 
 func Load() *Config {
@@ -73,6 +74,7 @@ func Load() *Config {
 		ArgoCDToken:     os.Getenv("ARGOCD_TOKEN"),
 
 		PredictiveEnabled: getEnvBool("PREDICTIVE_ENABLED", true),
+		HistoryCRDEnabled: getEnvBool("HISTORY_CRD_ENABLED", false),
 	}
 }
 

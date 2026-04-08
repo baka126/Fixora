@@ -68,6 +68,8 @@ features:
     token: ""
   predictive:
     enabled: true
+  history:
+    crdEnabled: true
 
 vcs:
   github:

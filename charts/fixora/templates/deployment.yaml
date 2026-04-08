@@ -78,6 +78,8 @@ spec:
               value: {{ .Values.features.argocd.token | quote }}
             - name: PREDICTIVE_ENABLED
               value: {{ .Values.features.predictive.enabled | quote }}
+            - name: HISTORY_CRD_ENABLED
+              value: {{ .Values.features.history.crdEnabled | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       nodeSelector:

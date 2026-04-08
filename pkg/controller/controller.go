@@ -99,7 +99,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		ghProvider: ghProvider,
 		glProvider: glProvider,
 		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:    newHistoryCache(cfg.HistoryFilePath),
+		history:    newHistoryCache(cfg.HistoryFilePath, cfg.HistoryCRDEnabled, dynamicClient),
 	}
 }
 
@@ -240,7 +240,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	var historyStr string
 	historySummary := "This is the first time we've diagnosed this pod."
-	if prev, exists := c.history.Get(pod.Namespace, pod.Name); exists {
+	if prev, exists := c.history.Get(ctx, pod.Namespace, pod.Name); exists {
 		historySummary = fmt.Sprintf("Recurring Issue: This pod has crashed %d times previously.", len(prev.Incidents))
 		var sb strings.Builder
 		for _, inc := range prev.Incidents {
@@ -306,7 +306,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			evidence.RootCause = "Forensic analysis failed: " + err.Error()
 		} else {
 			evidence.RootCause = rootCause
-			c.history.Update(pod.Namespace, pod.Name, reason, rootCause)
+			c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause)
 		}
 	} else {
 		evidence.RootCause = "AI Provider not configured"
@@ -405,7 +405,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
-	c.history.UpdatePatch(pod.Namespace, pod.Name, string(newContent))
+	c.history.UpdatePatch(ctx, pod.Namespace, pod.Name, string(newContent))
 
 	branchName := fmt.Sprintf("fixora/patch-%s-%d", pod.Name, time.Now().Unix())
 	opts := vcs.PullRequestOptions{
