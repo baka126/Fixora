@@ -81,7 +81,7 @@ helm upgrade --install fixora ./charts/fixora \
   --create-namespace \
   -f fixora-values.yaml
 
-
+```
 ## 4. Connecting Alertmanager
 
 Fixora acts as an Alertmanager **receiver**. You must configure your Alertmanager to send firing alerts to Fixora's `/alerts` endpoint.
