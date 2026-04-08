@@ -135,9 +135,17 @@ func (c *Client) extractMatch(app map[string]interface{}, namespace, name, kind 
 	}
 
 	for _, res := range resources {
-		r := res.(map[string]interface{})
+		r, ok := res.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
 		if r["kind"] == kind && r["name"] == name && r["namespace"] == namespace {
-			source := spec["source"].(map[string]interface{})
+			source, ok := spec["source"].(map[string]interface{})
+			if !ok {
+				return nil
+			}
+
 			repoURL, _ := source["repoURL"].(string)
 			path, _ := source["path"].(string)
 			targetRevision, _ := source["targetRevision"].(string)

@@ -75,7 +75,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 
 	var aiProvider ai.Provider
 	if cfg.AIProvider != "" && cfg.AIAPIKey != "" {
-		aiProvider, _ = ai.NewProvider(cfg.AIProvider, cfg.AIAPIKey)
+		aiProvider, _ = ai.NewProvider(cfg.AIProvider, cfg.AIAPIKey, cfg.AIModel)
 	}
 
 	var ghProvider *vcs.GitHubProvider
@@ -121,7 +121,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 
 	// Start diagnostic workers
 	go wait.Until(c.runWorker, time.Second, stopCh)
-	
+
 	// Start predictive leak scanner if enabled
 	if c.config.PredictiveEnabled {
 		go wait.Until(c.scanForLeaks, 5*time.Minute, stopCh)
@@ -137,7 +137,10 @@ func (c *Controller) scanForLeaks() {
 	}
 
 	slog.Info("Scanning for memory leak trajectories")
-	pods, err := c.clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		slog.Error("Failed to list pods for leak scan", "error", err)
 		return
@@ -211,11 +214,14 @@ func (c *Controller) processNextItem() bool {
 }
 
 func (c *Controller) processDiagnostic(work podWorkItem) error {
-	pod, err := c.clientset.CoreV1().Pods(work.namespace).Get(context.TODO(), work.name, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pod, err := c.clientset.CoreV1().Pods(work.namespace).Get(ctx, work.name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	c.diagnosePod(pod, work.reason)
+	c.diagnosePod(ctx, pod, work.reason)
 	return nil
 }
 
@@ -229,7 +235,7 @@ func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
 }
 
 // diagnosePod performs the full forensic evidence gathering and AI correlation.
-func (c *Controller) diagnosePod(pod *v1.Pod, reason string) {
+func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string) {
 	slog.Info("Diagnosing Pod", "namespace", pod.Namespace, "name", pod.Name, "reason", reason)
 
 	historySummary := "This is the first time we've diagnosed this pod."
@@ -262,7 +268,7 @@ func (c *Controller) diagnosePod(pod *v1.Pod, reason string) {
 	}
 
 	// Gathers Kubernetes events
-	events, err := c.getPodEvents(pod)
+	events, err := c.getPodEvents(ctx, pod)
 	if err == nil {
 		evidence.EventTimeline = events
 	}
@@ -270,7 +276,7 @@ func (c *Controller) diagnosePod(pod *v1.Pod, reason string) {
 	// Execute Multi-Modal AI Forensics
 	var rootCause string
 	if c.aiProvider != nil {
-		logs, err := c.getPodLogs(pod)
+		logs, err := c.getPodLogs(ctx, pod)
 		if err != nil {
 			slog.Warn("Error fetching logs", "pod", pod.Name, "error", err)
 		}
@@ -284,7 +290,7 @@ func (c *Controller) diagnosePod(pod *v1.Pod, reason string) {
 			Metrics:   evidence.MetricProof,
 		}
 
-		rootCause, err = c.aiProvider.PerformForensics(context.TODO(), forensicCtx)
+		rootCause, err = c.aiProvider.PerformForensics(ctx, forensicCtx)
 		if err != nil {
 			slog.Error("AI Forensics failed", "pod", pod.Name, "error", err)
 			evidence.RootCause = "Forensic analysis failed: " + err.Error()
@@ -302,21 +308,21 @@ func (c *Controller) diagnosePod(pod *v1.Pod, reason string) {
 	notifications.SendEvidenceChain(c.config, evidence)
 
 	// Attempts automated remediation
-	c.handleRemediation(pod, evidence)
+	c.handleRemediation(ctx, pod, evidence)
 }
 
 // handleRemediation attempts to open a Pull Request with a fix by discovering the pod's source repository.
-func (c *Controller) handleRemediation(pod *v1.Pod, evidence notifications.EvidenceChain) {
+func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain) {
 	var repoURL, filePath, vcsType, targetRevision string
 
 	// Attempt discovery via ArgoCD API/CRD
 	if c.argoClient != nil {
 		for _, owner := range pod.OwnerReferences {
 			if owner.Kind == "ReplicaSet" {
-				rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
+				rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 				if err == nil {
 					for _, rsOwner := range rs.OwnerReferences {
-						info, err := c.argoClient.GetAppForResource(context.TODO(), pod.Namespace, rsOwner.Name, rsOwner.Kind)
+						info, err := c.argoClient.GetAppForResource(ctx, pod.Namespace, rsOwner.Name, rsOwner.Kind)
 						if err == nil {
 							slog.Info("Discovered Git info via ArgoCD", "app", rsOwner.Name, "repo", info.RepoURL)
 							repoURL = info.RepoURL
@@ -376,14 +382,14 @@ func (c *Controller) handleRemediation(pod *v1.Pod, evidence notifications.Evide
 	}
 
 	// Fetch current config content to provide context for the AI patch generator
-	currentContent, err := provider.GetFileContent(context.TODO(), repoOwner, repoName, filePath, baseBranch)
+	currentContent, err := provider.GetFileContent(ctx, repoOwner, repoName, filePath, baseBranch)
 	if err != nil {
 		slog.Error("Failed to fetch current content", "repo", repoName, "path", filePath, "error", err)
 		return
 	}
 
 	// Generate the specific patch content using AI
-	newContent, err := c.aiProvider.GeneratePatch(context.TODO(), currentContent, evidence.RootCause+"\n"+evidence.MetricProof)
+	newContent, err := c.aiProvider.GeneratePatch(ctx, currentContent, evidence.RootCause+"\n"+evidence.MetricProof)
 	if err != nil {
 		slog.Error("Failed to generate patch", "pod", pod.Name, "error", err)
 		return
@@ -403,7 +409,7 @@ func (c *Controller) handleRemediation(pod *v1.Pod, evidence notifications.Evide
 	}
 
 	// Execute the PR creation
-	prURL, err := provider.CreatePullRequest(context.TODO(), opts)
+	prURL, err := provider.CreatePullRequest(ctx, opts)
 	if err != nil {
 		slog.Error("Error creating PR", "pod", pod.Name, "error", err)
 	} else if prURL != "" {
@@ -412,10 +418,10 @@ func (c *Controller) handleRemediation(pod *v1.Pod, evidence notifications.Evide
 	}
 }
 
-func (c *Controller) getPodLogs(pod *v1.Pod) (string, error) {
+func (c *Controller) getPodLogs(ctx context.Context, pod *v1.Pod) (string, error) {
 	podLogOpts := v1.PodLogOptions{TailLines: Int64Ptr(50)}
 	req := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
-	podLogs, err := req.Stream(context.TODO())
+	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -429,8 +435,8 @@ func (c *Controller) getPodLogs(pod *v1.Pod) (string, error) {
 	return buf.String(), nil
 }
 
-func (c *Controller) getPodEvents(pod *v1.Pod) (string, error) {
-	events, err := c.clientset.CoreV1().Events(pod.Namespace).List(context.TODO(), metav1.ListOptions{
+func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, error) {
+	events, err := c.clientset.CoreV1().Events(pod.Namespace).List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.namespace=%s", pod.Name, pod.Namespace),
 	})
 	if err != nil {
@@ -438,7 +444,12 @@ func (c *Controller) getPodEvents(pod *v1.Pod) (string, error) {
 	}
 
 	var sb strings.Builder
-	for _, event := range events.Items {
+	limit := 50
+	start := 0
+	if len(events.Items) > limit {
+		start = len(events.Items) - limit
+	}
+	for _, event := range events.Items[start:] {
 		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, event.Message))
 	}
 	return sb.String(), nil
@@ -446,7 +457,10 @@ func (c *Controller) getPodEvents(pod *v1.Pod) (string, error) {
 
 // PerformRolloutRestart executes a manual rollout restart of a Deployment.
 func (c *Controller) PerformRolloutRestart(namespace, deploymentName string) {
-	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+
+	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
 	if err != nil {
 		slog.Error("Error getting Deployment", "namespace", namespace, "name", deploymentName, "error", err)
 		return
@@ -460,7 +474,7 @@ func (c *Controller) PerformRolloutRestart(namespace, deploymentName string) {
 	}
 	deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 
-	_, err = c.clientset.AppsV1().Deployments(deployment.Namespace).Update(context.TODO(), deployment, metav1.UpdateOptions{})
+	_, err = c.clientset.AppsV1().Deployments(deployment.Namespace).Update(ctx, deployment, metav1.UpdateOptions{})
 	if err != nil {
 		slog.Error("Error updating Deployment", "namespace", deployment.Namespace, "name", deployment.Name, "error", err)
 		return

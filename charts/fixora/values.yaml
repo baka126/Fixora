@@ -5,9 +5,9 @@
 replicaCount: 1
 
 image:
-  repository: fixora
+  repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: "main"
 
 imagePullSecrets: []
 nameOverride: ""

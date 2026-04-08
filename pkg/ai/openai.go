@@ -12,11 +12,14 @@ type OpenAIProvider struct {
 	model  string
 }
 
-func NewOpenAIProvider(apiKey string) (*OpenAIProvider, error) {
+func NewOpenAIProvider(apiKey, modelName string) (*OpenAIProvider, error) {
 	client := openai.NewClient(apiKey)
+	if modelName == "" {
+		modelName = openai.GPT4oMini
+	}
 	return &OpenAIProvider{
 		client: client,
-		model:  openai.GPT4oMini,
+		model:  modelName,
 	}, nil
 }
 
@@ -27,12 +30,8 @@ func (o *OpenAIProvider) AnalyzeLog(ctx context.Context, logs string) (string, e
 			Model: o.model,
 			Messages: []openai.ChatCompletionMessage{
 				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: "You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the log failure. No jargon, no extra text.",
-				},
-				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf("Analyze these logs:\n\n%s", logs),
+					Content: fmt.Sprintf(PromptAnalyzeLog, logs),
 				},
 			},
 		},
@@ -52,12 +51,8 @@ func (o *OpenAIProvider) AnalyzeEvents(ctx context.Context, events string) (stri
 			Model: o.model,
 			Messages: []openai.ChatCompletionMessage{
 				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: "You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the pod events. No jargon, no extra text.",
-				},
-				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf("Analyze these events:\n\n%s", events),
+					Content: fmt.Sprintf(PromptAnalyzeEvents, events),
 				},
 			},
 		},
@@ -78,7 +73,7 @@ func (o *OpenAIProvider) AnalyzeRootCause(ctx context.Context, evidence string) 
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf("Based on the following evidence chain, determine the root cause and suggest a fix:\n\n%s", evidence),
+					Content: fmt.Sprintf(PromptAnalyzeRootCause, evidence),
 				},
 			},
 		},
@@ -98,18 +93,9 @@ func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 			Model: o.model,
 			Messages: []openai.ChatCompletionMessage{
 				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: "You are a Kubernetes forensic expert. Analyze the relationship between metrics, events, and logs to find the root cause.",
-				},
-				{
 					Role: openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf(`Analyze failure for pod %s/%s. Reason: %s
-Metrics: %s
-Events: %s
-Logs: %s
-
-Provide a clear, 3-sentence summary: 1. Root Cause, 2. Proof, 3. Recommended fix.`, 
-						forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason, 
+					Content: fmt.Sprintf(PromptForensics,
+						forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
 						forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs),
 				},
 			},
@@ -130,18 +116,8 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byt
 			Model: o.model,
 			Messages: []openai.ChatCompletionMessage{
 				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: "You are a Kubernetes GitOps expert. Generate ONLY the complete new file content. No markdown.",
-				},
-				{
-					Role: openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf(`Given this current file and the evidence, generate a fixed version:
-
-[CURRENT CONTENT]
-%s
-
-[EVIDENCE]
-%s`, string(currentContent), evidence),
+					Role:    openai.ChatMessageRoleUser,
+					Content: fmt.Sprintf(PromptGeneratePatch, string(currentContent), evidence),
 				},
 			},
 		},
@@ -151,5 +127,5 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byt
 		return nil, err
 	}
 
-	return []byte(resp.Choices[0].Message.Content), nil
+	return CleanPatch(resp.Choices[0].Message.Content), nil
 }

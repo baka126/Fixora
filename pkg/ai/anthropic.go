@@ -9,25 +9,30 @@ import (
 
 type AnthropicProvider struct {
 	client *anthropic.Client
+	model  anthropic.Model
 }
 
-func NewAnthropicProvider(apiKey string) (*AnthropicProvider, error) {
+func NewAnthropicProvider(apiKey, modelName string) (*AnthropicProvider, error) {
 	client := anthropic.NewClient(apiKey)
+	if modelName == "" {
+		modelName = string(anthropic.ModelClaude3Dot5Sonnet20240620)
+	}
 	return &AnthropicProvider{
 		client: client,
+		model:  anthropic.Model(modelName),
 	}, nil
 }
 
 func (a *AnthropicProvider) AnalyzeLog(ctx context.Context, logs string) (string, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
-		Model: anthropic.ModelClaude3Dot5Sonnet20240620,
+		Model: a.model,
 		Messages: []anthropic.Message{
 			{
 				Role: anthropic.RoleUser,
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf("You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the log failure. No jargon, no extra text.\n\nLogs:\n%s", logs)),
+						Text: StringPtr(fmt.Sprintf(PromptAnalyzeLog, logs)),
 					},
 				},
 			},
@@ -48,14 +53,14 @@ func (a *AnthropicProvider) AnalyzeLog(ctx context.Context, logs string) (string
 
 func (a *AnthropicProvider) AnalyzeEvents(ctx context.Context, events string) (string, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
-		Model: anthropic.ModelClaude3Dot5Sonnet20240620,
+		Model: a.model,
 		Messages: []anthropic.Message{
 			{
 				Role: anthropic.RoleUser,
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf("You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the pod events. No jargon, no extra text.\n\nEvents:\n%s", events)),
+						Text: StringPtr(fmt.Sprintf(PromptAnalyzeEvents, events)),
 					},
 				},
 			},
@@ -76,14 +81,14 @@ func (a *AnthropicProvider) AnalyzeEvents(ctx context.Context, events string) (s
 
 func (a *AnthropicProvider) AnalyzeRootCause(ctx context.Context, evidence string) (string, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
-		Model: anthropic.ModelClaude3Dot5Sonnet20240620,
+		Model: a.model,
 		Messages: []anthropic.Message{
 			{
 				Role: anthropic.RoleUser,
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf("Based on the following evidence chain, determine the root cause and suggest a fix:\n\n%s", evidence)),
+						Text: StringPtr(fmt.Sprintf(PromptAnalyzeRootCause, evidence)),
 					},
 				},
 			},
@@ -104,20 +109,15 @@ func (a *AnthropicProvider) AnalyzeRootCause(ctx context.Context, evidence strin
 
 func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (string, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
-		Model: anthropic.ModelClaude3Dot5Sonnet20240620,
+		Model: a.model,
 		Messages: []anthropic.Message{
 			{
 				Role: anthropic.RoleUser,
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf(`You are a Kubernetes forensic expert. Analyze failure for pod %s/%s. Reason: %s
-Metrics: %s
-Events: %s
-Logs: %s
-
-Provide a clear, 3-sentence summary: 1. Root Cause, 2. Proof, 3. Recommended fix.`, 
-							forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason, 
+						Text: StringPtr(fmt.Sprintf(PromptForensics,
+							forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
 							forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs)),
 					},
 				},
@@ -139,20 +139,14 @@ Provide a clear, 3-sentence summary: 1. Root Cause, 2. Proof, 3. Recommended fix
 
 func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
-		Model: anthropic.ModelClaude3Dot5Sonnet20240620,
+		Model: a.model,
 		Messages: []anthropic.Message{
 			{
 				Role: anthropic.RoleUser,
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf(`You are a Kubernetes GitOps expert. Generate ONLY the complete new file content. No markdown.
-
-[CURRENT CONTENT]
-%s
-
-[EVIDENCE]
-%s`, string(currentContent), evidence)),
+						Text: StringPtr(fmt.Sprintf(PromptGeneratePatch, string(currentContent), evidence)),
 					},
 				},
 			},
@@ -168,7 +162,7 @@ func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []
 		return nil, fmt.Errorf("no patch generated")
 	}
 
-	return []byte(*resp.Content[0].Text), nil
+	return CleanPatch(*resp.Content[0].Text), nil
 }
 
 func StringPtr(s string) *string {
