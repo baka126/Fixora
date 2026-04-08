@@ -14,21 +14,22 @@ const (
 )
 
 type Config struct {
-	SlackToken         string
-	SlackSigningSecret string
-	SlackChannel       string
-	Mode               OperatingMode
-	PrometheusURL      string
-	AlertmanagerURL    string
-	AIProvider         string // "gemini", "openai", "anthropic"
-	AIModel            string
-	AIAPIKey           string
-	GitHubToken        string
-	GitLabToken        string
-	GitLabBaseURL      string
-	WebhookToken       string
-	WebhookUser        string
-	WebhookPassword    string
+	SlackToken           string
+	SlackSigningSecret   string
+	SlackChannel         string
+	GoogleChatWebhookURL string
+	Mode                 OperatingMode
+	PrometheusURL        string
+	AlertmanagerURL      string
+	AIProvider           string // "gemini", "openai", "anthropic"
+	AIModel              string
+	AIAPIKey             string
+	GitHubToken          string
+	GitLabToken          string
+	GitLabBaseURL        string
+	WebhookToken         string
+	WebhookUser          string
+	WebhookPassword      string
 
 	// ArgoCD Config
 	ArgoCDEnabled   bool
@@ -47,21 +48,22 @@ func Load() *Config {
 	}
 
 	return &Config{
-		SlackToken:         os.Getenv("SLACK_TOKEN"),
-		SlackSigningSecret: os.Getenv("SLACK_SIGNING_SECRET"),
-		SlackChannel:       os.Getenv("SLACK_CHANNEL"),
-		Mode:               mode,
-		PrometheusURL:      os.Getenv("PROMETHEUS_URL"),
-		AlertmanagerURL:    os.Getenv("ALERTMANAGER_URL"),
-		AIProvider:         os.Getenv("AI_PROVIDER"),
-		AIModel:            os.Getenv("AI_MODEL"),
-		AIAPIKey:           os.Getenv("AI_API_KEY"),
-		GitHubToken:        os.Getenv("GITHUB_TOKEN"),
-		GitLabToken:        os.Getenv("GITLAB_TOKEN"),
-		GitLabBaseURL:      os.Getenv("GITLAB_BASE_URL"),
-		WebhookToken:       os.Getenv("WEBHOOK_TOKEN"),
-		WebhookUser:        os.Getenv("WEBHOOK_USER"),
-		WebhookPassword:    os.Getenv("WEBHOOK_PASSWORD"),
+		SlackToken:           os.Getenv("SLACK_TOKEN"),
+		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
+		SlackChannel:         os.Getenv("SLACK_CHANNEL"),
+		GoogleChatWebhookURL: os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
+		Mode:                 mode,
+		PrometheusURL:        os.Getenv("PROMETHEUS_URL"),
+		AlertmanagerURL:      os.Getenv("ALERTMANAGER_URL"),
+		AIProvider:           os.Getenv("AI_PROVIDER"),
+		AIModel:              os.Getenv("AI_MODEL"),
+		AIAPIKey:             os.Getenv("AI_API_KEY"),
+		GitHubToken:          os.Getenv("GITHUB_TOKEN"),
+		GitLabToken:          os.Getenv("GITLAB_TOKEN"),
+		GitLabBaseURL:        os.Getenv("GITLAB_BASE_URL"),
+		WebhookToken:         os.Getenv("WEBHOOK_TOKEN"),
+		WebhookUser:          os.Getenv("WEBHOOK_USER"),
+		WebhookPassword:      os.Getenv("WEBHOOK_PASSWORD"),
 
 		ArgoCDEnabled:   getEnvBool("ARGOCD_ENABLED", false),
 		ArgoCDNamespace: getEnv("ARGOCD_NAMESPACE", "argocd"),
