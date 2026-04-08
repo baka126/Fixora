@@ -5,14 +5,14 @@ import (
 )
 
 type PullRequestOptions struct {
-	Title        string
-	Body         string
-	Head         string // Branch name
-	Base         string // usually "main" or "master"
-	RepoOwner    string
-	RepoName     string
-	FilePath     string
-	NewContent   []byte
+	Title         string
+	Body          string
+	Head          string // Branch name
+	Base          string // usually "main" or "master"
+	RepoOwner     string
+	RepoName      string
+	FilePath      string
+	NewContent    []byte
 	CommitMessage string
 }
 

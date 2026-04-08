@@ -7,7 +7,6 @@ fixora
 
 # Go
 bin/
-pkg/
 vendor/
 .gemini/
 GEMINI.md

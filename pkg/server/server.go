@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -114,6 +116,30 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInteractive(w http.ResponseWriter, r *http.Request) {
+	verifier, err := slack.NewSecretsVerifier(r.Header, s.config.SlackSigningSecret)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(body)) // Reset body for later parsing
+
+	if _, err := verifier.Write(body); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if err := verifier.Ensure(); err != nil {
+		slog.Warn("Blocked forged interactive webhook attempt")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	payloadStr := r.FormValue("payload")
 	if payloadStr == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -121,7 +147,7 @@ func (s *Server) handleInteractive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload slack.InteractionCallback
-	err := json.Unmarshal([]byte(payloadStr), &payload)
+	err = json.Unmarshal([]byte(payloadStr), &payload)
 	if err != nil {
 		slog.Error("Failed to unmarshal slack callback", "error", err)
 		w.WriteHeader(http.StatusBadRequest)

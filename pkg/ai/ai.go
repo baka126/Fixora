@@ -1,6 +1,17 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"strings"
+)
+
+const (
+	PromptAnalyzeLog       = "You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the log failure. No jargon, no extra text.\n\nLogs:\n%s"
+	PromptAnalyzeEvents    = "You are a Kubernetes forensic expert. Provide a strict 2-sentence TL;DR in plain English of the pod events. No jargon, no extra text.\n\nEvents:\n%s"
+	PromptAnalyzeRootCause = "Based on the following evidence chain, determine the root cause and suggest a fix:\n\n%s"
+	PromptForensics        = "You are a Kubernetes forensic expert. Analyze failure for pod %s/%s. Reason: %s\nMetrics: %s\nEvents: %s\nLogs: %s\n\nProvide a clear, 3-sentence summary: 1. Root Cause, 2. Proof, 3. Recommended fix."
+	PromptGeneratePatch    = "You are a Kubernetes GitOps expert. Generate ONLY the complete new file content. No markdown.\n\n[CURRENT CONTENT]\n%s\n\n[EVIDENCE]\n%s"
+)
 
 type ForensicContext struct {
 	Namespace string
@@ -19,15 +30,28 @@ type Provider interface {
 	GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error)
 }
 
-func NewProvider(providerName, apiKey string) (Provider, error) {
+func NewProvider(providerName, apiKey, modelName string) (Provider, error) {
 	switch providerName {
 	case "gemini":
-		return NewGeminiProvider(apiKey)
+		return NewGeminiProvider(apiKey, modelName)
 	case "openai":
-		return NewOpenAIProvider(apiKey)
+		return NewOpenAIProvider(apiKey, modelName)
 	case "anthropic":
-		return NewAnthropicProvider(apiKey)
+		return NewAnthropicProvider(apiKey, modelName)
 	default:
 		return nil, nil
 	}
+}
+
+// CleanPatch removes markdown code blocks and other common LLM-injected formatting
+// from the generated patch to ensure it is valid YAML/JSON.
+func CleanPatch(raw string) []byte {
+	clean := strings.TrimSpace(raw)
+	// Remove common markdown tags
+	prefixes := []string{"```yaml", "```json", "```"}
+	for _, p := range prefixes {
+		clean = strings.TrimPrefix(clean, p)
+	}
+	clean = strings.TrimSuffix(clean, "```")
+	return []byte(strings.TrimSpace(clean))
 }
