@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"fixora/pkg/ai"
@@ -36,18 +37,28 @@ type podWorkItem struct {
 
 // Controller is the core engine of Fixora. It watches for pod failures,
 // gathers forensic evidence from metrics/logs, and triggers AI analysis.
+
+type PendingFix struct {
+	Options      vcs.PullRequestOptions
+	VCSType      string
+	PodNamespace string
+	PodName      string
+}
+
 type Controller struct {
-	clientset  kubernetes.Interface
-	factory    informers.SharedInformerFactory
-	config     *config.Config
-	promClient *prometheus.Client
-	amClient   *alertmanager.Client
-	argoClient *argocd.Client
-	aiProvider ai.Provider
-	ghProvider *vcs.GitHubProvider
-	glProvider *vcs.GitLabProvider
-	queue      workqueue.RateLimitingInterface
-	history    *historyCache
+	clientset    kubernetes.Interface
+	factory      informers.SharedInformerFactory
+	config       *config.Config
+	promClient   *prometheus.Client
+	amClient     *alertmanager.Client
+	argoClient   *argocd.Client
+	aiProvider   ai.Provider
+	ghProvider   *vcs.GitHubProvider
+	glProvider   *vcs.GitLabProvider
+	queue        workqueue.RateLimitingInterface
+	history      *historyCache
+	pendingFixes map[string]PendingFix
+	pendingMu    sync.Mutex
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
@@ -89,17 +100,18 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	}
 
 	return &Controller{
-		clientset:  clientset,
-		factory:    factory,
-		config:     cfg,
-		promClient: promClient,
-		amClient:   amClient,
-		argoClient: argoClient,
-		aiProvider: aiProvider,
-		ghProvider: ghProvider,
-		glProvider: glProvider,
-		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:    newHistoryCache(cfg.HistoryFilePath),
+		clientset:    clientset,
+		factory:      factory,
+		config:       cfg,
+		promClient:   promClient,
+		amClient:     amClient,
+		argoClient:   argoClient,
+		aiProvider:   aiProvider,
+		ghProvider:   ghProvider,
+		glProvider:   glProvider,
+		queue:        workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
+		history:      newHistoryCache(cfg.HistoryCRDEnabled, dynamicClient),
+		pendingFixes: make(map[string]PendingFix),
 	}
 }
 
@@ -240,7 +252,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	var historyStr string
 	historySummary := "This is the first time we've diagnosed this pod."
-	if prev, exists := c.history.Get(pod.Namespace, pod.Name); exists {
+	if prev, exists := c.history.Get(ctx, pod.Namespace, pod.Name); exists {
 		historySummary = fmt.Sprintf("Recurring Issue: This pod has crashed %d times previously.", len(prev.Incidents))
 		var sb strings.Builder
 		for _, inc := range prev.Incidents {
@@ -306,7 +318,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			evidence.RootCause = "Forensic analysis failed: " + err.Error()
 		} else {
 			evidence.RootCause = rootCause
-			c.history.Update(pod.Namespace, pod.Name, reason, rootCause)
+			c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause)
 		}
 	} else {
 		evidence.RootCause = "AI Provider not configured"
@@ -405,7 +417,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
-	c.history.UpdatePatch(pod.Namespace, pod.Name, string(newContent))
+	c.history.UpdatePatch(ctx, pod.Namespace, pod.Name, string(newContent))
 
 	branchName := fmt.Sprintf("fixora/patch-%s-%d", pod.Name, time.Now().Unix())
 	opts := vcs.PullRequestOptions{
@@ -427,6 +439,44 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	} else if prURL != "" {
 		slog.Info("Created PR", "url", prURL)
 		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", pod.Namespace, pod.Name, prURL))
+	}
+}
+
+func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
+	c.pendingMu.Lock()
+	fix, ok := c.pendingFixes[callbackID]
+	if ok {
+		delete(c.pendingFixes, callbackID)
+	}
+	c.pendingMu.Unlock()
+
+	if !ok {
+		slog.Warn("No pending fix found for callback", "id", callbackID)
+		notifications.SendNotification(c.config, "⚠️ Could not find a pending fix for this approval. It may have expired or already been processed.")
+		return
+	}
+
+	var provider vcs.Provider
+	if fix.VCSType == "github" {
+		provider = c.ghProvider
+	} else if fix.VCSType == "gitlab" {
+		provider = c.glProvider
+	}
+
+	if provider == nil {
+		slog.Error("No VCS provider configured to submit pending fix")
+		notifications.SendNotification(c.config, "❌ Remediation failed: No VCS provider configured.")
+		return
+	}
+
+	slog.Info("Executing pending PR creation", "namespace", fix.PodNamespace, "name", fix.PodName)
+	prURL, err := provider.CreatePullRequest(ctx, fix.Options)
+	if err != nil {
+		slog.Error("Error creating pending PR", "pod", fix.PodName, "error", err)
+		notifications.SendNotification(c.config, fmt.Sprintf("❌ Remediation PR creation failed for %s/%s: %v", fix.PodNamespace, fix.PodName, err))
+	} else if prURL != "" {
+		slog.Info("Created PR from pending fix", "url", prURL)
+		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", fix.PodNamespace, fix.PodName, prURL))
 	}
 }
 

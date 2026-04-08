@@ -15,9 +15,12 @@ The full documentation is available at [https://baka126.github.io/Fixora](https:
 
 ## Features
 
-- **Zero-Trust Security**: No inbound access required (Pull-Not-Push).
+- **Zero-Trust Security**: No inbound access required. Requests are cryptographically verified.
 - **Evidence Chain**: Metric Proof + Cluster Context + Historical Pattern = Root Cause.
-- **AI-Powered**: Multi-LLM support (Gemini, OpenAI, Anthropic).
+- **AI-Powered Forensics**: Multi-LLM support (Gemini, OpenAI, Anthropic) with custom model selection.
+- **Stateful Predictive Analysis**: Persists incident history in Kubernetes CRDs to identify recurring patterns.
+- **Operating Modes**: Choose between `auto-fix`, `click-to-fix` (manual approval), and `dry-run`.
+- **Multi-Platform Notifications**: Native support for **Slack** and **Google Workspace (Chat)**.
 - **GitOps Ready**: Automated PR/MR generation via GitHub/GitLab.
 - **ArgoCD Integrated**: Automatic repository discovery.
 

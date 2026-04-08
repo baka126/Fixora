@@ -30,7 +30,6 @@ type Config struct {
 	WebhookToken         string
 	WebhookUser          string
 	WebhookPassword      string
-	HistoryFilePath      string
 
 	// ArgoCD Config
 	ArgoCDEnabled   bool
@@ -40,6 +39,7 @@ type Config struct {
 
 	// Feature Toggles
 	PredictiveEnabled bool
+	HistoryCRDEnabled bool
 }
 
 func Load() *Config {
@@ -65,7 +65,6 @@ func Load() *Config {
 		WebhookToken:         os.Getenv("WEBHOOK_TOKEN"),
 		WebhookUser:          os.Getenv("WEBHOOK_USER"),
 		WebhookPassword:      os.Getenv("WEBHOOK_PASSWORD"),
-		HistoryFilePath:      getEnv("HISTORY_FILE_PATH", "/tmp/fixora_history.json"),
 
 		ArgoCDEnabled:   getEnvBool("ARGOCD_ENABLED", false),
 		ArgoCDNamespace: getEnv("ARGOCD_NAMESPACE", "argocd"),
@@ -73,6 +72,7 @@ func Load() *Config {
 		ArgoCDToken:     os.Getenv("ARGOCD_TOKEN"),
 
 		PredictiveEnabled: getEnvBool("PREDICTIVE_ENABLED", true),
+		HistoryCRDEnabled: getEnvBool("HISTORY_CRD_ENABLED", false),
 	}
 }
 

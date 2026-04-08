@@ -52,7 +52,7 @@ ai:
   model: ""
   apiKey: ""
 
-mode: "auto-fix"
+mode: "auto-fix" # Options: "auto-fix" (auto-PR), "click-to-fix" (manual approval via Slack/Chat), "dry-run" (report only)
 
 webhook:
   token: ""
@@ -68,6 +68,8 @@ features:
     token: ""
   predictive:
     enabled: true
+  history:
+    crdEnabled: true
 
 vcs:
   github:
