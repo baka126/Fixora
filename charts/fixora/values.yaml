@@ -35,7 +35,11 @@ affinity: {}
 
 slack:
   token: ""
+  signingSecret: ""
   channel: ""
+
+googleChat:
+  webhookUrl: ""
 
 prometheus:
   url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
@@ -45,6 +49,7 @@ alertmanager:
 
 ai:
   provider: "gemini" # "gemini", "openai", "anthropic"
+  model: ""
   apiKey: ""
 
 mode: "auto-fix"

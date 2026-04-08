@@ -1,5 +1,5 @@
 # Binaries
-fixora
+/fixora
 *.exe
 *.dll
 *.so
