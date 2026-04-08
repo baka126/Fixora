@@ -99,7 +99,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		ghProvider: ghProvider,
 		glProvider: glProvider,
 		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:    newHistoryCache(cfg.HistoryFilePath, cfg.HistoryCRDEnabled, dynamicClient),
+		history:    newHistoryCache(cfg.HistoryCRDEnabled, dynamicClient),
 	}
 }
 

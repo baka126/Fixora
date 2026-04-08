@@ -30,7 +30,6 @@ type Config struct {
 	WebhookToken         string
 	WebhookUser          string
 	WebhookPassword      string
-	HistoryFilePath      string
 
 	// ArgoCD Config
 	ArgoCDEnabled   bool
@@ -66,7 +65,6 @@ func Load() *Config {
 		WebhookToken:         os.Getenv("WEBHOOK_TOKEN"),
 		WebhookUser:          os.Getenv("WEBHOOK_USER"),
 		WebhookPassword:      os.Getenv("WEBHOOK_PASSWORD"),
-		HistoryFilePath:      getEnv("HISTORY_FILE_PATH", "/tmp/fixora_history.json"),
 
 		ArgoCDEnabled:   getEnvBool("ARGOCD_ENABLED", false),
 		ArgoCDNamespace: getEnv("ARGOCD_NAMESPACE", "argocd"),

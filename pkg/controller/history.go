@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"os"
-	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,9 +24,6 @@ type PodHistory struct {
 }
 
 type historyCache struct {
-	history    map[string]*PodHistory // key: namespace/podname
-	mu         sync.RWMutex
-	filePath   string
 	crdEnabled bool
 	dynClient  dynamic.Interface
 }
@@ -39,64 +34,30 @@ var incidentHistoryGVR = schema.GroupVersionResource{
 	Resource: "incidenthistories",
 }
 
-func newHistoryCache(filePath string, crdEnabled bool, dynClient dynamic.Interface) *historyCache {
-	h := &historyCache{
-		history:    make(map[string]*PodHistory),
-		filePath:   filePath,
+func newHistoryCache(crdEnabled bool, dynClient dynamic.Interface) *historyCache {
+	return &historyCache{
 		crdEnabled: crdEnabled,
 		dynClient:  dynClient,
 	}
-	h.load()
-	return h
 }
 
-func (h *historyCache) load() {
-	if h.filePath == "" {
-		return
-	}
-	data, err := os.ReadFile(h.filePath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("Failed to read history file", "error", err)
-		}
-		return
-	}
-	if err := json.Unmarshal(data, &h.history); err != nil {
-		slog.Warn("Failed to unmarshal history file", "error", err)
-	}
-}
-
-func (h *historyCache) saveLocal() {
-	if h.filePath == "" {
-		return
-	}
-	data, err := json.MarshalIndent(h.history, "", "  ")
-	if err != nil {
-		slog.Warn("Failed to marshal history data", "error", err)
-		return
-	}
-	if err := os.WriteFile(h.filePath, data, 0644); err != nil {
-		slog.Warn("Failed to write history file", "error", err)
-	}
-}
-
-func (h *historyCache) getFromCRD(ctx context.Context, namespace, podName string) (*PodHistory, bool) {
+func (h *historyCache) getFromCRD(ctx context.Context, namespace, podName string) (*PodHistory, *unstructured.Unstructured, bool) {
 	if h.dynClient == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	unstruct, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 
 	spec, found, err := unstructured.NestedMap(unstruct.Object, "spec")
 	if !found || err != nil {
-		return nil, false
+		return nil, unstruct, false
 	}
 
 	incidentsRaw, found, err := unstructured.NestedSlice(spec, "incidents")
 	if !found || err != nil {
-		return nil, false
+		return nil, unstruct, false
 	}
 
 	var incidents []Incident
@@ -105,13 +66,13 @@ func (h *historyCache) getFromCRD(ctx context.Context, namespace, podName string
 	json.Unmarshal(bytes, &incidents)
 
 	if len(incidents) > 0 {
-		return &PodHistory{Incidents: incidents}, true
+		return &PodHistory{Incidents: incidents}, unstruct, true
 	}
 
-	return nil, false
+	return nil, unstruct, false
 }
 
-func (h *historyCache) saveToCRD(ctx context.Context, namespace, podName string, ph *PodHistory) {
+func (h *historyCache) saveToCRD(ctx context.Context, namespace, podName string, ph *PodHistory, existing *unstructured.Unstructured) {
 	if h.dynClient == nil {
 		return
 	}
@@ -120,8 +81,7 @@ func (h *historyCache) saveToCRD(ctx context.Context, namespace, podName string,
 	var incidentsRaw []interface{}
 	json.Unmarshal(bytes, &incidentsRaw)
 
-	unstruct, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
+	if existing == nil {
 		// Create new
 		newCRD := &unstructured.Unstructured{
 			Object: map[string]interface{}{
@@ -136,14 +96,14 @@ func (h *historyCache) saveToCRD(ctx context.Context, namespace, podName string,
 				},
 			},
 		}
-		_, err = h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Create(ctx, newCRD, metav1.CreateOptions{})
+		_, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Create(ctx, newCRD, metav1.CreateOptions{})
 		if err != nil {
 			slog.Error("Failed to create IncidentHistory CRD", "namespace", namespace, "name", podName, "error", err)
 		}
 	} else {
 		// Update existing
-		unstructured.SetNestedSlice(unstruct.Object, incidentsRaw, "spec", "incidents")
-		_, err = h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Update(ctx, unstruct, metav1.UpdateOptions{})
+		unstructured.SetNestedSlice(existing.Object, incidentsRaw, "spec", "incidents")
+		_, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{})
 		if err != nil {
 			slog.Error("Failed to update IncidentHistory CRD", "namespace", namespace, "name", podName, "error", err)
 		}
@@ -151,24 +111,17 @@ func (h *historyCache) saveToCRD(ctx context.Context, namespace, podName string,
 }
 
 func (h *historyCache) Get(ctx context.Context, namespace, podName string) (*PodHistory, bool) {
-	if h.crdEnabled {
-		if ph, ok := h.getFromCRD(ctx, namespace, podName); ok {
-			return ph, true
-		}
+	if !h.crdEnabled {
+		return nil, false
 	}
-
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	prev, exists := h.history[namespace+"/"+podName]
-	if exists && len(prev.Incidents) > 0 {
-		return prev, true
-	}
-	return nil, false
+	ph, _, ok := h.getFromCRD(ctx, namespace, podName)
+	return ph, ok
 }
 
 func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, rootCause string) {
-	h.mu.Lock()
-	key := namespace + "/" + podName
+	if !h.crdEnabled {
+		return
+	}
 
 	inc := Incident{
 		Timestamp: time.Now(),
@@ -176,47 +129,26 @@ func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, r
 		RootCause: rootCause,
 	}
 
-	var ph *PodHistory
-	if prev, exists := h.history[key]; exists {
-		prev.Incidents = append(prev.Incidents, inc)
-		ph = prev
+	ph, unstruct, ok := h.getFromCRD(ctx, namespace, podName)
+	if ok && ph != nil {
+		ph.Incidents = append(ph.Incidents, inc)
 	} else {
 		ph = &PodHistory{
 			Incidents: []Incident{inc},
 		}
-		h.history[key] = ph
 	}
-	h.mu.Unlock()
 
-	if h.crdEnabled {
-		h.saveToCRD(ctx, namespace, podName, ph)
-	} else {
-		h.mu.Lock()
-		h.saveLocal()
-		h.mu.Unlock()
-	}
+	h.saveToCRD(ctx, namespace, podName, ph, unstruct)
 }
 
 func (h *historyCache) UpdatePatch(ctx context.Context, namespace, podName, patch string) {
-	h.mu.Lock()
-	key := namespace + "/" + podName
-	var ph *PodHistory
-
-	if prev, exists := h.history[key]; exists {
-		if len(prev.Incidents) > 0 {
-			prev.Incidents[len(prev.Incidents)-1].AppliedFix = patch
-			ph = prev
-		}
+	if !h.crdEnabled {
+		return
 	}
-	h.mu.Unlock()
 
-	if ph != nil {
-		if h.crdEnabled {
-			h.saveToCRD(ctx, namespace, podName, ph)
-		} else {
-			h.mu.Lock()
-			h.saveLocal()
-			h.mu.Unlock()
-		}
+	ph, unstruct, ok := h.getFromCRD(ctx, namespace, podName)
+	if ok && ph != nil && len(ph.Incidents) > 0 {
+		ph.Incidents[len(ph.Incidents)-1].AppliedFix = patch
+		h.saveToCRD(ctx, namespace, podName, ph, unstruct)
 	}
 }
