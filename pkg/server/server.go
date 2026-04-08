@@ -164,7 +164,15 @@ func (s *Server) handleInteractive(w http.ResponseWriter, r *http.Request) {
 
 	action := payload.ActionCallback.BlockActions[0]
 	if action.ActionID != "approve" {
-		slog.Info("Rollout restart denied by user", "callback_id", payload.CallbackID)
+		slog.Info("Action denied by user", "callback_id", payload.CallbackID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if strings.HasPrefix(payload.CallbackID, "patch-") {
+		slog.Info("Patch generation approved", "callback_id", payload.CallbackID)
+		s.controller.SubmitPendingFix(r.Context(), payload.CallbackID)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
