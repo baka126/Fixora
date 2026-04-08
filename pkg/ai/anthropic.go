@@ -118,7 +118,7 @@ func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx Fo
 						Type: anthropic.MessagesContentTypeText,
 						Text: StringPtr(fmt.Sprintf(PromptForensics,
 							forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
-							forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs)),
+							forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)),
 					},
 				},
 			},
