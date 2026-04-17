@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v6 # v4 is the current stable long-term version
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
