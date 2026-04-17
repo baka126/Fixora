@@ -45,6 +45,7 @@ prometheus:
   url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
 
 alertmanager:
+  enabled: true
   url: "http://alertmanager-operated.monitoring.svc.cluster.local:9093"
 
 ai:
@@ -68,8 +69,12 @@ features:
     token: ""
   predictive:
     enabled: true
-  history:
-    crdEnabled: true
+  database:
+    host: ""
+    port: "5432"
+    user: ""
+    password: ""
+    name: "fixora"
 
 vcs:
   github:

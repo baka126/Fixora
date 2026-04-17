@@ -6,6 +6,7 @@ require (
 	github.com/chainguard-dev/git-urls v1.0.2
 	github.com/google/generative-ai-go v0.20.1
 	github.com/google/go-github/v50 v50.2.0
+	github.com/lib/pq v1.12.3
 	github.com/liushuangls/go-anthropic/v2 v2.17.3
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/common v0.66.1

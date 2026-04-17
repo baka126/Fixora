@@ -15,11 +15,6 @@ rules:
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
   verbs: ["get", "list", "watch", "update", "patch"]
-{{- if .Values.features.history.crdEnabled }}
-- apiGroups: ["fixora.io"]
-  resources: ["incidenthistories"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-{{- end }}
 {{- if .Values.features.argocd.enabled }}
 - apiGroups: ["argoproj.io"]
   resources: ["applications"]

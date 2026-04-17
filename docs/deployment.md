@@ -55,8 +55,9 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | `ai.provider` | `AI_PROVIDER` | `string` | Selected engine: `gemini`, `openai`, or `anthropic`. |
 | `ai.model` | `AI_MODEL` | `string` | (Optional) Specific model version (e.g., `gpt-4o-mini`). |
 | `webhook.token` | `WEBHOOK_TOKEN` | `secret` | (Optional) Bearer token for securing the Alertmanager endpoint. |
+| `alertmanager.enabled` | `ALERTMANAGER_ENABLED` | `boolean` | (Optional) Toggles whether to listen for Alertmanager webhooks or watch pods directly. |
 | `features.argocd.enabled` | `ARGOCD_ENABLED` | `boolean` | Toggles automatic repository discovery via ArgoCD API. |
-| `features.history.crdEnabled`| `HISTORY_CRD_ENABLED` | `boolean` | Persists incident history in Kubernetes CRDs for predictive analysis. |
+| `features.database.host`| `DB_HOST` | `string` | Postgres Database Host for persisting incident history. |
 
 ---
 

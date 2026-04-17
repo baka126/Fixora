@@ -2,14 +2,14 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
+	"fmt"
 	"log/slog"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
+	_ "github.com/lib/pq"
+
+	"fixora/pkg/config"
 )
 
 type Incident struct {
@@ -24,131 +24,135 @@ type PodHistory struct {
 }
 
 type historyCache struct {
-	crdEnabled bool
-	dynClient  dynamic.Interface
+	config *config.Config
+	db     *sql.DB
 }
 
-var incidentHistoryGVR = schema.GroupVersionResource{
-	Group:    "fixora.io",
-	Version:  "v1alpha1",
-	Resource: "incidenthistories",
-}
-
-func newHistoryCache(crdEnabled bool, dynClient dynamic.Interface) *historyCache {
-	return &historyCache{
-		crdEnabled: crdEnabled,
-		dynClient:  dynClient,
-	}
-}
-
-func (h *historyCache) getFromCRD(ctx context.Context, namespace, podName string) (*PodHistory, *unstructured.Unstructured, bool) {
-	if h.dynClient == nil {
-		return nil, nil, false
-	}
-	unstruct, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
-		return nil, nil, false
+func newHistoryCache(cfg *config.Config) *historyCache {
+	hc := &historyCache{
+		config: cfg,
 	}
 
-	spec, found, err := unstructured.NestedMap(unstruct.Object, "spec")
-	if !found || err != nil {
-		return nil, unstruct, false
-	}
-
-	incidentsRaw, found, err := unstructured.NestedSlice(spec, "incidents")
-	if !found || err != nil {
-		return nil, unstruct, false
-	}
-
-	var incidents []Incident
-	// Best effort mapping from unstructured slice to our struct
-	bytes, _ := json.Marshal(incidentsRaw)
-	json.Unmarshal(bytes, &incidents)
-
-	if len(incidents) > 0 {
-		return &PodHistory{Incidents: incidents}, unstruct, true
-	}
-
-	return nil, unstruct, false
-}
-
-func (h *historyCache) saveToCRD(ctx context.Context, namespace, podName string, ph *PodHistory, existing *unstructured.Unstructured) {
-	if h.dynClient == nil {
-		return
-	}
-	// Convert incidents to unstruct
-	bytes, _ := json.Marshal(ph.Incidents)
-	var incidentsRaw []interface{}
-	json.Unmarshal(bytes, &incidentsRaw)
-
-	if existing == nil {
-		// Create new
-		newCRD := &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"apiVersion": "fixora.io/v1alpha1",
-				"kind":       "IncidentHistory",
-				"metadata": map[string]interface{}{
-					"name":      podName,
-					"namespace": namespace,
-				},
-				"spec": map[string]interface{}{
-					"incidents": incidentsRaw,
-				},
-			},
-		}
-		_, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Create(ctx, newCRD, metav1.CreateOptions{})
+	if cfg.DBHost != "" {
+		connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName)
+		db, err := sql.Open("postgres", connStr)
 		if err != nil {
-			slog.Error("Failed to create IncidentHistory CRD", "namespace", namespace, "name", podName, "error", err)
+			slog.Error("Failed to open DB connection", "error", err)
+		} else {
+			if err := db.Ping(); err != nil {
+				slog.Error("Failed to ping DB", "error", err)
+			} else {
+				hc.db = db
+				hc.initDB()
+			}
 		}
 	} else {
-		// Update existing
-		unstructured.SetNestedSlice(existing.Object, incidentsRaw, "spec", "incidents")
-		_, err := h.dynClient.Resource(incidentHistoryGVR).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{})
-		if err != nil {
-			slog.Error("Failed to update IncidentHistory CRD", "namespace", namespace, "name", podName, "error", err)
+		slog.Warn("DBHost is empty, history cache will be disabled")
+	}
+
+	return hc
+}
+
+func (h *historyCache) initDB() {
+	query := `
+	CREATE TABLE IF NOT EXISTS incident_history (
+		id SERIAL PRIMARY KEY,
+		namespace VARCHAR(255) NOT NULL,
+		pod_name VARCHAR(255) NOT NULL,
+		timestamp TIMESTAMP NOT NULL,
+		reason TEXT NOT NULL,
+		root_cause TEXT NOT NULL,
+		applied_fix TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_incident_pod ON incident_history (namespace, pod_name);
+	`
+	_, err := h.db.Exec(query)
+	if err != nil {
+		slog.Error("Failed to initialize database schema", "error", err)
+	}
+}
+
+func (h *historyCache) getFromDB(ctx context.Context, namespace, podName string) (*PodHistory, bool) {
+	if h.db == nil {
+		return nil, false
+	}
+
+	query := `SELECT timestamp, reason, root_cause, COALESCE(applied_fix, '') FROM incident_history WHERE namespace = $1 AND pod_name = $2 ORDER BY timestamp ASC`
+	rows, err := h.db.QueryContext(ctx, query, namespace, podName)
+	if err != nil {
+		slog.Error("Failed to query DB for incidents", "error", err)
+		return nil, false
+	}
+	defer rows.Close()
+
+	var incidents []Incident
+	for rows.Next() {
+		var inc Incident
+		if err := rows.Scan(&inc.Timestamp, &inc.Reason, &inc.RootCause, &inc.AppliedFix); err == nil {
+			incidents = append(incidents, inc)
 		}
+	}
+
+	if len(incidents) > 0 {
+		return &PodHistory{Incidents: incidents}, true
+	}
+	return nil, false
+}
+
+func (h *historyCache) saveToDB(ctx context.Context, namespace, podName string, inc Incident) {
+	if h.db == nil {
+		return
+	}
+
+	query := `INSERT INTO incident_history (namespace, pod_name, timestamp, reason, root_cause, applied_fix) VALUES ($1, $2, $3, $4, $5, $6)`
+	_, err := h.db.ExecContext(ctx, query, namespace, podName, inc.Timestamp, inc.Reason, inc.RootCause, inc.AppliedFix)
+	if err != nil {
+		slog.Error("Failed to insert incident to DB", "error", err)
+	}
+}
+
+func (h *historyCache) updatePatchDB(ctx context.Context, namespace, podName, patch string) {
+	if h.db == nil {
+		return
+	}
+
+	query := `
+		UPDATE incident_history 
+		SET applied_fix = $1 
+		WHERE id = (
+			SELECT id FROM incident_history 
+			WHERE namespace = $2 AND pod_name = $3 
+			ORDER BY timestamp DESC LIMIT 1
+		)
+	`
+	_, err := h.db.ExecContext(ctx, query, patch, namespace, podName)
+	if err != nil {
+		slog.Error("Failed to update patch in DB", "error", err)
 	}
 }
 
 func (h *historyCache) Get(ctx context.Context, namespace, podName string) (*PodHistory, bool) {
-	if !h.crdEnabled {
-		return nil, false
+	if h.db != nil {
+		return h.getFromDB(ctx, namespace, podName)
 	}
-	ph, _, ok := h.getFromCRD(ctx, namespace, podName)
-	return ph, ok
+	return nil, false
 }
 
 func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, rootCause string) {
-	if !h.crdEnabled {
-		return
-	}
-
 	inc := Incident{
 		Timestamp: time.Now(),
 		Reason:    reason,
 		RootCause: rootCause,
 	}
 
-	ph, unstruct, ok := h.getFromCRD(ctx, namespace, podName)
-	if ok && ph != nil {
-		ph.Incidents = append(ph.Incidents, inc)
-	} else {
-		ph = &PodHistory{
-			Incidents: []Incident{inc},
-		}
+	if h.db != nil {
+		h.saveToDB(ctx, namespace, podName, inc)
 	}
-
-	h.saveToCRD(ctx, namespace, podName, ph, unstruct)
 }
 
 func (h *historyCache) UpdatePatch(ctx context.Context, namespace, podName, patch string) {
-	if !h.crdEnabled {
-		return
-	}
-
-	ph, unstruct, ok := h.getFromCRD(ctx, namespace, podName)
-	if ok && ph != nil && len(ph.Incidents) > 0 {
-		ph.Incidents[len(ph.Incidents)-1].AppliedFix = patch
-		h.saveToCRD(ctx, namespace, podName, ph, unstruct)
+	if h.db != nil {
+		h.updatePatchDB(ctx, namespace, podName, patch)
 	}
 }

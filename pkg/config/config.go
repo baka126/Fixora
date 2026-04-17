@@ -21,6 +21,7 @@ type Config struct {
 	Mode                 OperatingMode
 	PrometheusURL        string
 	AlertmanagerURL      string
+	AlertmanagerEnabled  bool
 	AIProvider           string // "gemini", "openai", "anthropic"
 	AIModel              string
 	AIAPIKey             string
@@ -37,9 +38,15 @@ type Config struct {
 	ArgoCDURL       string
 	ArgoCDToken     string
 
+	// Database Config
+	DBHost     string
+	DBPort     string
+	DBUser     string
+	DBPassword string
+	DBName     string
+
 	// Feature Toggles
 	PredictiveEnabled bool
-	HistoryCRDEnabled bool
 }
 
 func Load() *Config {
@@ -56,6 +63,7 @@ func Load() *Config {
 		Mode:                 mode,
 		PrometheusURL:        os.Getenv("PROMETHEUS_URL"),
 		AlertmanagerURL:      os.Getenv("ALERTMANAGER_URL"),
+		AlertmanagerEnabled:  getEnvBool("ALERTMANAGER_ENABLED", true),
 		AIProvider:           os.Getenv("AI_PROVIDER"),
 		AIModel:              os.Getenv("AI_MODEL"),
 		AIAPIKey:             os.Getenv("AI_API_KEY"),
@@ -71,8 +79,13 @@ func Load() *Config {
 		ArgoCDURL:       getEnv("ARGOCD_URL", ""),
 		ArgoCDToken:     os.Getenv("ARGOCD_TOKEN"),
 
+		DBHost:     os.Getenv("DB_HOST"),
+		DBPort:     getEnv("DB_PORT", "5432"),
+		DBUser:     os.Getenv("DB_USER"),
+		DBPassword: os.Getenv("DB_PASSWORD"),
+		DBName:     getEnv("DB_NAME", "fixora"),
+
 		PredictiveEnabled: getEnvBool("PREDICTIVE_ENABLED", true),
-		HistoryCRDEnabled: getEnvBool("HISTORY_CRD_ENABLED", false),
 	}
 }
 

@@ -110,7 +110,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		ghProvider:   ghProvider,
 		glProvider:   glProvider,
 		queue:        workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:      newHistoryCache(cfg.HistoryCRDEnabled, dynamicClient),
+		history:      newHistoryCache(cfg),
 		pendingFixes: make(map[string]PendingFix),
 	}
 }
@@ -120,11 +120,13 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer c.queue.ShutDown()
 
 	podInformer := c.factory.Core().V1().Pods().Informer()
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			c.enqueuePod(newObj)
-		},
-	})
+	if !c.config.AlertmanagerEnabled {
+		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				c.enqueuePod(newObj)
+			},
+		})
+	}
 
 	c.factory.Start(stopCh)
 	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {

@@ -46,6 +46,8 @@ spec:
               value: {{ .Values.googleChat.webhookUrl | quote }}
             - name: PROMETHEUS_URL
               value: {{ .Values.prometheus.url | quote }}
+            - name: ALERTMANAGER_ENABLED
+              value: {{ .Values.alertmanager.enabled | quote }}
             - name: ALERTMANAGER_URL
               value: {{ .Values.alertmanager.url | quote }}
             - name: AI_PROVIDER
@@ -78,8 +80,16 @@ spec:
               value: {{ .Values.features.argocd.token | quote }}
             - name: PREDICTIVE_ENABLED
               value: {{ .Values.features.predictive.enabled | quote }}
-            - name: HISTORY_CRD_ENABLED
-              value: {{ .Values.features.history.crdEnabled | quote }}
+            - name: DB_HOST
+              value: {{ .Values.features.database.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.features.database.port | quote }}
+            - name: DB_USER
+              value: {{ .Values.features.database.user | quote }}
+            - name: DB_PASSWORD
+              value: {{ .Values.features.database.password | quote }}
+            - name: DB_NAME
+              value: {{ .Values.features.database.name | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       nodeSelector:
