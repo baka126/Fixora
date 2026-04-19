@@ -98,5 +98,43 @@ func (f *FallbackProvider) GetHistory(ns, pod string, d time.Duration) (model.Ma
 	return f.Secondary.GetHistory(ns, pod, d)
 }
 
+// GetPodMemoryRSS attempts to get RSS memory from Primary, falling back to Secondary.
+func (f *FallbackProvider) GetPodMemoryRSS(ns, pod string) (float64, error) {
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, fmt.Errorf("no metrics providers configured")
+	}
+
+	if f.Primary != nil {
+		val, err := f.Primary.GetPodMemoryRSS(ns, pod)
+		if err == nil {
+			return val, nil
+		}
+		if f.Secondary == nil {
+			return 0, err
+		}
+	}
+
+	return f.Secondary.GetPodMemoryRSS(ns, pod)
+}
+
+// GetPodMemoryCache attempts to get cache memory from Primary, falling back to Secondary.
+func (f *FallbackProvider) GetPodMemoryCache(ns, pod string) (float64, error) {
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, fmt.Errorf("no metrics providers configured")
+	}
+
+	if f.Primary != nil {
+		val, err := f.Primary.GetPodMemoryCache(ns, pod)
+		if err == nil {
+			return val, nil
+		}
+		if f.Secondary == nil {
+			return 0, err
+		}
+	}
+
+	return f.Secondary.GetPodMemoryCache(ns, pod)
+}
+
 // Ensure FallbackProvider implements MetricsProvider
 var _ MetricsProvider = (*FallbackProvider)(nil)

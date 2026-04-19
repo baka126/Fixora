@@ -49,7 +49,7 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | `slack.token` | `SLACK_TOKEN` | `string` | Slack Bot User OAuth Token (`xoxb-`). |
 | `slack.signingSecret` | `SLACK_SIGNING_SECRET` | `secret` | Slack App Signing Secret for request verification. |
 | `slack.channel` | `SLACK_CHANNEL` | `string` | Target Slack channel ID or name (e.g., `#ops-diagnostics`). |
-| `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL. |
+| `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL (required for basic notifications). |
 | `mode` | `FIXORA_MODE` | `string` | Operating mode: `auto-fix`, `click-to-fix`, or `dry-run`. |
 | `ai.apiKey` | `AI_API_KEY` | `secret` | API Key for your designated LLM provider. |
 | `ai.provider` | `AI_PROVIDER` | `string` | Selected engine: `gemini`, `openai`, or `anthropic`. |
@@ -58,7 +58,7 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | `alertmanager.enabled` | `ALERTMANAGER_ENABLED` | `boolean` | (Optional) Toggles whether to listen for Alertmanager webhooks or watch pods directly. |
 | `features.argocd.enabled` | `ARGOCD_ENABLED` | `boolean` | Toggles automatic repository discovery via ArgoCD API. |
 | `features.database.host`| `DB_HOST` | `string` | Postgres Database Host for persisting incident history. |
-| `features.finops.infracostKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
+| `finops.infracostAPIKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
 
 ---
 
@@ -197,3 +197,19 @@ Fixora is designed with privacy in mind. Before sending any logs to AI providers
 * IPv4 addresses
 * Authentication tokens (Bearer, JWT, etc.)
 * Common password/secret patterns
+
+---
+
+## 8. Google Chat App Interactivity (Optional)
+
+To enable interactive features in Google Chat (like the **"Approve"** button or the **"View Logs"** explorer), you must configure Fixora as a **Google Chat App** instead of using a simple incoming webhook.
+
+1.  **Create a Google Cloud Project** and enable the **Google Chat API**.
+2.  **Configure the App:**
+    *   **App Name:** Fixora
+    *   **Interactive features:** Enabled
+    *   **Functionality:** Receive 1-to-1 messages, Join spaces.
+    *   **Connection settings:** Use **App URL**.
+    *   **App URL:** `https://your-fixora-ingress.com/googlechat/interactive`
+3.  **Permissions:** The App does not require specific OAuth scopes for basic interactivity, but ensure it is allowed to respond in the spaces it is added to.
+4.  **Usage:** In `click-to-fix` mode, Fixora will send cards with buttons. Clicking these buttons will send an event to the App URL, which Fixora will process to execute the remediation.

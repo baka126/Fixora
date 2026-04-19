@@ -33,6 +33,12 @@ func (m *mockMetricsProvider) GetPodCPULimits(ns, pod string) (float64, float64,
 func (m *mockMetricsProvider) GetHistory(ns, pod string, d time.Duration) (model.Matrix, error) {
 	return m.historical, nil
 }
+func (m *mockMetricsProvider) GetPodMemoryRSS(ns, pod string) (float64, error) {
+	return m.usage * 0.9, nil
+}
+func (m *mockMetricsProvider) GetPodMemoryCache(ns, pod string) (float64, error) {
+	return m.usage * 0.1, nil
+}
 
 // Ensure mockMetricsProvider implements metrics.MetricsProvider
 var _ metrics.MetricsProvider = (*mockMetricsProvider)(nil)

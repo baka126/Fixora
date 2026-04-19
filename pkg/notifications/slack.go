@@ -53,6 +53,14 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		finOpsSection,
 	)
 
+	// Add Interactive Log Explorer Button
+	if evidence.Namespace != "" && evidence.PodName != "" {
+		logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
+		logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
+		actionBlock := slack.NewActionBlock("", logBtn)
+		blocks = append(blocks, actionBlock)
+	}
+
 	attachment := slack.Attachment{
 		Color:  color,
 		Blocks: slack.Blocks{BlockSet: blocks},
@@ -117,6 +125,48 @@ func sendSlack(cfg *config.Config, msgOptions ...slack.MsgOption) error {
 	_, _, err := api.PostMessage(cfg.SlackChannel, msgOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to send slack message: %w", err)
+	}
+	return nil
+}
+
+// SendLogModal opens a Slack modal containing the scrubbed logs.
+func SendLogModal(cfg *config.Config, triggerID, namespace, podName, logs string) error {
+	api := slack.New(cfg.SlackToken)
+
+	titleText := slack.NewTextBlockObject("plain_text", "Log Explorer", false, false)
+	closeText := slack.NewTextBlockObject("plain_text", "Close", false, false)
+
+	headerText := slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("📄 *Scrubbed Logs for %s/%s*", namespace, podName), false, false)
+	headerSection := slack.NewSectionBlock(headerText, nil, nil)
+
+	logContent := "No logs found or empty."
+	if logs != "" {
+		logContent = fmt.Sprintf("```\n%s\n```", logs)
+	}
+
+	// Split logs if too long (Slack limit is 3000 chars per block)
+	var logBlocks []slack.Block
+	logBlocks = append(logBlocks, headerSection)
+
+	if len(logContent) > 2900 {
+		// Just take the tail if too large for simple modal
+		logContent = "```\n... [truncated] ...\n" + logs[len(logs)-2800:] + "\n```"
+	}
+
+	logText := slack.NewTextBlockObject("mrkdwn", logContent, false, false)
+	logSection := slack.NewSectionBlock(logText, nil, nil)
+	logBlocks = append(logBlocks, logSection)
+
+	modalRequest := slack.ModalViewRequest{
+		Type:   slack.VTModal,
+		Title:  titleText,
+		Close:  closeText,
+		Blocks: slack.Blocks{BlockSet: logBlocks},
+	}
+
+	_, err := api.OpenView(triggerID, modalRequest)
+	if err != nil {
+		return fmt.Errorf("failed to open slack modal: %w", err)
 	}
 	return nil
 }

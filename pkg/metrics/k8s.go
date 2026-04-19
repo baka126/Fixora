@@ -82,5 +82,15 @@ func (p *K8sMetricsProvider) GetHistory(ns, pod string, d time.Duration) (model.
 	return nil, fmt.Errorf("historical metrics are not supported by the K8s Metrics API (use Prometheus for history)")
 }
 
+// GetPodMemoryRSS is not supported by the K8s Metrics API.
+func (p *K8sMetricsProvider) GetPodMemoryRSS(ns, pod string) (float64, error) {
+	return 0, fmt.Errorf("RSS metrics are not supported by the K8s Metrics API (use Prometheus)")
+}
+
+// GetPodMemoryCache is not supported by the K8s Metrics API.
+func (p *K8sMetricsProvider) GetPodMemoryCache(ns, pod string) (float64, error) {
+	return 0, fmt.Errorf("cache metrics are not supported by the K8s Metrics API (use Prometheus)")
+}
+
 // Ensure K8sMetricsProvider implements MetricsProvider
 var _ MetricsProvider = (*K8sMetricsProvider)(nil)

@@ -31,7 +31,10 @@ func NewAWSPricingClient() *AWSPricingClient {
 }
 
 // GetProfileForInstance fetches live pricing for a specific instance type and region.
-func (c *AWSPricingClient) GetProfileForInstance(instanceType, region string) (*PricingProfile, error) {
+func (c *AWSPricingClient) GetProfileForInstance(vendor, region, instanceType string) (*PricingProfile, error) {
+	if vendor != "aws" {
+		return nil, fmt.Errorf("AWSPricingClient only handles 'aws' vendor, got: %s", vendor)
+	}
 	cacheKey := fmt.Sprintf("%s:%s", instanceType, region)
 
 	c.mu.RLock()

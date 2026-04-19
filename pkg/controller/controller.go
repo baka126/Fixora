@@ -51,19 +51,20 @@ type PendingFix struct {
 }
 
 type Controller struct {
-	clientset    kubernetes.Interface
-	factory      informers.SharedInformerFactory
-	config       *config.Config
-	promClient   metrics.MetricsProvider
-	amClient     *alertmanager.Client
-	argoClient   *argocd.Client
-	aiProvider   ai.Provider
-	ghProvider   *vcs.GitHubProvider
-	glProvider   *vcs.GitLabProvider
-	queue        workqueue.RateLimitingInterface
-	history      *historyCache
-	pendingFixes map[string]PendingFix
-	pendingMu    sync.Mutex
+	clientset       kubernetes.Interface
+	factory         informers.SharedInformerFactory
+	config          *config.Config
+	promClient      metrics.MetricsProvider
+	pricingProvider finops.PricingProvider
+	amClient        *alertmanager.Client
+	argoClient      *argocd.Client
+	aiProvider      ai.Provider
+	ghProvider      *vcs.GitHubProvider
+	glProvider      *vcs.GitLabProvider
+	queue           workqueue.RateLimitingInterface
+	history         *historyCache
+	pendingFixes    map[string]PendingFix
+	pendingMu       sync.Mutex
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
@@ -92,6 +93,17 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	} else if secondary != nil {
 		promClient = secondary
 	}
+
+	// Initialize Pricing Provider
+	var providers []finops.PricingProvider
+	if cfg.InfracostAPIKey != "" {
+		providers = append(providers, finops.NewInfracostClient(cfg.InfracostAPIKey))
+	}
+	// Fallback to direct cloud APIs
+	providers = append(providers, finops.DefaultAWSClient)
+	providers = append(providers, finops.DefaultAzureClient)
+	providers = append(providers, finops.DefaultGCPClient)
+	pricingProvider := finops.NewMultiPricingProvider(providers...)
 
 	var amClient *alertmanager.Client
 	if cfg.AlertmanagerURL != "" {
@@ -123,18 +135,19 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	}
 
 	return &Controller{
-		clientset:    clientset,
-		factory:      factory,
-		config:       cfg,
-		promClient:   promClient,
-		amClient:     amClient,
-		argoClient:   argoClient,
-		aiProvider:   aiProvider,
-		ghProvider:   ghProvider,
-		glProvider:   glProvider,
-		queue:        workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:      newHistoryCache(cfg),
-		pendingFixes: make(map[string]PendingFix),
+		clientset:       clientset,
+		factory:         factory,
+		config:          cfg,
+		promClient:      promClient,
+		pricingProvider: pricingProvider,
+		amClient:        amClient,
+		argoClient:      argoClient,
+		aiProvider:      aiProvider,
+		ghProvider:      ghProvider,
+		glProvider:      glProvider,
+		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
+		history:         newHistoryCache(cfg),
+		pendingFixes:    make(map[string]PendingFix),
 	}
 }
 
@@ -272,6 +285,8 @@ func (c *Controller) scanForLeaks() {
 			clusterCtx := fmt.Sprintf("Namespace: %s, Pod: %s, Status: Predictive Warning (Potential OOM Trajectory)", pod.Namespace, pod.Name)
 
 			evidence := notifications.EvidenceChain{
+				Namespace:           pod.Namespace,
+				PodName:             pod.Name,
 				MetricProof:         metricProof.String(),
 				ClusterContext:      clusterCtx,
 				HistoricalPattern:   historySummary,
@@ -406,6 +421,8 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	}
 
 	evidence := notifications.EvidenceChain{
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
 		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s", pod.Namespace, pod.Name, reason),
 		HistoricalPattern: historySummary,
 	}
@@ -448,7 +465,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	// Execute Multi-Modal AI Forensics
 	var rootCause string
 	if c.aiProvider != nil {
-		logs, err := c.getPodLogs(ctx, pod)
+		logs, err := c.getPodLogs(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			slog.Warn("Error fetching logs", "pod", pod.Name, "error", err)
 		}
@@ -497,32 +514,11 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 // getGranularMetrics attempts to fetch RSS and Cache metrics from the provider.
 func (c *Controller) getGranularMetrics(ns, pod string) (rss, cache float64) {
-	type granular interface {
-		GetPodMemoryRSS(ns, pod string) (float64, error)
-		GetPodMemoryCache(ns, pod string) (float64, error)
-	}
-
-	// Direct check
-	if g, ok := c.promClient.(granular); ok {
-		rss, _ = g.GetPodMemoryRSS(ns, pod)
-		cache, _ = g.GetPodMemoryCache(ns, pod)
+	if c.promClient == nil {
 		return
 	}
-
-	// FallbackProvider check
-	if fb, ok := c.promClient.(*metrics.FallbackProvider); ok {
-		if g, ok := fb.Primary.(granular); ok {
-			rss, _ = g.GetPodMemoryRSS(ns, pod)
-			cache, _ = g.GetPodMemoryCache(ns, pod)
-			if rss > 0 || cache > 0 {
-				return
-			}
-		}
-		if g, ok := fb.Secondary.(granular); ok {
-			rss, _ = g.GetPodMemoryRSS(ns, pod)
-			cache, _ = g.GetPodMemoryCache(ns, pod)
-		}
-	}
+	rss, _ = c.promClient.GetPodMemoryRSS(ns, pod)
+	cache, _ = c.promClient.GetPodMemoryCache(ns, pod)
 	return
 }
 
@@ -540,35 +536,8 @@ func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.
 					region = "us-east-1"
 				}
 
-				vendor := "aws"
-				isAzure := strings.HasPrefix(instanceType, "Standard_") || strings.HasPrefix(instanceType, "Basic_") || !strings.Contains(region, "-")
-				// Simple heuristic for GCP: regions like us-central1, nodes with machine type like n1-standard-1
-				isGCP := strings.Contains(instanceType, "-") && (strings.HasPrefix(instanceType, "n1-") || strings.HasPrefix(instanceType, "e2-") || strings.HasPrefix(instanceType, "c2-"))
-
-				if isAzure {
-					vendor = "azure"
-				} else if isGCP {
-					vendor = "gcp"
-				}
-
-				var liveProfile *finops.PricingProfile
-				var err error
-
-				// Prioritize Infracost if API key is provided
-				if c.config.InfracostAPIKey != "" {
-					infracost := finops.NewInfracostClient(c.config.InfracostAPIKey)
-					liveProfile, err = infracost.GetProfileForInstance(vendor, region, instanceType)
-				}
-
-				// Fallback to individual providers if Infracost fails or is not configured
-				if err != nil || liveProfile == nil {
-					if vendor == "azure" {
-						liveProfile, err = finops.DefaultAzureClient.GetProfileForInstance(instanceType, region)
-					} else if vendor == "aws" {
-						liveProfile, err = finops.DefaultAWSClient.GetProfileForInstance(instanceType, region)
-					}
-				}
-
+				vendor := finops.DetectVendor(instanceType, region)
+				liveProfile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType)
 				if err == nil && liveProfile != nil {
 					profile = *liveProfile
 				}
@@ -764,9 +733,14 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	}
 }
 
-func (c *Controller) getPodLogs(ctx context.Context, pod *v1.Pod) (string, error) {
+// GetPodLogs fetches and scrubs logs for a specific pod. Public for use by server (Slack modal).
+func (c *Controller) GetPodLogs(ctx context.Context, namespace, podName string) (string, error) {
+	return c.getPodLogs(ctx, namespace, podName)
+}
+
+func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) (string, error) {
 	podLogOpts := v1.PodLogOptions{TailLines: Int64Ptr(100)} // Fetch more to allow filtering
-	req := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
+	req := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, &podLogOpts)
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return "", err

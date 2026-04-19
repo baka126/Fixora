@@ -95,6 +95,28 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
 	)
 
+	// Add Interactive Log Explorer Button
+	if evidence.Namespace != "" && evidence.PodName != "" {
+		mainWidgets = append(mainWidgets, GoogleChatWidget{
+			ButtonList: &GoogleChatButtonList{
+				Buttons: []GoogleChatButton{
+					{
+						Text: "🔍 View Logs",
+						OnClick: GoogleChatOnClick{
+							Action: &GoogleChatAction{
+								Function: "view_logs",
+								Parameters: []GoogleChatActionParam{
+									{Key: "namespace", Value: evidence.Namespace},
+									{Key: "podName", Value: evidence.PodName},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
 	payload := GoogleChatPayload{
 		CardsV2: []GoogleChatCardV2{
 			{

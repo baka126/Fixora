@@ -32,9 +32,10 @@ func NewAzurePricingClient() *AzurePricingClient {
 }
 
 // GetProfileForInstance fetches live pricing for an Azure VM SKU.
-// Since the Azure Retail API doesn't return vCPU/RAM specs directly in a structured way,
-// we use a heuristic based on the SKU name or return a profile that represents the VM cost.
-func (c *AzurePricingClient) GetProfileForInstance(sku, region string) (*PricingProfile, error) {
+func (c *AzurePricingClient) GetProfileForInstance(vendor, region, sku string) (*PricingProfile, error) {
+	if vendor != "azure" {
+		return nil, fmt.Errorf("AzurePricingClient only handles 'azure' vendor, got: %s", vendor)
+	}
 	cacheKey := fmt.Sprintf("%s:%s", sku, region)
 
 	c.mu.RLock()
