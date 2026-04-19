@@ -38,16 +38,12 @@ To ensure Fixora works across all K8s platforms, it supports multiple alert iden
 * **Automated Discovery:** Dynamically discover the source repository for a failing pod by inspecting ArgoCD Application CRDs or fallback to specific Kubernetes annotations/labels (e.g., `app.kubernetes.io/repository`).
 * **Multi-Secret Support:** Support application-specific or namespace-specific VCS secrets (GitHub/GitLab tokens) rather than relying on a single global token, allowing Fixora to operate securely in multi-tenant clusters.
 
-### 3.6. Interactive Debugging & Shadow Pods
-* **Streaming Terminal:** Web interface (Xterm.js/WebSockets) for developers to securely `kubectl exec` into an isolated "Shadow Pod" mockup environment to test fixes.
-* **Ephemeral Environments:** Strictly enforced 15-minute TTLs with a Confidence Score indicating environmental parity with production.
-
 ## 4. Technology Stack Expectations
 * **VCS Integration:** GitHub API and GitLab API with multi-secret support.
 * **AI / ML:** Multi-LLM routing logic.
 * **Integration:** Slack API (Bolt), Google Chat webhooks.
 * **Monitoring/K8s:** Kubernetes API, Metrics API, Prometheus, kube-state-metrics.
-* **Frontend/UI:** React (for the configuration dashboard and Shadow Pod terminal).
+* **Frontend/UI:** React (for the configuration dashboard).
 * **Backend:** Go (preferred for K8s operators/bots) with a dedicated Database (e.g., PostgreSQL) for history and state.
 
 ## 5. Development Instructions for AI CLI

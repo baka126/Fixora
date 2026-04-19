@@ -91,6 +91,27 @@ func sendSlackInteractiveNotification(cfg *config.Config, message, callbackID st
 	return sendSlack(cfg, slack.MsgOptionBlocks(msgSection, actionBlock))
 }
 
+func sendSlackRemediationApproval(cfg *config.Config, namespace, pod, patch, callbackID string) error {
+	if cfg.SlackToken == "" || cfg.SlackToken == "xoxb-your-token" {
+		return nil
+	}
+
+	headerText := slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("🛠️ *Remediation Approval Required* for %s/%s", namespace, pod), false, false)
+	headerSection := slack.NewSectionBlock(headerText, nil, nil)
+
+	patchText := slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("Proposed Fix:\n```yaml\n%s\n```", patch), false, false)
+	patchSection := slack.NewSectionBlock(patchText, nil, nil)
+
+	approveBtn := slack.NewButtonBlockElement("approve", "approve", slack.NewTextBlockObject("plain_text", "Approve & Open PR", false, false))
+	approveBtn.Style = slack.StylePrimary
+	denyBtn := slack.NewButtonBlockElement("deny", "deny", slack.NewTextBlockObject("plain_text", "Ignore", false, false))
+	denyBtn.Style = slack.StyleDanger
+
+	actionBlock := slack.NewActionBlock(callbackID, approveBtn, denyBtn)
+
+	return sendSlack(cfg, slack.MsgOptionBlocks(headerSection, patchSection, actionBlock))
+}
+
 func sendSlack(cfg *config.Config, msgOptions ...slack.MsgOption) error {
 	api := slack.New(cfg.SlackToken)
 	_, _, err := api.PostMessage(cfg.SlackChannel, msgOptions...)

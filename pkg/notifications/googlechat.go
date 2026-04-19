@@ -193,6 +193,63 @@ func sendGoogleChatInteractiveNotification(cfg *config.Config, message, callback
 	return sendGoogleChat(cfg, payload)
 }
 
+func sendGoogleChatRemediationApproval(cfg *config.Config, namespace, pod, patch, callbackID string) error {
+	if cfg.GoogleChatWebhookURL == "" {
+		return nil
+	}
+
+	payload := GoogleChatPayload{
+		CardsV2: []GoogleChatCardV2{
+			{
+				CardId: "remediation_approval",
+				Card: GoogleChatCard{
+					Header: GoogleChatHeader{
+						Title:    "🛠️ Remediation Approval Required",
+						Subtitle: fmt.Sprintf("%s/%s", namespace, pod),
+					},
+					Sections: []GoogleChatSection{
+						{
+							Widgets: []GoogleChatWidget{
+								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Proposed Fix:</b><br><pre>" + patch + "</pre>"}},
+								{
+									ButtonList: &GoogleChatButtonList{
+										Buttons: []GoogleChatButton{
+											{
+												Text: "Approve & Open PR",
+												OnClick: GoogleChatOnClick{
+													Action: &GoogleChatAction{
+														Function: "approve_remediation",
+														Parameters: []GoogleChatActionParam{
+															{Key: "callback_id", Value: callbackID},
+														},
+													},
+												},
+											},
+											{
+												Text: "Ignore",
+												OnClick: GoogleChatOnClick{
+													Action: &GoogleChatAction{
+														Function: "deny_remediation",
+														Parameters: []GoogleChatActionParam{
+															{Key: "callback_id", Value: callbackID},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return sendGoogleChat(cfg, payload)
+}
+
 func sendGoogleChat(cfg *config.Config, payload GoogleChatPayload) error {
 	body, err := json.Marshal(payload)
 	if err != nil {

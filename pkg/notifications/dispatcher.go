@@ -68,3 +68,20 @@ func SendInteractiveNotification(cfg *config.Config, message, callbackID string)
 	}
 	return nil
 }
+
+func SendRemediationApproval(cfg *config.Config, namespace, pod, patch, callbackID string) error {
+	var errs []string
+
+	if err := sendSlackRemediationApproval(cfg, namespace, pod, patch, callbackID); err != nil {
+		errs = append(errs, fmt.Sprintf("slack: %v", err))
+	}
+
+	if err := sendGoogleChatRemediationApproval(cfg, namespace, pod, patch, callbackID); err != nil {
+		errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to send remediation approval: %s", strings.Join(errs, ", "))
+	}
+	return nil
+}

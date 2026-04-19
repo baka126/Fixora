@@ -18,6 +18,7 @@ import (
 	"fixora/pkg/metrics"
 	"fixora/pkg/notifications"
 	"fixora/pkg/prometheus"
+	"fixora/pkg/security"
 	"fixora/pkg/vcs"
 	giturls "github.com/chainguard-dev/git-urls"
 	"k8s.io/api/core/v1"
@@ -632,14 +633,9 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		baseBranch = targetRevision
 	}
 
-	var provider vcs.Provider
-	if vcsType == "github" {
-		provider = c.ghProvider
-	} else if vcsType == "gitlab" {
-		provider = c.glProvider
-	}
-
-	if provider == nil || c.aiProvider == nil {
+	provider, token := c.getVCSProvider(ctx, pod.Namespace, vcsType)
+	if provider == nil {
+		slog.Warn("No VCS provider found for remediation", "type", vcsType, "pod", pod.Name)
 		return
 	}
 
@@ -682,6 +678,23 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		CommitMessage: "fix: automated resource adjustment by Fixora",
 	}
 
+	// Stash for interactive approval if in ClickToFix mode
+	if c.config.Mode == config.ClickToFix {
+		callbackID := fmt.Sprintf("fix-%d", time.Now().UnixNano())
+		c.pendingMu.Lock()
+		c.pendingFixes[callbackID] = PendingFix{
+			Options:      opts,
+			VCSType:      vcsType,
+			VCSToken:     token,
+			PodNamespace: pod.Namespace,
+			PodName:      pod.Name,
+		}
+		c.pendingMu.Unlock()
+
+		notifications.SendRemediationApproval(c.config, pod.Namespace, pod.Name, string(newContent), callbackID)
+		return
+	}
+
 	// Execute the PR creation
 	prURL, err = provider.CreatePullRequest(ctx, opts)
 	if err != nil {
@@ -707,10 +720,18 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	}
 
 	var provider vcs.Provider
-	if fix.VCSType == "github" {
-		provider = c.ghProvider
-	} else if fix.VCSType == "gitlab" {
-		provider = c.glProvider
+	if fix.VCSToken != "" {
+		if fix.VCSType == "github" {
+			provider = vcs.NewGitHubProvider(fix.VCSToken)
+		} else if fix.VCSType == "gitlab" {
+			provider, _ = vcs.NewGitLabProvider(fix.VCSToken, c.config.GitLabBaseURL)
+		}
+	} else {
+		if fix.VCSType == "github" {
+			provider = c.ghProvider
+		} else if fix.VCSType == "gitlab" {
+			provider = c.glProvider
+		}
 	}
 
 	if provider == nil {
@@ -731,7 +752,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 }
 
 func (c *Controller) getPodLogs(ctx context.Context, pod *v1.Pod) (string, error) {
-	podLogOpts := v1.PodLogOptions{TailLines: Int64Ptr(50)}
+	podLogOpts := v1.PodLogOptions{TailLines: Int64Ptr(100)} // Fetch more to allow filtering
 	req := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
@@ -744,7 +765,43 @@ func (c *Controller) getPodLogs(ctx context.Context, pod *v1.Pod) (string, error
 	if err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+
+	rawLogs := buf.String()
+	lines := strings.Split(rawLogs, "\n")
+	var relevantLines []string
+
+	// Relevance Heuristics: Keep lines with common error patterns
+	keywords := []string{"error", "panic", "fatal", "fail", "exception", "exit", "137", "killed", "oom"}
+	for _, line := range lines {
+		lowerLine := strings.ToLower(line)
+		isRelevant := false
+		for _, kw := range keywords {
+			if strings.Contains(lowerLine, kw) {
+				isRelevant = true
+				break
+			}
+		}
+
+		if isRelevant {
+			// Scrub PII before adding to relevant set
+			relevantLines = append(relevantLines, security.ScrubPII(line))
+		}
+	}
+
+	if len(relevantLines) == 0 {
+		// Fallback: If no keywords found, just return last 10 lines scrubbed
+		start := 0
+		if len(lines) > 10 {
+			start = len(lines) - 10
+		}
+		for i := start; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) != "" {
+				relevantLines = append(relevantLines, security.ScrubPII(lines[i]))
+			}
+		}
+	}
+
+	return strings.Join(relevantLines, "\n"), nil
 }
 
 func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, error) {
@@ -791,6 +848,35 @@ func (c *Controller) PerformRolloutRestart(namespace, deploymentName string) {
 		slog.Error("Error updating Deployment", "namespace", deployment.Namespace, "name", deployment.Name, "error", err)
 		return
 	}
+}
+
+// getVCSProvider returns a provider and the token used (if dynamic) for the given namespace and type.
+func (c *Controller) getVCSProvider(ctx context.Context, namespace, vcsType string) (vcs.Provider, string) {
+	// 1. Check for namespace-specific secret "fixora-vcs"
+	secret, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, "fixora-vcs", metav1.GetOptions{})
+	if err == nil {
+		if vcsType == "github" {
+			if token, ok := secret.Data["github-token"]; ok {
+				slog.Info("Using namespace-specific GitHub token", "namespace", namespace)
+				return vcs.NewGitHubProvider(string(token)), string(token)
+			}
+		} else if vcsType == "gitlab" {
+			if token, ok := secret.Data["gitlab-token"]; ok {
+				slog.Info("Using namespace-specific GitLab token", "namespace", namespace)
+				p, _ := vcs.NewGitLabProvider(string(token), c.config.GitLabBaseURL)
+				return p, string(token)
+			}
+		}
+	}
+
+	// 2. Fallback to global providers
+	if vcsType == "github" {
+		return c.ghProvider, ""
+	} else if vcsType == "gitlab" {
+		return c.glProvider, ""
+	}
+
+	return nil, ""
 }
 
 func Int64Ptr(i int64) *int64 { return &i }
