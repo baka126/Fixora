@@ -51,6 +51,8 @@ type Config struct {
 	PredictiveGrowthThreshold float64
 	PredictiveScanInterval    time.Duration
 	PredictiveMinDataPoints   int
+
+	InfracostAPIKey string
 }
 
 func Load() *Config {
@@ -93,6 +95,8 @@ func Load() *Config {
 		PredictiveGrowthThreshold: getEnvFloat("PREDICTIVE_GROWTH_THRESHOLD", 0.20),
 		PredictiveScanInterval:    getEnvDuration("PREDICTIVE_SCAN_INTERVAL", 5*time.Minute),
 		PredictiveMinDataPoints:   getEnvInt("PREDICTIVE_MIN_DATA_POINTS", 10),
+
+		InfracostAPIKey: os.Getenv("INFRACOST_API_KEY"),
 	}
 }
 

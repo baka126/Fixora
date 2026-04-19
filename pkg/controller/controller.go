@@ -534,20 +534,36 @@ func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.
 					region = "us-east-1"
 				}
 
-				// Heuristic: Azure SKU names usually start with "Standard_" or "Basic_"
-				// and Azure regions usually don't have hyphens between numbers (e.g. eastus, westus2).
+				vendor := "aws"
 				isAzure := strings.HasPrefix(instanceType, "Standard_") || strings.HasPrefix(instanceType, "Basic_") || !strings.Contains(region, "-")
+				// Simple heuristic for GCP: regions like us-central1, nodes with machine type like n1-standard-1
+				isGCP := strings.Contains(instanceType, "-") && (strings.HasPrefix(instanceType, "n1-") || strings.HasPrefix(instanceType, "e2-") || strings.HasPrefix(instanceType, "c2-"))
+
+				if isAzure {
+					vendor = "azure"
+				} else if isGCP {
+					vendor = "gcp"
+				}
 
 				var liveProfile *finops.PricingProfile
 				var err error
 
-				if isAzure {
-					liveProfile, err = finops.DefaultAzureClient.GetProfileForInstance(instanceType, region)
-				} else {
-					liveProfile, err = finops.DefaultAWSClient.GetProfileForInstance(instanceType, region)
+				// Prioritize Infracost if API key is provided
+				if c.config.InfracostAPIKey != "" {
+					infracost := finops.NewInfracostClient(c.config.InfracostAPIKey)
+					liveProfile, err = infracost.GetProfileForInstance(vendor, region, instanceType)
 				}
 
-				if err == nil {
+				// Fallback to individual providers if Infracost fails or is not configured
+				if err != nil || liveProfile == nil {
+					if vendor == "azure" {
+						liveProfile, err = finops.DefaultAzureClient.GetProfileForInstance(instanceType, region)
+					} else if vendor == "aws" {
+						liveProfile, err = finops.DefaultAWSClient.GetProfileForInstance(instanceType, region)
+					}
+				}
+
+				if err == nil && liveProfile != nil {
 					profile = *liveProfile
 				}
 			}
