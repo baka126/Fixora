@@ -533,7 +533,20 @@ func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.
 				if region == "" {
 					region = "us-east-1"
 				}
-				liveProfile, err := finops.DefaultAWSClient.GetProfileForInstance(instanceType, region)
+
+				// Heuristic: Azure SKU names usually start with "Standard_" or "Basic_"
+				// and Azure regions usually don't have hyphens between numbers (e.g. eastus, westus2).
+				isAzure := strings.HasPrefix(instanceType, "Standard_") || strings.HasPrefix(instanceType, "Basic_") || !strings.Contains(region, "-")
+
+				var liveProfile *finops.PricingProfile
+				var err error
+
+				if isAzure {
+					liveProfile, err = finops.DefaultAzureClient.GetProfileForInstance(instanceType, region)
+				} else {
+					liveProfile, err = finops.DefaultAWSClient.GetProfileForInstance(instanceType, region)
+				}
+
 				if err == nil {
 					profile = *liveProfile
 				}
