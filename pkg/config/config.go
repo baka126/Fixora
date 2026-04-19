@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,7 @@ type Config struct {
 	PredictiveMinDataPoints   int
 
 	InfracostAPIKey string
+	TrustedVCSDomains []string
 }
 
 func Load() *Config {
@@ -97,6 +99,7 @@ func Load() *Config {
 		PredictiveMinDataPoints:   getEnvInt("PREDICTIVE_MIN_DATA_POINTS", 10),
 
 		InfracostAPIKey: os.Getenv("INFRACOST_API_KEY"),
+		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),
 	}
 }
 
@@ -143,6 +146,13 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 		if err == nil {
 			return d
 		}
+	}
+	return fallback
+}
+
+func getEnvSlice(key string, fallback []string) []string {
+	if value, ok := os.LookupEnv(key); ok {
+		return strings.Split(value, ",")
 	}
 	return fallback
 }

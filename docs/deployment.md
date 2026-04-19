@@ -58,6 +58,7 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | `alertmanager.enabled` | `ALERTMANAGER_ENABLED` | `boolean` | (Optional) Toggles whether to listen for Alertmanager webhooks or watch pods directly. |
 | `features.argocd.enabled` | `ARGOCD_ENABLED` | `boolean` | Toggles automatic repository discovery via ArgoCD API. |
 | `features.database.host`| `DB_HOST` | `string` | Postgres Database Host for persisting incident history. |
+| `features.finops.infracostKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
 
 ---
 
@@ -164,3 +165,35 @@ Depending on your `mode`:
 - **`auto-fix`**: Fixora will automatically create a remediation Pull Request.
 - **`click-to-fix`**: Fixora will provide an "Approve" button in the chat to trigger PR creation.
 - **`dry-run`**: Fixora will only report the findings without taking action.
+
+---
+
+## 7. Advanced Configuration
+
+### A. Multi-Tenant VCS Support
+By default, Fixora uses the global `GITHUB_TOKEN` or `GITLAB_TOKEN`. For multi-tenant clusters, you can provide namespace-specific credentials by creating a Secret named `fixora-vcs` in the target namespace:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fixora-vcs
+  namespace: target-app-namespace
+type: Opaque
+data:
+  github-token: <base64-encoded-token>
+  # OR
+  gitlab-token: <base64-encoded-token>
+```
+
+### B. FinOps & Cost Estimation
+Fixora automatically calculates the monthly cost impact of suggested resource changes. 
+* **Standard Profiles:** Uses built-in pricing for AWS, Azure, and GCP.
+* **Infracost Integration:** For live, accurate pricing based on your specific cloud setup, provide an `INFRACOST_API_KEY`.
+
+### C. Security & PII Scrubbing
+Fixora is designed with privacy in mind. Before sending any logs to AI providers or notification channels, it automatically scrubs:
+* Email addresses
+* IPv4 addresses
+* Authentication tokens (Bearer, JWT, etc.)
+* Common password/secret patterns

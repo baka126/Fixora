@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/prometheus/common/model"
@@ -23,38 +24,78 @@ func NewFallbackProvider(primary, secondary MetricsProvider) *FallbackProvider {
 
 // GetPodUsage attempts to get usage from Primary, falling back to Secondary.
 func (f *FallbackProvider) GetPodUsage(ns, pod string) (float64, error) {
-	val, err := f.Primary.GetPodUsage(ns, pod)
-	if err != nil {
-		return f.Secondary.GetPodUsage(ns, pod)
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, fmt.Errorf("no metrics providers configured")
 	}
-	return val, nil
+
+	if f.Primary != nil {
+		val, err := f.Primary.GetPodUsage(ns, pod)
+		if err == nil {
+			return val, nil
+		}
+		if f.Secondary == nil {
+			return 0, err
+		}
+	}
+
+	return f.Secondary.GetPodUsage(ns, pod)
 }
 
 // GetPodLimits attempts to get limits from Primary, falling back to Secondary.
 func (f *FallbackProvider) GetPodLimits(ns, pod string) (float64, float64, error) {
-	req, lim, err := f.Primary.GetPodLimits(ns, pod)
-	if err != nil {
-		return f.Secondary.GetPodLimits(ns, pod)
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, 0, fmt.Errorf("no metrics providers configured")
 	}
-	return req, lim, nil
+
+	if f.Primary != nil {
+		req, lim, err := f.Primary.GetPodLimits(ns, pod)
+		if err == nil {
+			return req, lim, nil
+		}
+		if f.Secondary == nil {
+			return 0, 0, err
+		}
+	}
+
+	return f.Secondary.GetPodLimits(ns, pod)
 }
 
 // GetPodCPULimits attempts to get CPU limits from Primary, falling back to Secondary.
 func (f *FallbackProvider) GetPodCPULimits(ns, pod string) (float64, float64, error) {
-	req, lim, err := f.Primary.GetPodCPULimits(ns, pod)
-	if err != nil {
-		return f.Secondary.GetPodCPULimits(ns, pod)
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, 0, fmt.Errorf("no metrics providers configured")
 	}
-	return req, lim, nil
+
+	if f.Primary != nil {
+		req, lim, err := f.Primary.GetPodCPULimits(ns, pod)
+		if err == nil {
+			return req, lim, nil
+		}
+		if f.Secondary == nil {
+			return 0, 0, err
+		}
+	}
+
+	return f.Secondary.GetPodCPULimits(ns, pod)
 }
 
 // GetHistory attempts to get history from Primary, falling back to Secondary.
 func (f *FallbackProvider) GetHistory(ns, pod string, d time.Duration) (model.Matrix, error) {
-	matrix, err := f.Primary.GetHistory(ns, pod, d)
-	if err != nil {
-		return f.Secondary.GetHistory(ns, pod, d)
+	if f.Primary == nil && f.Secondary == nil {
+		return nil, fmt.Errorf("no metrics providers configured")
 	}
-	return matrix, nil
+
+	if f.Primary != nil {
+		matrix, err := f.Primary.GetHistory(ns, pod, d)
+		if err == nil {
+			return matrix, nil
+		}
+		if f.Secondary == nil {
+			return nil, err
+		}
+	}
+
+	return f.Secondary.GetHistory(ns, pod, d)
 }
 
 // Ensure FallbackProvider implements MetricsProvider

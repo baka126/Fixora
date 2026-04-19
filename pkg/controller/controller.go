@@ -115,7 +115,11 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 
 	var glProvider *vcs.GitLabProvider
 	if cfg.GitLabToken != "" {
-		glProvider, _ = vcs.NewGitLabProvider(cfg.GitLabToken, cfg.GitLabBaseURL)
+		var err error
+		glProvider, err = vcs.NewGitLabProvider(cfg.GitLabToken, cfg.GitLabBaseURL)
+		if err != nil {
+			slog.Error("Failed to create global GitLab provider", "error", err)
+		}
 	}
 
 	return &Controller{
@@ -620,6 +624,11 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
+	if !c.isVCSDomainTrusted(u.Host) {
+		slog.Warn("Refusing remediation for untrusted VCS domain", "host", u.Host, "pod", pod.Name)
+		return
+	}
+
 	pathParts := strings.Split(strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/"), "/")
 	if len(pathParts) < 2 {
 		slog.Warn("Invalid git path", "path", u.Path)
@@ -720,11 +729,15 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	}
 
 	var provider vcs.Provider
+	var err error
 	if fix.VCSToken != "" {
 		if fix.VCSType == "github" {
 			provider = vcs.NewGitHubProvider(fix.VCSToken)
 		} else if fix.VCSType == "gitlab" {
-			provider, _ = vcs.NewGitLabProvider(fix.VCSToken, c.config.GitLabBaseURL)
+			provider, err = vcs.NewGitLabProvider(fix.VCSToken, c.config.GitLabBaseURL)
+			if err != nil {
+				slog.Error("Failed to create GitLab provider for pending fix", "error", err)
+			}
 		}
 	} else {
 		if fix.VCSType == "github" {
@@ -819,7 +832,8 @@ func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, err
 		start = len(events.Items) - limit
 	}
 	for _, event := range events.Items[start:] {
-		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, event.Message))
+		scrubbedMessage := security.ScrubPII(event.Message)
+		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, scrubbedMessage))
 	}
 	return sb.String(), nil
 }
@@ -863,7 +877,11 @@ func (c *Controller) getVCSProvider(ctx context.Context, namespace, vcsType stri
 		} else if vcsType == "gitlab" {
 			if token, ok := secret.Data["gitlab-token"]; ok {
 				slog.Info("Using namespace-specific GitLab token", "namespace", namespace)
-				p, _ := vcs.NewGitLabProvider(string(token), c.config.GitLabBaseURL)
+				p, err := vcs.NewGitLabProvider(string(token), c.config.GitLabBaseURL)
+				if err != nil {
+					slog.Error("Failed to create namespace-specific GitLab provider", "namespace", namespace, "error", err)
+					return nil, ""
+				}
 				return p, string(token)
 			}
 		}
@@ -877,6 +895,15 @@ func (c *Controller) getVCSProvider(ctx context.Context, namespace, vcsType stri
 	}
 
 	return nil, ""
+}
+
+func (c *Controller) isVCSDomainTrusted(host string) bool {
+	for _, domain := range c.config.TrustedVCSDomains {
+		if host == domain {
+			return true
+		}
+	}
+	return false
 }
 
 func Int64Ptr(i int64) *int64 { return &i }

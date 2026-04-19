@@ -36,10 +36,20 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/fixora"]
           env:
+            {{- if .Values.slack.token }}
             - name: SLACK_TOKEN
-              value: {{ .Values.slack.token | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: slack-token
+            {{- end }}
+            {{- if .Values.slack.signingSecret }}
             - name: SLACK_SIGNING_SECRET
-              value: {{ .Values.slack.signingSecret | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: slack-signing-secret
+            {{- end }}
             - name: SLACK_CHANNEL
               value: {{ .Values.slack.channel | quote }}
             - name: GOOGLE_CHAT_WEBHOOK_URL
@@ -54,20 +64,47 @@ spec:
               value: {{ .Values.ai.provider | quote }}
             - name: AI_MODEL
               value: {{ .Values.ai.model | quote }}
+            {{- if .Values.ai.apiKey }}
             - name: AI_API_KEY
-              value: {{ .Values.ai.apiKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: ai-api-key
+            {{- end }}
+            {{- if .Values.finops.infracostAPIKey }}
+            - name: INFRACOST_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: infracost-api-key
+            {{- end }}
+            {{- if .Values.vcs.github.token }}
             - name: GITHUB_TOKEN
-              value: {{ .Values.vcs.github.token | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: github-token
+            {{- end }}
+            {{- if .Values.vcs.gitlab.token }}
             - name: GITLAB_TOKEN
-              value: {{ .Values.vcs.gitlab.token | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: gitlab-token
+            {{- end }}
             - name: GITLAB_BASE_URL
               value: {{ .Values.vcs.gitlab.baseUrl | quote }}
             - name: WEBHOOK_TOKEN
               value: {{ .Values.webhook.token | quote }}
             - name: WEBHOOK_USER
               value: {{ .Values.webhook.user | quote }}
+            {{- if .Values.webhook.password }}
             - name: WEBHOOK_PASSWORD
-              value: {{ .Values.webhook.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: webhook-password
+            {{- end }}
             - name: FIXORA_MODE
               value: {{ .Values.mode | quote }}
             - name: ARGOCD_ENABLED
@@ -76,8 +113,13 @@ spec:
               value: {{ .Values.features.argocd.namespace | quote }}
             - name: ARGOCD_URL
               value: {{ .Values.features.argocd.url | quote }}
+            {{- if .Values.features.argocd.token }}
             - name: ARGOCD_TOKEN
-              value: {{ .Values.features.argocd.token | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: argocd-token
+            {{- end }}
             - name: PREDICTIVE_ENABLED
               value: {{ .Values.features.predictive.enabled | quote }}
             - name: DB_HOST
@@ -86,8 +128,13 @@ spec:
               value: {{ .Values.features.database.port | quote }}
             - name: DB_USER
               value: {{ .Values.features.database.user | quote }}
+            {{- if .Values.features.database.password }}
             - name: DB_PASSWORD
-              value: {{ .Values.features.database.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: db-password
+            {{- end }}
             - name: DB_NAME
               value: {{ .Values.features.database.name | quote }}
           resources:

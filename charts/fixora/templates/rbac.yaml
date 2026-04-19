@@ -8,6 +8,7 @@ rules:
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["secrets"]
+  resourceNames: ["fixora-vcs"]
   verbs: ["get"]
 - apiGroups: [""]
   resources: ["pods/log"]

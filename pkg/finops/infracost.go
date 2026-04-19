@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 type InfracostGraphQLRequest struct {
@@ -109,11 +111,12 @@ func (c *InfracostClient) GetProfileForInstance(vendor, region, instanceType str
 		Variables: variables,
 	})
 
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 	req, _ := http.NewRequest("POST", "https://pricing.api.infracost.io/graphql", bytes.NewBuffer(reqBody))
 	req.Header.Set("X-Api-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +136,9 @@ func (c *InfracostClient) GetProfileForInstance(vendor, region, instanceType str
 	}
 
 	var hourlyPrice float64
-	fmt.Sscanf(infraResp.Data.Products[0].Prices[0].USD, "%f", &hourlyPrice)
+	if _, err := fmt.Sscanf(infraResp.Data.Products[0].Prices[0].USD, "%f", &hourlyPrice); err != nil {
+		slog.Error("Failed to parse hourly price from Infracost", "value", infraResp.Data.Products[0].Prices[0].USD, "error", err)
+	}
 
 	// Extract vCPU and Memory if available from attributes
 	vcpus := 2.0 // Default heuristic
@@ -145,6 +150,10 @@ func (c *InfracostClient) GetProfileForInstance(vendor, region, instanceType str
 		if attr.Key == "memoryGiB" {
 			fmt.Sscanf(attr.Value, "%f", &memoryGiB)
 		}
+	}
+
+	if hourlyPrice == 0 {
+		return nil, fmt.Errorf("invalid hourly price from Infracost: %s", infraResp.Data.Products[0].Prices[0].USD)
 	}
 
 	profile := &PricingProfile{
