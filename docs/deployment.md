@@ -49,14 +49,16 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | `slack.token` | `SLACK_TOKEN` | `string` | Slack Bot User OAuth Token (`xoxb-`). |
 | `slack.signingSecret` | `SLACK_SIGNING_SECRET` | `secret` | Slack App Signing Secret for request verification. |
 | `slack.channel` | `SLACK_CHANNEL` | `string` | Target Slack channel ID or name (e.g., `#ops-diagnostics`). |
-| `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL. |
+| `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL (required for basic notifications). |
 | `mode` | `FIXORA_MODE` | `string` | Operating mode: `auto-fix`, `click-to-fix`, or `dry-run`. |
 | `ai.apiKey` | `AI_API_KEY` | `secret` | API Key for your designated LLM provider. |
 | `ai.provider` | `AI_PROVIDER` | `string` | Selected engine: `gemini`, `openai`, or `anthropic`. |
 | `ai.model` | `AI_MODEL` | `string` | (Optional) Specific model version (e.g., `gpt-4o-mini`). |
 | `webhook.token` | `WEBHOOK_TOKEN` | `secret` | (Optional) Bearer token for securing the Alertmanager endpoint. |
+| `alertmanager.enabled` | `ALERTMANAGER_ENABLED` | `boolean` | (Optional) Toggles whether to listen for Alertmanager webhooks or watch pods directly. |
 | `features.argocd.enabled` | `ARGOCD_ENABLED` | `boolean` | Toggles automatic repository discovery via ArgoCD API. |
-| `features.history.crdEnabled`| `HISTORY_CRD_ENABLED` | `boolean` | Persists incident history in Kubernetes CRDs for predictive analysis. |
+| `features.database.host`| `DB_HOST` | `string` | Postgres Database Host for persisting incident history. |
+| `finops.infracostAPIKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
 
 ---
 
@@ -163,3 +165,51 @@ Depending on your `mode`:
 - **`auto-fix`**: Fixora will automatically create a remediation Pull Request.
 - **`click-to-fix`**: Fixora will provide an "Approve" button in the chat to trigger PR creation.
 - **`dry-run`**: Fixora will only report the findings without taking action.
+
+---
+
+## 7. Advanced Configuration
+
+### A. Multi-Tenant VCS Support
+By default, Fixora uses the global `GITHUB_TOKEN` or `GITLAB_TOKEN`. For multi-tenant clusters, you can provide namespace-specific credentials by creating a Secret named `fixora-vcs` in the target namespace:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fixora-vcs
+  namespace: target-app-namespace
+type: Opaque
+data:
+  github-token: <base64-encoded-token>
+  # OR
+  gitlab-token: <base64-encoded-token>
+```
+
+### B. FinOps & Cost Estimation
+Fixora automatically calculates the monthly cost impact of suggested resource changes. 
+* **Standard Profiles:** Uses built-in pricing for AWS, Azure, and GCP.
+* **Infracost Integration:** For live, accurate pricing based on your specific cloud setup, provide an `INFRACOST_API_KEY`.
+
+### C. Security & PII Scrubbing
+Fixora is designed with privacy in mind. Before sending any logs to AI providers or notification channels, it automatically scrubs:
+* Email addresses
+* IPv4 addresses
+* Authentication tokens (Bearer, JWT, etc.)
+* Common password/secret patterns
+
+---
+
+## 8. Google Chat App Interactivity (Optional)
+
+To enable interactive features in Google Chat (like the **"Approve"** button or the **"View Logs"** explorer), you must configure Fixora as a **Google Chat App** instead of using a simple incoming webhook.
+
+1.  **Create a Google Cloud Project** and enable the **Google Chat API**.
+2.  **Configure the App:**
+    *   **App Name:** Fixora
+    *   **Interactive features:** Enabled
+    *   **Functionality:** Receive 1-to-1 messages, Join spaces.
+    *   **Connection settings:** Use **App URL**.
+    *   **App URL:** `https://your-fixora-ingress.com/googlechat/interactive`
+3.  **Permissions:** The App does not require specific OAuth scopes for basic interactivity, but ensure it is allowed to respond in the spaces it is added to.
+4.  **Usage:** In `click-to-fix` mode, Fixora will send cards with buttons. Clicking these buttons will send an event to the App URL, which Fixora will process to execute the remediation.

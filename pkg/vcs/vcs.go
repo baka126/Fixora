@@ -19,4 +19,5 @@ type PullRequestOptions struct {
 type Provider interface {
 	CreatePullRequest(ctx context.Context, opts PullRequestOptions) (string, error) // Returns PR URL
 	GetFileContent(ctx context.Context, repoOwner, repoName, path, ref string) ([]byte, error)
+	PullRequestExists(ctx context.Context, repoOwner, repoName, headBranch string) (bool, string, error) // Returns true and URL if exists
 }

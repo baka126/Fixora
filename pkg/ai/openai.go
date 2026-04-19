@@ -109,6 +109,27 @@ func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 	return resp.Choices[0].Message.Content, nil
 }
 
+func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (string, error) {
+	resp, err := o.client.CreateChatCompletion(
+		ctx,
+		openai.ChatCompletionRequest{
+			Model: o.model,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics),
+				},
+			},
+		},
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
 func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
 	resp, err := o.client.CreateChatCompletion(
 		ctx,

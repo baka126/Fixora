@@ -14,8 +14,11 @@ import (
 	"fixora/pkg/alertmanager"
 	"fixora/pkg/argocd"
 	"fixora/pkg/config"
+	"fixora/pkg/finops"
+	"fixora/pkg/metrics"
 	"fixora/pkg/notifications"
 	"fixora/pkg/prometheus"
+	"fixora/pkg/security"
 	"fixora/pkg/vcs"
 	giturls "github.com/chainguard-dev/git-urls"
 	"k8s.io/api/core/v1"
@@ -26,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 // podWorkItem represents a unit of diagnostic work for a specific pod.
@@ -41,38 +45,65 @@ type podWorkItem struct {
 type PendingFix struct {
 	Options      vcs.PullRequestOptions
 	VCSType      string
+	VCSToken     string // Token to use if namespace-specific
 	PodNamespace string
 	PodName      string
 }
 
 type Controller struct {
-	clientset    kubernetes.Interface
-	factory      informers.SharedInformerFactory
-	config       *config.Config
-	promClient   *prometheus.Client
-	amClient     *alertmanager.Client
-	argoClient   *argocd.Client
-	aiProvider   ai.Provider
-	ghProvider   *vcs.GitHubProvider
-	glProvider   *vcs.GitLabProvider
-	queue        workqueue.RateLimitingInterface
-	history      *historyCache
-	pendingFixes map[string]PendingFix
-	pendingMu    sync.Mutex
+	clientset       kubernetes.Interface
+	factory         informers.SharedInformerFactory
+	config          *config.Config
+	promClient      metrics.MetricsProvider
+	pricingProvider finops.PricingProvider
+	amClient        *alertmanager.Client
+	argoClient      *argocd.Client
+	aiProvider      ai.Provider
+	ghProvider      *vcs.GitHubProvider
+	glProvider      *vcs.GitLabProvider
+	queue           workqueue.RateLimitingInterface
+	history         *historyCache
+	pendingFixes    map[string]PendingFix
+	pendingMu       sync.Mutex
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
-func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interface, cfg *config.Config) *Controller {
+func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interface, metricsClient metricsclientset.Interface, cfg *config.Config) *Controller {
 	factory := informers.NewSharedInformerFactory(clientset, time.Second*30)
 
-	var promClient *prometheus.Client
+	var primary metrics.MetricsProvider
 	if cfg.PrometheusURL != "" {
 		var err error
-		promClient, err = prometheus.New(cfg.PrometheusURL)
+		primary, err = prometheus.New(cfg.PrometheusURL)
 		if err != nil {
 			slog.Error("Failed to create Prometheus client", "error", err)
 		}
 	}
+
+	var secondary metrics.MetricsProvider
+	if metricsClient != nil {
+		secondary = metrics.NewK8sMetricsProvider(clientset, metricsClient)
+	}
+
+	var promClient metrics.MetricsProvider
+	if primary != nil && secondary != nil {
+		promClient = metrics.NewFallbackProvider(primary, secondary)
+	} else if primary != nil {
+		promClient = primary
+	} else if secondary != nil {
+		promClient = secondary
+	}
+
+	// Initialize Pricing Provider
+	var providers []finops.PricingProvider
+	if cfg.InfracostAPIKey != "" {
+		providers = append(providers, finops.NewInfracostClient(cfg.InfracostAPIKey))
+	}
+	// Fallback to direct cloud APIs
+	providers = append(providers, finops.DefaultAWSClient)
+	providers = append(providers, finops.DefaultAzureClient)
+	providers = append(providers, finops.DefaultGCPClient)
+	pricingProvider := finops.NewMultiPricingProvider(providers...)
 
 	var amClient *alertmanager.Client
 	if cfg.AlertmanagerURL != "" {
@@ -96,22 +127,27 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 
 	var glProvider *vcs.GitLabProvider
 	if cfg.GitLabToken != "" {
-		glProvider, _ = vcs.NewGitLabProvider(cfg.GitLabToken, cfg.GitLabBaseURL)
+		var err error
+		glProvider, err = vcs.NewGitLabProvider(cfg.GitLabToken, cfg.GitLabBaseURL)
+		if err != nil {
+			slog.Error("Failed to create global GitLab provider", "error", err)
+		}
 	}
 
 	return &Controller{
-		clientset:    clientset,
-		factory:      factory,
-		config:       cfg,
-		promClient:   promClient,
-		amClient:     amClient,
-		argoClient:   argoClient,
-		aiProvider:   aiProvider,
-		ghProvider:   ghProvider,
-		glProvider:   glProvider,
-		queue:        workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:      newHistoryCache(cfg.HistoryCRDEnabled, dynamicClient),
-		pendingFixes: make(map[string]PendingFix),
+		clientset:       clientset,
+		factory:         factory,
+		config:          cfg,
+		promClient:      promClient,
+		pricingProvider: pricingProvider,
+		amClient:        amClient,
+		argoClient:      argoClient,
+		aiProvider:      aiProvider,
+		ghProvider:      ghProvider,
+		glProvider:      glProvider,
+		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
+		history:         newHistoryCache(cfg),
+		pendingFixes:    make(map[string]PendingFix),
 	}
 }
 
@@ -120,11 +156,13 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer c.queue.ShutDown()
 
 	podInformer := c.factory.Core().V1().Pods().Informer()
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			c.enqueuePod(newObj)
-		},
-	})
+	if !c.config.AlertmanagerEnabled {
+		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				c.enqueuePod(newObj)
+			},
+		})
+	}
 
 	c.factory.Start(stopCh)
 	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {
@@ -136,13 +174,14 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 
 	// Start predictive leak scanner if enabled
 	if c.config.PredictiveEnabled {
-		go wait.Until(c.scanForLeaks, 5*time.Minute, stopCh)
+		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
 	}
 
 	<-stopCh
 }
 
 // scanForLeaks periodically checks all running pods for consistent memory growth patterns.
+// It actively analyzes incident history alongside Prometheus metrics to predict time-to-OOM.
 func (c *Controller) scanForLeaks() {
 	if c.promClient == nil {
 		return
@@ -163,8 +202,8 @@ func (c *Controller) scanForLeaks() {
 			continue
 		}
 
-		matrix, err := c.promClient.GetHistoricalMemoryUsage(pod.Namespace, pod.Name, 1*time.Hour)
-		if err != nil || len(matrix) == 0 || len(matrix[0].Values) < 10 {
+		matrix, err := c.promClient.GetHistory(pod.Namespace, pod.Name, 1*time.Hour)
+		if err != nil || len(matrix) == 0 || len(matrix[0].Values) < c.config.PredictiveMinDataPoints {
 			continue
 		}
 
@@ -172,10 +211,127 @@ func (c *Controller) scanForLeaks() {
 		first := float64(values[0].Value)
 		last := float64(values[len(values)-1].Value)
 
-		// Flag pods with >20% memory growth in 1 hour
-		if first > 0 && (last-first)/first > 0.20 {
-			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", (last-first)/first*100)
-			notifications.SendNotification(c.config, fmt.Sprintf("⚠️ *Predictive Warning*: Pod %s/%s has a %.1f%% memory growth in the last hour. Potential OOM trajectory.", pod.Namespace, pod.Name, (last-first)/first*100))
+		growthRate := (last - first) / first
+
+		// Flag pods with growth exceeding threshold
+		if first > 0 && growthRate > c.config.PredictiveGrowthThreshold {
+			// Cooldown logic: don't re-alert for 4 hours unless growth rate increases significantly (>50% increase)
+			state, exists := c.history.GetPredictionState(ctx, pod.Namespace, pod.Name)
+			if exists {
+				cooldown := 4 * time.Hour
+				timeSinceLast := time.Since(state.LastAlertTime)
+				growthIncrease := (growthRate - state.LastGrowthRate) / state.LastGrowthRate
+
+				if timeSinceLast < cooldown && growthIncrease < 0.50 {
+					slog.Debug("Suppressing duplicate leak alert (cooldown/insignificant growth)", "pod", pod.Name, "time_since", timeSinceLast, "growth_increase", growthIncrease)
+					continue
+				}
+			}
+
+			var metricProof strings.Builder
+			metricProof.WriteString(fmt.Sprintf("Memory Growth: %.1f%% in the last hour.\n", growthRate*100))
+			metricProof.WriteString(fmt.Sprintf("Current Usage: %.2f MiB.\n", last/1024/1024))
+
+			// Fetch more granular metrics if supported
+			rss, cache := c.getGranularMetrics(pod.Namespace, pod.Name)
+			if rss > 0 || cache > 0 {
+				metricProof.WriteString(fmt.Sprintf("RSS: %.2f MiB, Cache: %.2f MiB.\n", rss/1024/1024, cache/1024/1024))
+			}
+
+			// Predict time-to-OOM based on limits and requests
+			request, limit, err := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+
+			var hoursToOOM float64
+			if err == nil && limit > 0 {
+				metricProof.WriteString(fmt.Sprintf("Memory Limit: %.2f MiB.\n", limit/1024/1024))
+				if last < limit {
+					bytesPerHour := last - first
+					if bytesPerHour > 0 {
+						hoursToOOM = (limit - last) / bytesPerHour
+						metricProof.WriteString(fmt.Sprintf("Estimated Time-to-OOM: %.1f hours.\n", hoursToOOM))
+					}
+				} else {
+					metricProof.WriteString("Warning: Pod is currently EXCEEDING its memory limit.\n")
+				}
+			}
+
+			if err == nil && request > 0 {
+				metricProof.WriteString(fmt.Sprintf("Memory Request: %.2f MiB.\n", request/1024/1024))
+				if last > request {
+					metricProof.WriteString(fmt.Sprintf("Warning: Pod is exceeding its Request by %.2f MiB (Risk of eviction if node is under pressure).\n", (last-request)/1024/1024))
+				}
+			}
+
+			// Analyze incident history
+			historySummary := "This is the first time we've analyzed this pod."
+			var historyStr string
+			if hist, ok := c.history.Get(ctx, pod.Namespace, pod.Name); ok {
+				oomCount := 0
+				var sb strings.Builder
+				for _, inc := range hist.Incidents {
+					if inc.Reason == "OOMKilled" || inc.Reason == "CrashLoopBackOff" {
+						oomCount++
+					}
+					sb.WriteString(fmt.Sprintf("- [%s] Reason: %s, RootCause: %s\n", inc.Timestamp.Format(time.RFC3339), inc.Reason, inc.RootCause))
+				}
+				historyStr = sb.String()
+				if oomCount > 0 {
+					historySummary = fmt.Sprintf("Recurring Issue: This pod has historically crashed %d times (OOMKilled/CrashLoopBackOff). High risk of recurrence.", oomCount)
+				} else {
+					historySummary = fmt.Sprintf("History Analysis: The pod has %d prior incidents.", len(hist.Incidents))
+				}
+			}
+
+			clusterCtx := fmt.Sprintf("Namespace: %s, Pod: %s, Status: Predictive Warning (Potential OOM Trajectory)", pod.Namespace, pod.Name)
+
+			evidence := notifications.EvidenceChain{
+				Namespace:           pod.Namespace,
+				PodName:             pod.Name,
+				MetricProof:         metricProof.String(),
+				ClusterContext:      clusterCtx,
+				HistoricalPattern:   historySummary,
+				PredictiveWarning:   true,
+				EstimatedHoursToOOM: hoursToOOM,
+			}
+
+			// Gathers Kubernetes events
+			events, err := c.getPodEvents(ctx, &pod)
+			if err == nil {
+				evidence.EventTimeline = events
+			}
+
+			// Execute Multi-Modal AI Forensics
+			if c.aiProvider != nil {
+				rootCause, err := c.aiProvider.PerformPredictiveForensics(ctx, pod.Namespace, pod.Name, historyStr, evidence.MetricProof)
+				if err != nil {
+					slog.Error("AI Predictive Forensics failed", "pod", pod.Name, "error", err)
+					evidence.RootCause = "Predictive analysis failed: " + err.Error()
+				} else {
+					evidence.RootCause = rootCause
+					// Save the prediction to history
+					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", rootCause)
+				}
+			} else {
+				evidence.RootCause = "AI Provider not configured"
+			}
+
+			// FinOps Impact estimation for leaks
+			pricingProfile := c.getPricingProfile(ctx, &pod)
+			cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
+			memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+			currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
+			// Assume AI fix will increase memory by 256MiB for leak prevention if OOM is imminent
+			newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
+			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
+
+			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
+			notifications.SendEvidenceChain(c.config, evidence)
+
+			// Update prediction state to handle cooldowns
+			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate)
+
+			// Attempt automated remediation for predicted leaks
+			c.handleRemediation(ctx, &pod, evidence)
 		}
 	}
 }
@@ -265,6 +421,8 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	}
 
 	evidence := notifications.EvidenceChain{
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
 		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s", pod.Namespace, pod.Name, reason),
 		HistoricalPattern: historySummary,
 	}
@@ -283,9 +441,19 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	// Gathers memory metrics for proof
 	if c.promClient != nil {
-		usage, _ := c.promClient.GetPodMemoryUsage(pod.Namespace, pod.Name, time.Hour)
-		limit, _ := c.promClient.GetPodMemoryLimit(pod.Namespace, pod.Name)
-		evidence.MetricProof = fmt.Sprintf("Memory Usage: %.2f MiB, Memory Limit: %.2f MiB", usage/1024/1024, limit/1024/1024)
+		usage, _ := c.promClient.GetPodUsage(pod.Namespace, pod.Name)
+		request, limit, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+
+		rss, cache := c.getGranularMetrics(pod.Namespace, pod.Name)
+
+		metricSource := "Prometheus"
+		_, err := c.promClient.GetHistory(pod.Namespace, pod.Name, time.Hour)
+		if err != nil {
+			metricSource = "K8s API (Historical trend unavailable)"
+		}
+
+		evidence.MetricProof = fmt.Sprintf("Metric Source: %s\nMemory Usage: %.2f MiB (RSS: %.2f, Cache: %.2f)\nLimit: %.2f MiB, Request: %.2f MiB",
+			metricSource, usage/1024/1024, rss/1024/1024, cache/1024/1024, limit/1024/1024, request/1024/1024)
 	}
 
 	// Gathers Kubernetes events
@@ -297,7 +465,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	// Execute Multi-Modal AI Forensics
 	var rootCause string
 	if c.aiProvider != nil {
-		logs, err := c.getPodLogs(ctx, pod)
+		logs, err := c.getPodLogs(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			slog.Warn("Error fetching logs", "pod", pod.Name, "error", err)
 		}
@@ -324,13 +492,59 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		evidence.RootCause = "AI Provider not configured"
 	}
 
-	evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+	// FinOps Impact estimation for OOMKilled/CrashLoopBackOff
+	if c.promClient != nil {
+		pricingProfile := c.getPricingProfile(ctx, pod)
+		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
+		memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+		currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
+		// Assume AI fix will increase memory by 256MiB
+		newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
+		evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
+	} else {
+		evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+	}
 
 	// Sends the report to Slack
 	notifications.SendEvidenceChain(c.config, evidence)
 
 	// Attempts automated remediation
 	c.handleRemediation(ctx, pod, evidence)
+}
+
+// getGranularMetrics attempts to fetch RSS and Cache metrics from the provider.
+func (c *Controller) getGranularMetrics(ns, pod string) (rss, cache float64) {
+	if c.promClient == nil {
+		return
+	}
+	rss, _ = c.promClient.GetPodMemoryRSS(ns, pod)
+	cache, _ = c.promClient.GetPodMemoryCache(ns, pod)
+	return
+}
+
+// getPricingProfile attempts to fetch node-specific pricing for a pod.
+func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.PricingProfile {
+	profile := finops.AWSDefaultProfile
+
+	if pod.Spec.NodeName != "" {
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+		if err == nil {
+			instanceType := node.Labels["node.kubernetes.io/instance-type"]
+			region := node.Labels["topology.kubernetes.io/region"]
+			if instanceType != "" {
+				if region == "" {
+					region = "us-east-1"
+				}
+
+				vendor := finops.DetectVendor(instanceType, region)
+				liveProfile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType)
+				if err == nil && liveProfile != nil {
+					profile = *liveProfile
+				}
+			}
+		}
+	}
+	return profile
 }
 
 // handleRemediation attempts to open a Pull Request with a fix by discovering the pod's source repository.
@@ -379,6 +593,11 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
+	if !c.isVCSDomainTrusted(u.Host) {
+		slog.Warn("Refusing remediation for untrusted VCS domain", "host", u.Host, "pod", pod.Name)
+		return
+	}
+
 	pathParts := strings.Split(strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/"), "/")
 	if len(pathParts) < 2 {
 		slog.Warn("Invalid git path", "path", u.Path)
@@ -392,14 +611,19 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		baseBranch = targetRevision
 	}
 
-	var provider vcs.Provider
-	if vcsType == "github" {
-		provider = c.ghProvider
-	} else if vcsType == "gitlab" {
-		provider = c.glProvider
+	provider, token := c.getVCSProvider(ctx, pod.Namespace, vcsType)
+	if provider == nil {
+		slog.Warn("No VCS provider found for remediation", "type", vcsType, "pod", pod.Name)
+		return
 	}
 
-	if provider == nil || c.aiProvider == nil {
+	// Check if a PR already exists for this pod to avoid duplicates
+	// We check for a branch name that contains the pod name
+	// This is a bit loose but works for our naming convention "fixora/patch-%s-%d"
+	branchPrefix := fmt.Sprintf("fixora/patch-%s-", pod.Name)
+	exists, prURL, err := provider.PullRequestExists(ctx, repoOwner, repoName, branchPrefix)
+	if err == nil && exists {
+		slog.Info("PR already exists for pod, skipping", "pod", pod.Name, "pr", prURL)
 		return
 	}
 
@@ -432,8 +656,25 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		CommitMessage: "fix: automated resource adjustment by Fixora",
 	}
 
+	// Stash for interactive approval if in ClickToFix mode
+	if c.config.Mode == config.ClickToFix {
+		callbackID := fmt.Sprintf("fix-%d", time.Now().UnixNano())
+		c.pendingMu.Lock()
+		c.pendingFixes[callbackID] = PendingFix{
+			Options:      opts,
+			VCSType:      vcsType,
+			VCSToken:     token,
+			PodNamespace: pod.Namespace,
+			PodName:      pod.Name,
+		}
+		c.pendingMu.Unlock()
+
+		notifications.SendRemediationApproval(c.config, pod.Namespace, pod.Name, string(newContent), callbackID)
+		return
+	}
+
 	// Execute the PR creation
-	prURL, err := provider.CreatePullRequest(ctx, opts)
+	prURL, err = provider.CreatePullRequest(ctx, opts)
 	if err != nil {
 		slog.Error("Error creating PR", "pod", pod.Name, "error", err)
 	} else if prURL != "" {
@@ -457,10 +698,22 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	}
 
 	var provider vcs.Provider
-	if fix.VCSType == "github" {
-		provider = c.ghProvider
-	} else if fix.VCSType == "gitlab" {
-		provider = c.glProvider
+	var err error
+	if fix.VCSToken != "" {
+		if fix.VCSType == "github" {
+			provider = vcs.NewGitHubProvider(fix.VCSToken)
+		} else if fix.VCSType == "gitlab" {
+			provider, err = vcs.NewGitLabProvider(fix.VCSToken, c.config.GitLabBaseURL)
+			if err != nil {
+				slog.Error("Failed to create GitLab provider for pending fix", "error", err)
+			}
+		}
+	} else {
+		if fix.VCSType == "github" {
+			provider = c.ghProvider
+		} else if fix.VCSType == "gitlab" {
+			provider = c.glProvider
+		}
 	}
 
 	if provider == nil {
@@ -480,9 +733,14 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	}
 }
 
-func (c *Controller) getPodLogs(ctx context.Context, pod *v1.Pod) (string, error) {
-	podLogOpts := v1.PodLogOptions{TailLines: Int64Ptr(50)}
-	req := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
+// GetPodLogs fetches and scrubs logs for a specific pod. Public for use by server (Slack modal).
+func (c *Controller) GetPodLogs(ctx context.Context, namespace, podName string) (string, error) {
+	return c.getPodLogs(ctx, namespace, podName)
+}
+
+func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) (string, error) {
+	podLogOpts := v1.PodLogOptions{TailLines: Int64Ptr(100)} // Fetch more to allow filtering
+	req := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, &podLogOpts)
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return "", err
@@ -494,7 +752,43 @@ func (c *Controller) getPodLogs(ctx context.Context, pod *v1.Pod) (string, error
 	if err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+
+	rawLogs := buf.String()
+	lines := strings.Split(rawLogs, "\n")
+	var relevantLines []string
+
+	// Relevance Heuristics: Keep lines with common error patterns
+	keywords := []string{"error", "panic", "fatal", "fail", "exception", "exit", "137", "killed", "oom"}
+	for _, line := range lines {
+		lowerLine := strings.ToLower(line)
+		isRelevant := false
+		for _, kw := range keywords {
+			if strings.Contains(lowerLine, kw) {
+				isRelevant = true
+				break
+			}
+		}
+
+		if isRelevant {
+			// Scrub PII before adding to relevant set
+			relevantLines = append(relevantLines, security.ScrubPII(line))
+		}
+	}
+
+	if len(relevantLines) == 0 {
+		// Fallback: If no keywords found, just return last 10 lines scrubbed
+		start := 0
+		if len(lines) > 10 {
+			start = len(lines) - 10
+		}
+		for i := start; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) != "" {
+				relevantLines = append(relevantLines, security.ScrubPII(lines[i]))
+			}
+		}
+	}
+
+	return strings.Join(relevantLines, "\n"), nil
 }
 
 func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, error) {
@@ -512,7 +806,8 @@ func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, err
 		start = len(events.Items) - limit
 	}
 	for _, event := range events.Items[start:] {
-		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, event.Message))
+		scrubbedMessage := security.ScrubPII(event.Message)
+		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, scrubbedMessage))
 	}
 	return sb.String(), nil
 }
@@ -541,6 +836,48 @@ func (c *Controller) PerformRolloutRestart(namespace, deploymentName string) {
 		slog.Error("Error updating Deployment", "namespace", deployment.Namespace, "name", deployment.Name, "error", err)
 		return
 	}
+}
+
+// getVCSProvider returns a provider and the token used (if dynamic) for the given namespace and type.
+func (c *Controller) getVCSProvider(ctx context.Context, namespace, vcsType string) (vcs.Provider, string) {
+	// 1. Check for namespace-specific secret "fixora-vcs"
+	secret, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, "fixora-vcs", metav1.GetOptions{})
+	if err == nil {
+		if vcsType == "github" {
+			if token, ok := secret.Data["github-token"]; ok {
+				slog.Info("Using namespace-specific GitHub token", "namespace", namespace)
+				return vcs.NewGitHubProvider(string(token)), string(token)
+			}
+		} else if vcsType == "gitlab" {
+			if token, ok := secret.Data["gitlab-token"]; ok {
+				slog.Info("Using namespace-specific GitLab token", "namespace", namespace)
+				p, err := vcs.NewGitLabProvider(string(token), c.config.GitLabBaseURL)
+				if err != nil {
+					slog.Error("Failed to create namespace-specific GitLab provider", "namespace", namespace, "error", err)
+					return nil, ""
+				}
+				return p, string(token)
+			}
+		}
+	}
+
+	// 2. Fallback to global providers
+	if vcsType == "github" {
+		return c.ghProvider, ""
+	} else if vcsType == "gitlab" {
+		return c.glProvider, ""
+	}
+
+	return nil, ""
+}
+
+func (c *Controller) isVCSDomainTrusted(host string) bool {
+	for _, domain := range c.config.TrustedVCSDomains {
+		if host == domain {
+			return true
+		}
+	}
+	return false
 }
 
 func Int64Ptr(i int64) *int64 { return &i }

@@ -45,6 +45,7 @@ prometheus:
   url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
 
 alertmanager:
+  enabled: true
   url: "http://alertmanager-operated.monitoring.svc.cluster.local:9093"
 
 ai:
@@ -59,6 +60,10 @@ webhook:
   user: ""
   password: ""
 
+# FinOps Config
+finops:
+  infracostAPIKey: ""
+
 # Feature Toggles
 features:
   argocd:
@@ -68,15 +73,50 @@ features:
     token: ""
   predictive:
     enabled: true
-  history:
-    crdEnabled: true
+  database:
+    host: ""
+    port: "5432"
+    user: ""
+    password: ""
+    name: "fixora"
+
+# Gateway API support
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+  hostnames: []
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
 
 vcs:
+  # Global VCS tokens. These are used if no namespace-specific secret is found.
   github:
     token: ""
   gitlab:
     token: ""
     baseUrl: ""
+  # Multi-tenant / Namespace-specific VCS Support:
+  # Fixora can use different tokens for different namespaces.
+  # To use this, create a secret named 'fixora-vcs' in the target application namespace:
+  # kubectl create secret generic fixora-vcs --from-literal=github-token=YOUR_TOKEN -n target-namespace
 
 service:
   type: ClusterIP

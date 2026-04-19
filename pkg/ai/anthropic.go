@@ -137,6 +137,34 @@ func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx Fo
 	return *resp.Content[0].Text, nil
 }
 
+func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (string, error) {
+	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
+		Model: a.model,
+		Messages: []anthropic.Message{
+			{
+				Role: anthropic.RoleUser,
+				Content: []anthropic.MessageContent{
+					{
+						Type: anthropic.MessagesContentTypeText,
+						Text: StringPtr(fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics)),
+					},
+				},
+			},
+		},
+		MaxTokens: 1024,
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(resp.Content) == 0 {
+		return "No predictive analysis generated", nil
+	}
+
+	return *resp.Content[0].Text, nil
+}
+
 func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,

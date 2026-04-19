@@ -7,6 +7,10 @@ rules:
   resources: ["pods"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["fixora-vcs"]
+  verbs: ["get"]
+- apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
 - apiGroups: [""]
@@ -15,11 +19,6 @@ rules:
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
   verbs: ["get", "list", "watch", "update", "patch"]
-{{- if .Values.features.history.crdEnabled }}
-- apiGroups: ["fixora.io"]
-  resources: ["incidenthistories"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-{{- end }}
 {{- if .Values.features.argocd.enabled }}
 - apiGroups: ["argoproj.io"]
   resources: ["applications"]

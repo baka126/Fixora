@@ -72,23 +72,63 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		return nil
 	}
 
+	headerTitle := "Fixora: Forensic Diagnostic Report"
+	headerSubtitle := "Automated root cause analysis"
+
+	if evidence.PredictiveWarning {
+		headerTitle = "Fixora: Predictive Leak Warning"
+		headerSubtitle = "Memory growth trajectory detected"
+	}
+
+	mainWidgets := []GoogleChatWidget{
+		{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📊 Metric Proof</b><br>" + evidence.MetricProof}},
+	}
+
+	if evidence.PredictiveWarning && evidence.EstimatedHoursToOOM > 0 {
+		oomText := fmt.Sprintf("<b>⏳ Estimated Hours until OOM:</b> %.1f hours", evidence.EstimatedHoursToOOM)
+		mainWidgets = append(mainWidgets, GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: oomText}})
+	}
+
+	mainWidgets = append(mainWidgets,
+		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
+		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
+		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
+	)
+
+	// Add Interactive Log Explorer Button
+	if evidence.Namespace != "" && evidence.PodName != "" {
+		mainWidgets = append(mainWidgets, GoogleChatWidget{
+			ButtonList: &GoogleChatButtonList{
+				Buttons: []GoogleChatButton{
+					{
+						Text: "🔍 View Logs",
+						OnClick: GoogleChatOnClick{
+							Action: &GoogleChatAction{
+								Function: "view_logs",
+								Parameters: []GoogleChatActionParam{
+									{Key: "namespace", Value: evidence.Namespace},
+									{Key: "podName", Value: evidence.PodName},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
 	payload := GoogleChatPayload{
 		CardsV2: []GoogleChatCardV2{
 			{
 				CardId: "forensic_report",
 				Card: GoogleChatCard{
 					Header: GoogleChatHeader{
-						Title:    "Fixora: Forensic Diagnostic Report",
-						Subtitle: "Automated root cause analysis",
+						Title:    headerTitle,
+						Subtitle: headerSubtitle,
 					},
 					Sections: []GoogleChatSection{
 						{
-							Widgets: []GoogleChatWidget{
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📊 Metric Proof</b><br>" + evidence.MetricProof}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
-							},
+							Widgets: mainWidgets,
 						},
 						{
 							Widgets: []GoogleChatWidget{
@@ -155,6 +195,63 @@ func sendGoogleChatInteractiveNotification(cfg *config.Config, message, callback
 												OnClick: GoogleChatOnClick{
 													Action: &GoogleChatAction{
 														Function: "deny_action",
+														Parameters: []GoogleChatActionParam{
+															{Key: "callback_id", Value: callbackID},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return sendGoogleChat(cfg, payload)
+}
+
+func sendGoogleChatRemediationApproval(cfg *config.Config, namespace, pod, patch, callbackID string) error {
+	if cfg.GoogleChatWebhookURL == "" {
+		return nil
+	}
+
+	payload := GoogleChatPayload{
+		CardsV2: []GoogleChatCardV2{
+			{
+				CardId: "remediation_approval",
+				Card: GoogleChatCard{
+					Header: GoogleChatHeader{
+						Title:    "🛠️ Remediation Approval Required",
+						Subtitle: fmt.Sprintf("%s/%s", namespace, pod),
+					},
+					Sections: []GoogleChatSection{
+						{
+							Widgets: []GoogleChatWidget{
+								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Proposed Fix:</b><br><pre>" + patch + "</pre>"}},
+								{
+									ButtonList: &GoogleChatButtonList{
+										Buttons: []GoogleChatButton{
+											{
+												Text: "Approve & Open PR",
+												OnClick: GoogleChatOnClick{
+													Action: &GoogleChatAction{
+														Function: "approve_remediation",
+														Parameters: []GoogleChatActionParam{
+															{Key: "callback_id", Value: callbackID},
+														},
+													},
+												},
+											},
+											{
+												Text: "Ignore",
+												OnClick: GoogleChatOnClick{
+													Action: &GoogleChatAction{
+														Function: "deny_remediation",
 														Parameters: []GoogleChatActionParam{
 															{Key: "callback_id", Value: callbackID},
 														},
