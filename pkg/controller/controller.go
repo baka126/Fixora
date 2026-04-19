@@ -295,12 +295,13 @@ func (c *Controller) scanForLeaks() {
 			}
 
 			// FinOps Impact estimation for leaks
+			pricingProfile := c.getPricingProfile(ctx, &pod)
 			cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 			memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-			currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, finops.AWSDefaultProfile)
-			// Assume AI fix will increase memory by 20% or 256MiB for leak prevention if OOM is imminent
-			newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, finops.AWSDefaultProfile)
-			evidence.FinOpsImpact = fmt.Sprintf("%s AWS compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"))
+			currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
+			// Assume AI fix will increase memory by 256MiB for leak prevention if OOM is imminent
+			newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
+			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
 
 			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
 			notifications.SendEvidenceChain(c.config, evidence)
@@ -470,12 +471,13 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	// FinOps Impact estimation for OOMKilled/CrashLoopBackOff
 	if c.promClient != nil {
+		pricingProfile := c.getPricingProfile(ctx, pod)
 		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 		memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-		currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, finops.AWSDefaultProfile)
+		currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
 		// Assume AI fix will increase memory by 256MiB
-		newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, finops.AWSDefaultProfile)
-		evidence.FinOpsImpact = fmt.Sprintf("%s AWS compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"))
+		newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
+		evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
 	} else {
 		evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
 	}
@@ -516,6 +518,29 @@ func (c *Controller) getGranularMetrics(ns, pod string) (rss, cache float64) {
 		}
 	}
 	return
+}
+
+// getPricingProfile attempts to fetch node-specific pricing for a pod.
+func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.PricingProfile {
+	profile := finops.AWSDefaultProfile
+
+	if pod.Spec.NodeName != "" {
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+		if err == nil {
+			instanceType := node.Labels["node.kubernetes.io/instance-type"]
+			region := node.Labels["topology.kubernetes.io/region"]
+			if instanceType != "" {
+				if region == "" {
+					region = "us-east-1"
+				}
+				liveProfile, err := finops.DefaultAWSClient.GetProfileForInstance(instanceType, region)
+				if err == nil {
+					profile = *liveProfile
+				}
+			}
+		}
+	}
+	return profile
 }
 
 // handleRemediation attempts to open a Pull Request with a fix by discovering the pod's source repository.
