@@ -67,19 +67,27 @@ type Controller struct {
 func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interface, metricsClient metricsclientset.Interface, cfg *config.Config) *Controller {
 	factory := informers.NewSharedInformerFactory(clientset, time.Second*30)
 
-	var promClient metrics.MetricsProvider
+	var primary metrics.MetricsProvider
 	if cfg.PrometheusURL != "" {
 		var err error
-		promClient, err = prometheus.New(cfg.PrometheusURL)
+		primary, err = prometheus.New(cfg.PrometheusURL)
 		if err != nil {
 			slog.Error("Failed to create Prometheus client", "error", err)
 		}
 	}
 
-	// Fallback to K8s Metrics API if Prometheus is not configured
-	if promClient == nil && metricsClient != nil {
-		slog.Info("Prometheus not configured, falling back to K8s Metrics API")
-		promClient = metrics.NewK8sMetricsProvider(clientset, metricsClient)
+	var secondary metrics.MetricsProvider
+	if metricsClient != nil {
+		secondary = metrics.NewK8sMetricsProvider(clientset, metricsClient)
+	}
+
+	var promClient metrics.MetricsProvider
+	if primary != nil && secondary != nil {
+		promClient = metrics.NewFallbackProvider(primary, secondary)
+	} else if primary != nil {
+		promClient = primary
+	} else if secondary != nil {
+		promClient = secondary
 	}
 
 	var amClient *alertmanager.Client
@@ -204,10 +212,9 @@ func (c *Controller) scanForLeaks() {
 			metricProof.WriteString(fmt.Sprintf("Memory Growth: %.1f%% in the last hour.\n", growthRate*100))
 			metricProof.WriteString(fmt.Sprintf("Current Usage: %.2f MiB.\n", last/1024/1024))
 
-			// Fetch more granular metrics if it's a prometheus client
-			if pc, ok := c.promClient.(*prometheus.Client); ok {
-				rss, _ := pc.GetPodMemoryRSS(pod.Namespace, pod.Name)
-				cache, _ := pc.GetPodMemoryCache(pod.Namespace, pod.Name)
+			// Fetch more granular metrics if supported
+			rss, cache := c.getGranularMetrics(pod.Namespace, pod.Name)
+			if rss > 0 || cache > 0 {
 				metricProof.WriteString(fmt.Sprintf("RSS: %.2f MiB, Cache: %.2f MiB.\n", rss/1024/1024, cache/1024/1024))
 			}
 
@@ -406,11 +413,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		usage, _ := c.promClient.GetPodUsage(pod.Namespace, pod.Name)
 		request, limit, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
 
-		var rss, cache float64
-		if pc, ok := c.promClient.(*prometheus.Client); ok {
-			rss, _ = pc.GetPodMemoryRSS(pod.Namespace, pod.Name)
-			cache, _ = pc.GetPodMemoryCache(pod.Namespace, pod.Name)
-		}
+		rss, cache := c.getGranularMetrics(pod.Namespace, pod.Name)
 
 		evidence.MetricProof = fmt.Sprintf("Memory Usage: %.2f MiB (RSS: %.2f, Cache: %.2f)\nLimit: %.2f MiB, Request: %.2f MiB",
 			usage/1024/1024, rss/1024/1024, cache/1024/1024, limit/1024/1024, request/1024/1024)
@@ -459,6 +462,37 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	// Attempts automated remediation
 	c.handleRemediation(ctx, pod, evidence)
+}
+
+// getGranularMetrics attempts to fetch RSS and Cache metrics from the provider.
+func (c *Controller) getGranularMetrics(ns, pod string) (rss, cache float64) {
+	type granular interface {
+		GetPodMemoryRSS(ns, pod string) (float64, error)
+		GetPodMemoryCache(ns, pod string) (float64, error)
+	}
+
+	// Direct check
+	if g, ok := c.promClient.(granular); ok {
+		rss, _ = g.GetPodMemoryRSS(ns, pod)
+		cache, _ = g.GetPodMemoryCache(ns, pod)
+		return
+	}
+
+	// FallbackProvider check
+	if fb, ok := c.promClient.(*metrics.FallbackProvider); ok {
+		if g, ok := fb.Primary.(granular); ok {
+			rss, _ = g.GetPodMemoryRSS(ns, pod)
+			cache, _ = g.GetPodMemoryCache(ns, pod)
+			if rss > 0 || cache > 0 {
+				return
+			}
+		}
+		if g, ok := fb.Secondary.(granular); ok {
+			rss, _ = g.GetPodMemoryRSS(ns, pod)
+			cache, _ = g.GetPodMemoryCache(ns, pod)
+		}
+	}
+	return
 }
 
 // handleRemediation attempts to open a Pull Request with a fix by discovering the pod's source repository.
