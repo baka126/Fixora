@@ -12,7 +12,15 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		return nil
 	}
 
-	headerText := slack.NewTextBlockObject("mrkdwn", "*Fixora: Forensic Diagnostic Report*", false, false)
+	color := "#E01E5A" // Default Red-ish
+	headerTitle := "*Fixora: Forensic Diagnostic Report*"
+
+	if evidence.PredictiveWarning {
+		color = "#ECB22E" // Slack Orange
+		headerTitle = "*Fixora: Predictive Leak Warning*"
+	}
+
+	headerText := slack.NewTextBlockObject("mrkdwn", headerTitle, false, false)
 	headerSection := slack.NewSectionBlock(headerText, nil, nil)
 
 	metricSection := createSlackSection("📊 *Metric Proof*", evidence.MetricProof)
@@ -28,15 +36,29 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		headerSection,
 		divider,
 		metricSection,
+	}
+
+	if evidence.PredictiveWarning && evidence.EstimatedHoursToOOM > 0 {
+		oomText := fmt.Sprintf("⏳ *Estimated Hours until OOM:* %.1f hours", evidence.EstimatedHoursToOOM)
+		oomSection := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", oomText, false, false), nil, nil)
+		blocks = append(blocks, oomSection)
+	}
+
+	blocks = append(blocks,
 		contextSection,
 		patternSection,
 		timelineSection,
 		divider,
 		rootCauseSection,
 		finOpsSection,
+	)
+
+	attachment := slack.Attachment{
+		Color:  color,
+		Blocks: slack.Blocks{BlockSet: blocks},
 	}
 
-	return sendSlack(cfg, slack.MsgOptionBlocks(blocks...))
+	return sendSlack(cfg, slack.MsgOptionAttachments(attachment))
 }
 
 func createSlackSection(title, content string) *slack.SectionBlock {

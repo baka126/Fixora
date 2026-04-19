@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"fixora/pkg/config"
 	"fixora/pkg/controller"
@@ -41,10 +42,15 @@ func main() {
 		log.Fatalf("Error creating dynamic client: %s", err.Error())
 	}
 
+	metricsClient, err := metricsclientset.NewForConfig(k8sConfig)
+	if err != nil {
+		log.Fatalf("Error creating metrics client: %s", err.Error())
+	}
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	ctrl := controller.NewController(clientset, dynamicClient, cfg)
+	ctrl := controller.NewController(clientset, dynamicClient, metricsClient, cfg)
 	srv := server.New(ctrl, cfg)
 	go srv.Start()
 

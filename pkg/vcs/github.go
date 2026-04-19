@@ -92,3 +92,21 @@ func (g *GitHubProvider) GetFileContent(ctx context.Context, repoOwner, repoName
 	}
 	return []byte(content), nil
 }
+
+func (g *GitHubProvider) PullRequestExists(ctx context.Context, repoOwner, repoName, headBranch string) (bool, string, error) {
+	opts := &github.PullRequestListOptions{
+		State: "open",
+	}
+	prs, _, err := g.client.PullRequests.List(ctx, repoOwner, repoName, opts)
+	if err != nil {
+		return false, "", err
+	}
+
+	for _, pr := range prs {
+		if pr.Head.GetLabel() == headBranch || pr.Head.GetRef() == headBranch {
+			return true, pr.GetHTMLURL(), nil
+		}
+	}
+
+	return false, "", nil
+}

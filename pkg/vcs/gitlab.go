@@ -77,3 +77,21 @@ func (g *GitLabProvider) GetFileContent(ctx context.Context, repoOwner, repoName
 	}
 	return content, nil
 }
+
+func (g *GitLabProvider) PullRequestExists(ctx context.Context, repoOwner, repoName, headBranch string) (bool, string, error) {
+	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
+	opts := &gitlab.ListProjectMergeRequestsOptions{
+		State:        gitlab.Ptr("opened"),
+		SourceBranch: gitlab.Ptr(headBranch),
+	}
+	mrs, _, err := g.client.MergeRequests.ListProjectMergeRequests(projectID, opts)
+	if err != nil {
+		return false, "", err
+	}
+
+	if len(mrs) > 0 {
+		return true, mrs[0].WebURL, nil
+	}
+
+	return false, "", nil
+}

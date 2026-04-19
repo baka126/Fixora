@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 type OperatingMode string
@@ -45,8 +46,11 @@ type Config struct {
 	DBPassword string
 	DBName     string
 
-	// Feature Toggles
-	PredictiveEnabled bool
+	// Feature Toggles & Predictive Tuning
+	PredictiveEnabled         bool
+	PredictiveGrowthThreshold float64
+	PredictiveScanInterval    time.Duration
+	PredictiveMinDataPoints   int
 }
 
 func Load() *Config {
@@ -85,7 +89,10 @@ func Load() *Config {
 		DBPassword: os.Getenv("DB_PASSWORD"),
 		DBName:     getEnv("DB_NAME", "fixora"),
 
-		PredictiveEnabled: getEnvBool("PREDICTIVE_ENABLED", true),
+		PredictiveEnabled:         getEnvBool("PREDICTIVE_ENABLED", true),
+		PredictiveGrowthThreshold: getEnvFloat("PREDICTIVE_GROWTH_THRESHOLD", 0.20),
+		PredictiveScanInterval:    getEnvDuration("PREDICTIVE_SCAN_INTERVAL", 5*time.Minute),
+		PredictiveMinDataPoints:   getEnvInt("PREDICTIVE_MIN_DATA_POINTS", 10),
 	}
 }
 
@@ -101,6 +108,36 @@ func getEnvBool(key string, fallback bool) bool {
 		b, err := strconv.ParseBool(value)
 		if err == nil {
 			return b
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if value, ok := os.LookupEnv(key); ok {
+		f, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if value, ok := os.LookupEnv(key); ok {
+		i, err := strconv.Atoi(value)
+		if err == nil {
+			return i
+		}
+	}
+	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if value, ok := os.LookupEnv(key); ok {
+		d, err := time.ParseDuration(value)
+		if err == nil {
+			return d
 		}
 	}
 	return fallback

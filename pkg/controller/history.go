@@ -23,6 +23,11 @@ type PodHistory struct {
 	Incidents []Incident `json:"incidents"`
 }
 
+type PredictionState struct {
+	LastAlertTime  time.Time
+	LastGrowthRate float64
+}
+
 type historyCache struct {
 	config *config.Config
 	db     *sql.DB
@@ -55,21 +60,31 @@ func newHistoryCache(cfg *config.Config) *historyCache {
 }
 
 func (h *historyCache) initDB() {
-	query := `
-	CREATE TABLE IF NOT EXISTS incident_history (
-		id SERIAL PRIMARY KEY,
-		namespace VARCHAR(255) NOT NULL,
-		pod_name VARCHAR(255) NOT NULL,
-		timestamp TIMESTAMP NOT NULL,
-		reason TEXT NOT NULL,
-		root_cause TEXT NOT NULL,
-		applied_fix TEXT
-	);
-	CREATE INDEX IF NOT EXISTS idx_incident_pod ON incident_history (namespace, pod_name);
-	`
-	_, err := h.db.Exec(query)
-	if err != nil {
-		slog.Error("Failed to initialize database schema", "error", err)
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS incident_history (
+			id SERIAL PRIMARY KEY,
+			namespace VARCHAR(255) NOT NULL,
+			pod_name VARCHAR(255) NOT NULL,
+			timestamp TIMESTAMP NOT NULL,
+			reason TEXT NOT NULL,
+			root_cause TEXT NOT NULL,
+			applied_fix TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_incident_pod ON incident_history (namespace, pod_name);`,
+		`CREATE TABLE IF NOT EXISTS predictions (
+			id SERIAL PRIMARY KEY,
+			namespace VARCHAR(255) NOT NULL,
+			pod_name VARCHAR(255) NOT NULL,
+			last_alert_time TIMESTAMP NOT NULL,
+			last_growth_rate DOUBLE PRECISION NOT NULL,
+			UNIQUE(namespace, pod_name)
+		);`,
+	}
+	for _, q := range queries {
+		_, err := h.db.Exec(q)
+		if err != nil {
+			slog.Error("Failed to initialize database schema", "query", q, "error", err)
+		}
 	}
 }
 
@@ -154,5 +169,40 @@ func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, r
 func (h *historyCache) UpdatePatch(ctx context.Context, namespace, podName, patch string) {
 	if h.db != nil {
 		h.updatePatchDB(ctx, namespace, podName, patch)
+	}
+}
+
+func (h *historyCache) GetPredictionState(ctx context.Context, namespace, podName string) (*PredictionState, bool) {
+	if h.db == nil {
+		return nil, false
+	}
+
+	query := `SELECT last_alert_time, last_growth_rate FROM predictions WHERE namespace = $1 AND pod_name = $2`
+	var state PredictionState
+	err := h.db.QueryRowContext(ctx, query, namespace, podName).Scan(&state.LastAlertTime, &state.LastGrowthRate)
+	if err == sql.ErrNoRows {
+		return nil, false
+	} else if err != nil {
+		slog.Error("Failed to query prediction state", "error", err)
+		return nil, false
+	}
+
+	return &state, true
+}
+
+func (h *historyCache) UpdatePredictionState(ctx context.Context, namespace, podName string, alertTime time.Time, growthRate float64) {
+	if h.db == nil {
+		return
+	}
+
+	query := `
+		INSERT INTO predictions (namespace, pod_name, last_alert_time, last_growth_rate)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (namespace, pod_name)
+		DO UPDATE SET last_alert_time = EXCLUDED.last_alert_time, last_growth_rate = EXCLUDED.last_growth_rate
+	`
+	_, err := h.db.ExecContext(ctx, query, namespace, podName, alertTime, growthRate)
+	if err != nil {
+		slog.Error("Failed to update prediction state", "error", err)
 	}
 }

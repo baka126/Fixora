@@ -8,12 +8,14 @@ import (
 )
 
 type EvidenceChain struct {
-	MetricProof       string
-	ClusterContext    string
-	HistoricalPattern string
-	EventTimeline     string
-	RootCause         string
-	FinOpsImpact      string
+	MetricProof            string
+	ClusterContext         string
+	HistoricalPattern      string
+	EventTimeline          string
+	RootCause              string
+	FinOpsImpact           string
+	PredictiveWarning      bool
+	EstimatedHoursToOOM    float64
 }
 
 func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {

@@ -89,6 +89,20 @@ func (g *GeminiProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 	return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
 }
 
+func (g *GeminiProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (string, error) {
+	prompt := fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics)
+	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
+	if err != nil {
+		return "", err
+	}
+
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return "No predictive analysis generated", nil
+	}
+
+	return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
+}
+
 func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
 	prompt := fmt.Sprintf(PromptGeneratePatch,
 		string(currentContent), evidence)

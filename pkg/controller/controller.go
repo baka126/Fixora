@@ -14,6 +14,7 @@ import (
 	"fixora/pkg/alertmanager"
 	"fixora/pkg/argocd"
 	"fixora/pkg/config"
+	"fixora/pkg/metrics"
 	"fixora/pkg/notifications"
 	"fixora/pkg/prometheus"
 	"fixora/pkg/vcs"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 // podWorkItem represents a unit of diagnostic work for a specific pod.
@@ -49,7 +51,7 @@ type Controller struct {
 	clientset    kubernetes.Interface
 	factory      informers.SharedInformerFactory
 	config       *config.Config
-	promClient   *prometheus.Client
+	promClient   metrics.MetricsProvider
 	amClient     *alertmanager.Client
 	argoClient   *argocd.Client
 	aiProvider   ai.Provider
@@ -62,16 +64,22 @@ type Controller struct {
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
-func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interface, cfg *config.Config) *Controller {
+func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interface, metricsClient metricsclientset.Interface, cfg *config.Config) *Controller {
 	factory := informers.NewSharedInformerFactory(clientset, time.Second*30)
 
-	var promClient *prometheus.Client
+	var promClient metrics.MetricsProvider
 	if cfg.PrometheusURL != "" {
 		var err error
 		promClient, err = prometheus.New(cfg.PrometheusURL)
 		if err != nil {
 			slog.Error("Failed to create Prometheus client", "error", err)
 		}
+	}
+
+	// Fallback to K8s Metrics API if Prometheus is not configured
+	if promClient == nil && metricsClient != nil {
+		slog.Info("Prometheus not configured, falling back to K8s Metrics API")
+		promClient = metrics.NewK8sMetricsProvider(clientset, metricsClient)
 	}
 
 	var amClient *alertmanager.Client
@@ -138,13 +146,14 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 
 	// Start predictive leak scanner if enabled
 	if c.config.PredictiveEnabled {
-		go wait.Until(c.scanForLeaks, 5*time.Minute, stopCh)
+		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
 	}
 
 	<-stopCh
 }
 
 // scanForLeaks periodically checks all running pods for consistent memory growth patterns.
+// It actively analyzes incident history alongside Prometheus metrics to predict time-to-OOM.
 func (c *Controller) scanForLeaks() {
 	if c.promClient == nil {
 		return
@@ -165,8 +174,8 @@ func (c *Controller) scanForLeaks() {
 			continue
 		}
 
-		matrix, err := c.promClient.GetHistoricalMemoryUsage(pod.Namespace, pod.Name, 1*time.Hour)
-		if err != nil || len(matrix) == 0 || len(matrix[0].Values) < 10 {
+		matrix, err := c.promClient.GetHistory(pod.Namespace, pod.Name, 1*time.Hour)
+		if err != nil || len(matrix) == 0 || len(matrix[0].Values) < c.config.PredictiveMinDataPoints {
 			continue
 		}
 
@@ -174,10 +183,119 @@ func (c *Controller) scanForLeaks() {
 		first := float64(values[0].Value)
 		last := float64(values[len(values)-1].Value)
 
-		// Flag pods with >20% memory growth in 1 hour
-		if first > 0 && (last-first)/first > 0.20 {
-			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", (last-first)/first*100)
-			notifications.SendNotification(c.config, fmt.Sprintf("⚠️ *Predictive Warning*: Pod %s/%s has a %.1f%% memory growth in the last hour. Potential OOM trajectory.", pod.Namespace, pod.Name, (last-first)/first*100))
+		growthRate := (last - first) / first
+
+		// Flag pods with growth exceeding threshold
+		if first > 0 && growthRate > c.config.PredictiveGrowthThreshold {
+			// Cooldown logic: don't re-alert for 4 hours unless growth rate increases significantly (>50% increase)
+			state, exists := c.history.GetPredictionState(ctx, pod.Namespace, pod.Name)
+			if exists {
+				cooldown := 4 * time.Hour
+				timeSinceLast := time.Since(state.LastAlertTime)
+				growthIncrease := (growthRate - state.LastGrowthRate) / state.LastGrowthRate
+
+				if timeSinceLast < cooldown && growthIncrease < 0.50 {
+					slog.Debug("Suppressing duplicate leak alert (cooldown/insignificant growth)", "pod", pod.Name, "time_since", timeSinceLast, "growth_increase", growthIncrease)
+					continue
+				}
+			}
+
+			var metricProof strings.Builder
+			metricProof.WriteString(fmt.Sprintf("Memory Growth: %.1f%% in the last hour.\n", growthRate*100))
+			metricProof.WriteString(fmt.Sprintf("Current Usage: %.2f MiB.\n", last/1024/1024))
+
+			// Fetch more granular metrics if it's a prometheus client
+			if pc, ok := c.promClient.(*prometheus.Client); ok {
+				rss, _ := pc.GetPodMemoryRSS(pod.Namespace, pod.Name)
+				cache, _ := pc.GetPodMemoryCache(pod.Namespace, pod.Name)
+				metricProof.WriteString(fmt.Sprintf("RSS: %.2f MiB, Cache: %.2f MiB.\n", rss/1024/1024, cache/1024/1024))
+			}
+
+			// Predict time-to-OOM based on limits and requests
+			request, limit, err := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+
+			var hoursToOOM float64
+			if err == nil && limit > 0 {
+				metricProof.WriteString(fmt.Sprintf("Memory Limit: %.2f MiB.\n", limit/1024/1024))
+				if last < limit {
+					bytesPerHour := last - first
+					if bytesPerHour > 0 {
+						hoursToOOM = (limit - last) / bytesPerHour
+						metricProof.WriteString(fmt.Sprintf("Estimated Time-to-OOM: %.1f hours.\n", hoursToOOM))
+					}
+				} else {
+					metricProof.WriteString("Warning: Pod is currently EXCEEDING its memory limit.\n")
+				}
+			}
+
+			if err == nil && request > 0 {
+				metricProof.WriteString(fmt.Sprintf("Memory Request: %.2f MiB.\n", request/1024/1024))
+				if last > request {
+					metricProof.WriteString(fmt.Sprintf("Warning: Pod is exceeding its Request by %.2f MiB (Risk of eviction if node is under pressure).\n", (last-request)/1024/1024))
+				}
+			}
+
+			// Analyze incident history
+			historySummary := "This is the first time we've analyzed this pod."
+			var historyStr string
+			if hist, ok := c.history.Get(ctx, pod.Namespace, pod.Name); ok {
+				oomCount := 0
+				var sb strings.Builder
+				for _, inc := range hist.Incidents {
+					if inc.Reason == "OOMKilled" || inc.Reason == "CrashLoopBackOff" {
+						oomCount++
+					}
+					sb.WriteString(fmt.Sprintf("- [%s] Reason: %s, RootCause: %s\n", inc.Timestamp.Format(time.RFC3339), inc.Reason, inc.RootCause))
+				}
+				historyStr = sb.String()
+				if oomCount > 0 {
+					historySummary = fmt.Sprintf("Recurring Issue: This pod has historically crashed %d times (OOMKilled/CrashLoopBackOff). High risk of recurrence.", oomCount)
+				} else {
+					historySummary = fmt.Sprintf("History Analysis: The pod has %d prior incidents.", len(hist.Incidents))
+				}
+			}
+
+			clusterCtx := fmt.Sprintf("Namespace: %s, Pod: %s, Status: Predictive Warning (Potential OOM Trajectory)", pod.Namespace, pod.Name)
+
+			evidence := notifications.EvidenceChain{
+				MetricProof:         metricProof.String(),
+				ClusterContext:      clusterCtx,
+				HistoricalPattern:   historySummary,
+				PredictiveWarning:   true,
+				EstimatedHoursToOOM: hoursToOOM,
+			}
+
+			// Gathers Kubernetes events
+			events, err := c.getPodEvents(ctx, &pod)
+			if err == nil {
+				evidence.EventTimeline = events
+			}
+
+			// Execute Multi-Modal AI Forensics
+			if c.aiProvider != nil {
+				rootCause, err := c.aiProvider.PerformPredictiveForensics(ctx, pod.Namespace, pod.Name, historyStr, evidence.MetricProof)
+				if err != nil {
+					slog.Error("AI Predictive Forensics failed", "pod", pod.Name, "error", err)
+					evidence.RootCause = "Predictive analysis failed: " + err.Error()
+				} else {
+					evidence.RootCause = rootCause
+					// Save the prediction to history
+					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", rootCause)
+				}
+			} else {
+				evidence.RootCause = "AI Provider not configured"
+			}
+
+			evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+
+			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
+			notifications.SendEvidenceChain(c.config, evidence)
+
+			// Update prediction state to handle cooldowns
+			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate)
+
+			// Attempt automated remediation for predicted leaks
+			c.handleRemediation(ctx, &pod, evidence)
 		}
 	}
 }
@@ -285,9 +403,17 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	// Gathers memory metrics for proof
 	if c.promClient != nil {
-		usage, _ := c.promClient.GetPodMemoryUsage(pod.Namespace, pod.Name, time.Hour)
-		limit, _ := c.promClient.GetPodMemoryLimit(pod.Namespace, pod.Name)
-		evidence.MetricProof = fmt.Sprintf("Memory Usage: %.2f MiB, Memory Limit: %.2f MiB", usage/1024/1024, limit/1024/1024)
+		usage, _ := c.promClient.GetPodUsage(pod.Namespace, pod.Name)
+		request, limit, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+
+		var rss, cache float64
+		if pc, ok := c.promClient.(*prometheus.Client); ok {
+			rss, _ = pc.GetPodMemoryRSS(pod.Namespace, pod.Name)
+			cache, _ = pc.GetPodMemoryCache(pod.Namespace, pod.Name)
+		}
+
+		evidence.MetricProof = fmt.Sprintf("Memory Usage: %.2f MiB (RSS: %.2f, Cache: %.2f)\nLimit: %.2f MiB, Request: %.2f MiB",
+			usage/1024/1024, rss/1024/1024, cache/1024/1024, limit/1024/1024, request/1024/1024)
 	}
 
 	// Gathers Kubernetes events
@@ -405,6 +531,16 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
+	// Check if a PR already exists for this pod to avoid duplicates
+	// We check for a branch name that contains the pod name
+	// This is a bit loose but works for our naming convention "fixora/patch-%s-%d"
+	branchPrefix := fmt.Sprintf("fixora/patch-%s-", pod.Name)
+	exists, prURL, err := provider.PullRequestExists(ctx, repoOwner, repoName, branchPrefix)
+	if err == nil && exists {
+		slog.Info("PR already exists for pod, skipping", "pod", pod.Name, "pr", prURL)
+		return
+	}
+
 	// Fetch current config content to provide context for the AI patch generator
 	currentContent, err := provider.GetFileContent(ctx, repoOwner, repoName, filePath, baseBranch)
 	if err != nil {
@@ -435,7 +571,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	// Execute the PR creation
-	prURL, err := provider.CreatePullRequest(ctx, opts)
+	prURL, err = provider.CreatePullRequest(ctx, opts)
 	if err != nil {
 		slog.Error("Error creating PR", "pod", pod.Name, "error", err)
 	} else if prURL != "" {

@@ -72,23 +72,41 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		return nil
 	}
 
+	headerTitle := "Fixora: Forensic Diagnostic Report"
+	headerSubtitle := "Automated root cause analysis"
+
+	if evidence.PredictiveWarning {
+		headerTitle = "Fixora: Predictive Leak Warning"
+		headerSubtitle = "Memory growth trajectory detected"
+	}
+
+	mainWidgets := []GoogleChatWidget{
+		{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📊 Metric Proof</b><br>" + evidence.MetricProof}},
+	}
+
+	if evidence.PredictiveWarning && evidence.EstimatedHoursToOOM > 0 {
+		oomText := fmt.Sprintf("<b>⏳ Estimated Hours until OOM:</b> %.1f hours", evidence.EstimatedHoursToOOM)
+		mainWidgets = append(mainWidgets, GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: oomText}})
+	}
+
+	mainWidgets = append(mainWidgets,
+		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
+		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
+		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
+	)
+
 	payload := GoogleChatPayload{
 		CardsV2: []GoogleChatCardV2{
 			{
 				CardId: "forensic_report",
 				Card: GoogleChatCard{
 					Header: GoogleChatHeader{
-						Title:    "Fixora: Forensic Diagnostic Report",
-						Subtitle: "Automated root cause analysis",
+						Title:    headerTitle,
+						Subtitle: headerSubtitle,
 					},
 					Sections: []GoogleChatSection{
 						{
-							Widgets: []GoogleChatWidget{
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📊 Metric Proof</b><br>" + evidence.MetricProof}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
-							},
+							Widgets: mainWidgets,
 						},
 						{
 							Widgets: []GoogleChatWidget{
