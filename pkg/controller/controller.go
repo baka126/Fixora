@@ -415,8 +415,14 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 		rss, cache := c.getGranularMetrics(pod.Namespace, pod.Name)
 
-		evidence.MetricProof = fmt.Sprintf("Memory Usage: %.2f MiB (RSS: %.2f, Cache: %.2f)\nLimit: %.2f MiB, Request: %.2f MiB",
-			usage/1024/1024, rss/1024/1024, cache/1024/1024, limit/1024/1024, request/1024/1024)
+		metricSource := "Prometheus"
+		_, err := c.promClient.GetHistory(pod.Namespace, pod.Name, time.Hour)
+		if err != nil {
+			metricSource = "K8s API (Historical trend unavailable)"
+		}
+
+		evidence.MetricProof = fmt.Sprintf("Metric Source: %s\nMemory Usage: %.2f MiB (RSS: %.2f, Cache: %.2f)\nLimit: %.2f MiB, Request: %.2f MiB",
+			metricSource, usage/1024/1024, rss/1024/1024, cache/1024/1024, limit/1024/1024, request/1024/1024)
 	}
 
 	// Gathers Kubernetes events
