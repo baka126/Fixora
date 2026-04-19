@@ -72,6 +72,32 @@ func (c *Client) GetPodLimits(namespace, pod string) (float64, float64, error) {
 	return request, limit, nil
 }
 
+// GetPodCPULimits returns the CPU requests and limits for a pod.
+func (c *Client) GetPodCPULimits(namespace, pod string) (float64, float64, error) {
+	reqQuery := fmt.Sprintf(`sum(kube_pod_container_resource_requests{namespace="%s", pod="%s", resource="cpu"})`, namespace, pod)
+	limitQuery := fmt.Sprintf(`sum(kube_pod_container_resource_limits{namespace="%s", pod="%s", resource="cpu"})`, namespace, pod)
+
+	var request, limit float64
+
+	// Fetch Request
+	res, _, err := c.api.Query(context.TODO(), reqQuery, time.Now())
+	if err == nil {
+		if vector, ok := res.(model.Vector); ok && len(vector) > 0 {
+			request = float64(vector[0].Value)
+		}
+	}
+
+	// Fetch Limit
+	res, _, err = c.api.Query(context.TODO(), limitQuery, time.Now())
+	if err == nil {
+		if vector, ok := res.(model.Vector); ok && len(vector) > 0 {
+			limit = float64(vector[0].Value)
+		}
+	}
+
+	return request, limit, nil
+}
+
 // GetHistory returns historical memory usage matrix for a pod.
 func (c *Client) GetHistory(namespace, pod string, d time.Duration) (model.Matrix, error) {
 	query := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s", pod="%s", container!=""})`, namespace, pod)

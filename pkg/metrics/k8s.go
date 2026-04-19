@@ -61,6 +61,22 @@ func (p *K8sMetricsProvider) GetPodLimits(ns, podName string) (float64, float64,
 	return float64(totalRequests), float64(totalLimits), nil
 }
 
+// GetPodCPULimits calculates the CPU requests and limits by reading the Pod Spec.
+func (p *K8sMetricsProvider) GetPodCPULimits(ns, podName string) (float64, float64, error) {
+	pod, err := p.clientset.CoreV1().Pods(ns).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to fetch pod spec: %w", err)
+	}
+
+	var totalRequests, totalLimits float64
+	for _, container := range pod.Spec.Containers {
+		totalRequests += container.Resources.Requests.Cpu().AsApproximateFloat64()
+		totalLimits += container.Resources.Limits.Cpu().AsApproximateFloat64()
+	}
+
+	return totalRequests, totalLimits, nil
+}
+
 // GetHistory is not supported by the K8s Metrics API.
 func (p *K8sMetricsProvider) GetHistory(ns, pod string, d time.Duration) (model.Matrix, error) {
 	return nil, fmt.Errorf("historical metrics are not supported by the K8s Metrics API (use Prometheus for history)")

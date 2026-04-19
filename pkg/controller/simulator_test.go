@@ -16,6 +16,8 @@ type mockMetricsProvider struct {
 	usage      float64
 	limit      float64
 	request    float64
+	cpuLimit   float64
+	cpuRequest float64
 	historical model.Matrix
 }
 
@@ -24,6 +26,9 @@ func (m *mockMetricsProvider) GetPodUsage(ns, pod string) (float64, error) {
 }
 func (m *mockMetricsProvider) GetPodLimits(ns, pod string) (float64, float64, error) {
 	return m.request, m.limit, nil
+}
+func (m *mockMetricsProvider) GetPodCPULimits(ns, pod string) (float64, float64, error) {
+	return m.cpuRequest, m.cpuLimit, nil
 }
 func (m *mockMetricsProvider) GetHistory(ns, pod string, d time.Duration) (model.Matrix, error) {
 	return m.historical, nil

@@ -39,6 +39,15 @@ func (f *FallbackProvider) GetPodLimits(ns, pod string) (float64, float64, error
 	return req, lim, nil
 }
 
+// GetPodCPULimits attempts to get CPU limits from Primary, falling back to Secondary.
+func (f *FallbackProvider) GetPodCPULimits(ns, pod string) (float64, float64, error) {
+	req, lim, err := f.Primary.GetPodCPULimits(ns, pod)
+	if err != nil {
+		return f.Secondary.GetPodCPULimits(ns, pod)
+	}
+	return req, lim, nil
+}
+
 // GetHistory attempts to get history from Primary, falling back to Secondary.
 func (f *FallbackProvider) GetHistory(ns, pod string, d time.Duration) (model.Matrix, error) {
 	matrix, err := f.Primary.GetHistory(ns, pod, d)

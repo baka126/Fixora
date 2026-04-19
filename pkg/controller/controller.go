@@ -14,6 +14,7 @@ import (
 	"fixora/pkg/alertmanager"
 	"fixora/pkg/argocd"
 	"fixora/pkg/config"
+	"fixora/pkg/finops"
 	"fixora/pkg/metrics"
 	"fixora/pkg/notifications"
 	"fixora/pkg/prometheus"
@@ -293,7 +294,13 @@ func (c *Controller) scanForLeaks() {
 				evidence.RootCause = "AI Provider not configured"
 			}
 
-			evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+			// FinOps Impact estimation for leaks
+			cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
+			memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+			currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, finops.AWSDefaultProfile)
+			// Assume AI fix will increase memory by 20% or 256MiB for leak prevention if OOM is imminent
+			newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, finops.AWSDefaultProfile)
+			evidence.FinOpsImpact = fmt.Sprintf("%s AWS compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"))
 
 			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
 			notifications.SendEvidenceChain(c.config, evidence)
@@ -461,7 +468,17 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		evidence.RootCause = "AI Provider not configured"
 	}
 
-	evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+	// FinOps Impact estimation for OOMKilled/CrashLoopBackOff
+	if c.promClient != nil {
+		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
+		memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+		currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, finops.AWSDefaultProfile)
+		// Assume AI fix will increase memory by 256MiB
+		newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, finops.AWSDefaultProfile)
+		evidence.FinOpsImpact = fmt.Sprintf("%s AWS compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"))
+	} else {
+		evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+	}
 
 	// Sends the report to Slack
 	notifications.SendEvidenceChain(c.config, evidence)
