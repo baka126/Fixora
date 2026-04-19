@@ -44,6 +44,7 @@ type podWorkItem struct {
 type PendingFix struct {
 	Options      vcs.PullRequestOptions
 	VCSType      string
+	VCSToken     string // Token to use if namespace-specific
 	PodNamespace string
 	PodName      string
 }
