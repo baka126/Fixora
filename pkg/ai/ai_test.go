@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +46,18 @@ func TestCleanPatch(t *testing.T) {
 				t.Errorf("CleanPatch() = %v, want %v", string(got), string(tt.expected))
 			}
 		})
+	}
+}
+
+func TestNewProviderUnsupported(t *testing.T) {
+	provider, err := NewProvider("unsupported-provider", "key", "")
+	if provider != nil {
+		t.Fatalf("expected nil provider, got %#v", provider)
+	}
+	if err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+	if !strings.Contains(err.Error(), "unsupported AI provider") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

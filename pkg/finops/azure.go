@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 )
 
 type AzurePricingResponse struct {
@@ -21,13 +22,17 @@ type AzurePriceItem struct {
 }
 
 type AzurePricingClient struct {
-	cache map[string]*PricingProfile
-	mu    sync.RWMutex
+	cache      map[string]*PricingProfile
+	httpClient *http.Client
+	mu         sync.RWMutex
 }
 
 func NewAzurePricingClient() *AzurePricingClient {
 	return &AzurePricingClient{
 		cache: make(map[string]*PricingProfile),
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 }
 
@@ -49,7 +54,7 @@ func (c *AzurePricingClient) GetProfileForInstance(vendor, region, sku string) (
 	filter := fmt.Sprintf("armRegionName eq '%s' and armSkuName eq '%s' and serviceName eq 'Virtual Machines' and priceType eq 'Consumption'", region, sku)
 	endpoint := fmt.Sprintf("https://prices.azure.com/api/retail/prices?$filter=%s", url.QueryEscape(filter))
 
-	resp, err := http.Get(endpoint)
+	resp, err := c.httpClient.Get(endpoint)
 	if err != nil {
 		return nil, err
 	}

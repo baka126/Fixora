@@ -2,12 +2,13 @@ package server
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
-	"fmt"
 
 	"fixora/pkg/config"
 	"fixora/pkg/controller"
@@ -65,7 +66,7 @@ func (s *Server) handleGoogleChatInteractive(w http.ResponseWriter, r *http.Requ
 	// Request Verification (Basic for now, can be improved with JWT validation)
 	if s.config.WebhookToken != "" {
 		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer "+s.config.WebhookToken) {
+		if !matchesBearerToken(authHeader, s.config.WebhookToken) {
 			slog.Warn("Unauthorized Google Chat interactive attempt")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -136,6 +137,9 @@ func (s *Server) handleGoogleChatInteractive(w http.ResponseWriter, r *http.Requ
 	}
 
 	if function == "approve_remediation" {
+		if !s.ensureLeader(w) {
+			return
+		}
 		callbackID, _ := params["callback_id"].(string)
 		if callbackID != "" {
 			slog.Info("Google Chat remediation approved", "callback_id", callbackID)
@@ -158,11 +162,8 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		authorized = false
 
 		authHeader := r.Header.Get("Authorization")
-		if s.config.WebhookToken != "" && strings.HasPrefix(authHeader, "Bearer ") {
-			token := strings.TrimPrefix(authHeader, "Bearer ")
-			if token == s.config.WebhookToken {
-				authorized = true
-			}
+		if s.config.WebhookToken != "" && matchesBearerToken(authHeader, s.config.WebhookToken) {
+			authorized = true
 		}
 
 		if !authorized && s.config.WebhookUser != "" && s.config.WebhookPassword != "" {
@@ -176,6 +177,9 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	if !authorized {
 		slog.Warn("Unauthorized alert attempt")
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !s.ensureLeader(w) {
 		return
 	}
 
@@ -293,7 +297,10 @@ func (s *Server) handleInteractive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(payload.CallbackID, "patch-") {
+	if isPendingFixCallback(payload.CallbackID) {
+		if !s.ensureLeader(w) {
+			return
+		}
 		slog.Info("Patch generation approved", "callback_id", payload.CallbackID)
 		s.controller.SubmitPendingFix(r.Context(), payload.CallbackID)
 		w.WriteHeader(http.StatusOK)
@@ -311,4 +318,32 @@ func (s *Server) handleInteractive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func matchesBearerToken(authHeader, expectedToken string) bool {
+	if expectedToken == "" {
+		return false
+	}
+	const bearerPrefix = "Bearer "
+	if !strings.HasPrefix(authHeader, bearerPrefix) {
+		return false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
+	if len(token) != len(expectedToken) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1
+}
+
+func isPendingFixCallback(callbackID string) bool {
+	return strings.HasPrefix(callbackID, "fix-") || strings.HasPrefix(callbackID, "patch-")
+}
+
+func (s *Server) ensureLeader(w http.ResponseWriter) bool {
+	if s.controller.IsLeader() {
+		return true
+	}
+	w.Header().Set("Retry-After", "2")
+	http.Error(w, "standby replica: leader handles this request", http.StatusServiceUnavailable)
+	return false
 }

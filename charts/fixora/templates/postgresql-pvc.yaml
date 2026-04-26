@@ -1,0 +1,18 @@
+{{- if and .Values.features.predictive.enabled .Values.features.database.embedded.enabled (not .Values.features.database.host) .Values.features.database.embedded.storage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fixora.fullname" . }}-postgresql
+  labels:
+    {{- include "fixora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.features.database.embedded.storage.size | quote }}
+  {{- if .Values.features.database.embedded.storageClassName }}
+  storageClassName: {{ .Values.features.database.embedded.storageClassName | quote }}
+  {{- end }}
+{{- end }}

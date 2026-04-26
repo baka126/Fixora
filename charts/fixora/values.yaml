@@ -15,6 +15,7 @@ fullnameOverride: ""
 
 serviceAccount:
   create: true
+  automount: false
   annotations: {}
   name: ""
 
@@ -54,6 +55,16 @@ ai:
   apiKey: ""
 
 mode: "auto-fix" # Options: "auto-fix" (auto-PR), "click-to-fix" (manual approval via Slack/Chat), "dry-run" (report only)
+modePolicy:
+  approvalTTL: "24h"
+  autoFixMaxPRPerHour: 20
+  dryRunIncludePatch: true
+ha:
+  enabled: true
+  leaseName: "fixora-leader-election"
+  leaseDuration: "15s"
+  renewDeadline: "10s"
+  retryPeriod: "2s"
 
 webhook:
   token: ""
@@ -79,6 +90,17 @@ features:
     user: ""
     password: ""
     name: "fixora"
+    embedded:
+      enabled: true
+      image:
+        repository: postgres
+        tag: "16-alpine"
+        pullPolicy: IfNotPresent
+      storage:
+        enabled: true
+        size: 8Gi
+        storageClassName: ""
+      resources: {}
 
 # Gateway API support
 httpRoute:

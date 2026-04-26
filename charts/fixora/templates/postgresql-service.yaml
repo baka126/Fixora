@@ -1,0 +1,18 @@
+{{- if and .Values.features.predictive.enabled .Values.features.database.embedded.enabled (not .Values.features.database.host) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fixora.fullname" . }}-postgresql
+  labels:
+    {{- include "fixora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ include "fixora.fullname" . }}-postgresql
+{{- end }}

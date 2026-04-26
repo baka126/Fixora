@@ -1,0 +1,51 @@
+{{- if and .Values.features.predictive.enabled .Values.features.database.embedded.enabled (not .Values.features.database.host) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fixora.fullname" . }}-postgresql
+  labels:
+    {{- include "fixora.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fixora.fullname" . }}-postgresql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "fixora.fullname" . }}-postgresql
+        app.kubernetes.io/component: postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: "{{ .Values.features.database.embedded.image.repository }}:{{ .Values.features.database.embedded.image.tag }}"
+          imagePullPolicy: {{ .Values.features.database.embedded.image.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.features.database.name | quote }}
+            - name: POSTGRES_USER
+              value: {{ default "fixora" .Values.features.database.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: db-password
+          {{- if .Values.features.database.embedded.storage.enabled }}
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          {{- end }}
+          resources:
+            {{- toYaml .Values.features.database.embedded.resources | nindent 12 }}
+      {{- if .Values.features.database.embedded.storage.enabled }}
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: {{ include "fixora.fullname" . }}-postgresql
+      {{- end }}
+{{- end }}

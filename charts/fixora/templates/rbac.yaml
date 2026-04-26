@@ -19,6 +19,9 @@ rules:
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
   verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
 {{- if .Values.features.argocd.enabled }}
 - apiGroups: ["argoproj.io"]
   resources: ["applications"]

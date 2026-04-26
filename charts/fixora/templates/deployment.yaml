@@ -107,6 +107,26 @@ spec:
             {{- end }}
             - name: FIXORA_MODE
               value: {{ .Values.mode | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MODE_APPROVAL_TTL
+              value: {{ .Values.modePolicy.approvalTTL | quote }}
+            - name: MODE_AUTOFIX_MAX_PR_PER_HOUR
+              value: {{ .Values.modePolicy.autoFixMaxPRPerHour | quote }}
+            - name: MODE_DRY_RUN_INCLUDE_PATCH
+              value: {{ .Values.modePolicy.dryRunIncludePatch | quote }}
+            - name: HA_ENABLED
+              value: {{ if and .Values.ha.enabled (include "fixora.databaseEnabled" .) }}"true"{{ else }}"false"{{ end }}
+            - name: HA_LEASE_NAME
+              value: {{ .Values.ha.leaseName | quote }}
+            - name: HA_LEASE_DURATION
+              value: {{ .Values.ha.leaseDuration | quote }}
+            - name: HA_RENEW_DEADLINE
+              value: {{ .Values.ha.renewDeadline | quote }}
+            - name: HA_RETRY_PERIOD
+              value: {{ .Values.ha.retryPeriod | quote }}
             - name: ARGOCD_ENABLED
               value: {{ .Values.features.argocd.enabled | quote }}
             - name: ARGOCD_NAMESPACE
@@ -121,14 +141,25 @@ spec:
                   key: argocd-token
             {{- end }}
             - name: PREDICTIVE_ENABLED
-              value: {{ .Values.features.predictive.enabled | quote }}
+              value: {{ if and .Values.features.predictive.enabled (include "fixora.databaseEnabled" .) }}"true"{{ else }}"false"{{ end }}
+            {{- if .Values.features.database.host }}
             - name: DB_HOST
               value: {{ .Values.features.database.host | quote }}
+            {{- else if .Values.features.database.embedded.enabled }}
+            - name: DB_HOST
+              value: {{ printf "%s-postgresql" (include "fixora.fullname" .) | quote }}
+            {{- end }}
             - name: DB_PORT
               value: {{ .Values.features.database.port | quote }}
             - name: DB_USER
-              value: {{ .Values.features.database.user | quote }}
+              value: {{ default "fixora" .Values.features.database.user | quote }}
             {{- if .Values.features.database.password }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: db-password
+            {{- else if and .Values.features.predictive.enabled .Values.features.database.embedded.enabled }}
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:

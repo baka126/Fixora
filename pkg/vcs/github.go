@@ -3,6 +3,7 @@ package vcs
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/go-github/v50/github"
 	"golang.org/x/oauth2"
@@ -103,7 +104,8 @@ func (g *GitHubProvider) PullRequestExists(ctx context.Context, repoOwner, repoN
 	}
 
 	for _, pr := range prs {
-		if pr.Head.GetLabel() == headBranch || pr.Head.GetRef() == headBranch {
+		if pr.Head.GetLabel() == headBranch || pr.Head.GetRef() == headBranch ||
+			strings.HasPrefix(pr.Head.GetLabel(), headBranch) || strings.HasPrefix(pr.Head.GetRef(), headBranch) {
 			return true, pr.GetHTMLURL(), nil
 		}
 	}
