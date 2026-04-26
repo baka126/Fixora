@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +22,15 @@ type Config struct {
 	SlackChannel         string
 	GoogleChatWebhookURL string
 	Mode                 OperatingMode
+	ModeApprovalTTL      time.Duration
+	ModeAutoFixMaxPRPerHour int
+	ModeDryRunIncludePatch  bool
+	HAEnabled             bool
+	HALeaseName           string
+	HALeaseNamespace      string
+	HALeaseDuration       time.Duration
+	HARenewDeadline       time.Duration
+	HARetryPeriod         time.Duration
 	PrometheusURL        string
 	AlertmanagerURL      string
 	AlertmanagerEnabled  bool
@@ -58,17 +68,23 @@ type Config struct {
 }
 
 func Load() *Config {
-	mode := OperatingMode(os.Getenv("FIXORA_MODE"))
-	if mode == "" {
-		mode = AutoFix
-	}
+	mode := normalizeMode(os.Getenv("FIXORA_MODE"))
 
-	return &Config{
+	cfg := &Config{
 		SlackToken:           os.Getenv("SLACK_TOKEN"),
 		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
 		SlackChannel:         os.Getenv("SLACK_CHANNEL"),
 		GoogleChatWebhookURL: os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
 		Mode:                 mode,
+		ModeApprovalTTL:      getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),
+		ModeAutoFixMaxPRPerHour: getEnvInt("MODE_AUTOFIX_MAX_PR_PER_HOUR", 20),
+		ModeDryRunIncludePatch:  getEnvBool("MODE_DRY_RUN_INCLUDE_PATCH", true),
+		HAEnabled:            getEnvBool("HA_ENABLED", true),
+		HALeaseName:          getEnv("HA_LEASE_NAME", "fixora-leader-election"),
+		HALeaseNamespace:     getEnv("HA_LEASE_NAMESPACE", getEnv("POD_NAMESPACE", "default")),
+		HALeaseDuration:      getEnvDuration("HA_LEASE_DURATION", 15*time.Second),
+		HARenewDeadline:      getEnvDuration("HA_RENEW_DEADLINE", 10*time.Second),
+		HARetryPeriod:        getEnvDuration("HA_RETRY_PERIOD", 2*time.Second),
 		PrometheusURL:        os.Getenv("PROMETHEUS_URL"),
 		AlertmanagerURL:      os.Getenv("ALERTMANAGER_URL"),
 		AlertmanagerEnabled:  getEnvBool("ALERTMANAGER_ENABLED", true),
@@ -100,6 +116,32 @@ func Load() *Config {
 
 		InfracostAPIKey: os.Getenv("INFRACOST_API_KEY"),
 		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),
+	}
+
+	if cfg.DBHost == "" {
+		if cfg.HAEnabled {
+			slog.Warn("DBHost is not set, disabling HAEnabled as it requires a database for auditability")
+			cfg.HAEnabled = false
+		}
+		if cfg.PredictiveEnabled {
+			slog.Warn("DBHost is not set, disabling PredictiveEnabled as it requires a database for stateful tracking")
+			cfg.PredictiveEnabled = false
+		}
+	}
+
+	return cfg
+}
+
+func normalizeMode(mode string) OperatingMode {
+	switch OperatingMode(strings.TrimSpace(mode)) {
+	case ClickToFix:
+		return ClickToFix
+	case DryRun:
+		return DryRun
+	case AutoFix:
+		return AutoFix
+	default:
+		return AutoFix
 	}
 }
 

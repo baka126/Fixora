@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fixora/pkg/ai"
@@ -28,6 +30,8 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/util/workqueue"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 )
@@ -48,6 +52,7 @@ type PendingFix struct {
 	VCSToken     string // Token to use if namespace-specific
 	PodNamespace string
 	PodName      string
+	CreatedAt    time.Time
 }
 
 type Controller struct {
@@ -65,6 +70,10 @@ type Controller struct {
 	history         *historyCache
 	pendingFixes    map[string]PendingFix
 	pendingMu       sync.Mutex
+	autoFixPRTimes  []time.Time
+	autoFixMu       sync.Mutex
+	isLeader        atomic.Bool
+	leaderIdentity  string
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
@@ -117,7 +126,11 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 
 	var aiProvider ai.Provider
 	if cfg.AIProvider != "" && cfg.AIAPIKey != "" {
-		aiProvider, _ = ai.NewProvider(cfg.AIProvider, cfg.AIAPIKey, cfg.AIModel)
+		var err error
+		aiProvider, err = ai.NewProvider(cfg.AIProvider, cfg.AIAPIKey, cfg.AIModel)
+		if err != nil {
+			slog.Error("Failed to create AI provider", "provider", cfg.AIProvider, "error", err)
+		}
 	}
 
 	var ghProvider *vcs.GitHubProvider
@@ -148,11 +161,29 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
 		history:         newHistoryCache(cfg),
 		pendingFixes:    make(map[string]PendingFix),
+		leaderIdentity:  fmt.Sprintf("%s-%d", getHostname(), time.Now().UnixNano()),
 	}
+}
+
+func getHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		return "fixora"
+	}
+	return hostname
 }
 
 // Run starts the controller workers and informers.
 func (c *Controller) Run(stopCh <-chan struct{}) {
+	if c.config.HAEnabled {
+		c.runWithLeaderElection(stopCh)
+		return
+	}
+	c.isLeader.Store(true)
+	c.runLeaderWork(stopCh)
+}
+
+func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	defer c.queue.ShutDown()
 
 	podInformer := c.factory.Core().V1().Pods().Informer()
@@ -176,8 +207,52 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	if c.config.PredictiveEnabled {
 		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
 	}
+	go wait.Until(c.cleanupExpiredPendingFixes, time.Minute, stopCh)
 
 	<-stopCh
+}
+
+func (c *Controller) runWithLeaderElection(stopCh <-chan struct{}) {
+	identity := c.leaderIdentity
+	lock := &resourcelock.LeaseLock{
+		LeaseMeta: metav1.ObjectMeta{
+			Name:      c.config.HALeaseName,
+			Namespace: c.config.HALeaseNamespace,
+		},
+		Client: c.clientset.CoordinationV1(),
+		LockConfig: resourcelock.ResourceLockConfig{
+			Identity: identity,
+		},
+	}
+
+	leaderelection.RunOrDie(context.Background(), leaderelection.LeaderElectionConfig{
+		Lock:            lock,
+		ReleaseOnCancel: true,
+		LeaseDuration:   c.config.HALeaseDuration,
+		RenewDeadline:   c.config.HARenewDeadline,
+		RetryPeriod:     c.config.HARetryPeriod,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: func(ctx context.Context) {
+				slog.Info("Acquired leader lease", "identity", identity, "lease", c.config.HALeaseName, "namespace", c.config.HALeaseNamespace)
+				c.isLeader.Store(true)
+				c.history.RecordActionCheckpoint(ctx, identity, "AcquiredLeader", fmt.Sprintf("Lease %s/%s", c.config.HALeaseNamespace, c.config.HALeaseName))
+				c.runLeaderWork(ctx.Done())
+			},
+			OnStoppedLeading: func() {
+				c.isLeader.Store(false)
+				c.history.RecordActionCheckpoint(context.Background(), identity, "LostLeader", "Exiting for fast failover")
+				slog.Warn("Lost leader lease; exiting for fast failover", "identity", identity)
+				os.Exit(1)
+			},
+			OnNewLeader: func(current string) {
+				if current != identity {
+					c.isLeader.Store(false)
+				}
+				c.history.RecordActionCheckpoint(context.Background(), current, "ObservedNewLeader", "")
+				slog.Info("Leader election update", "leader", current, "self", identity)
+			},
+		},
+	})
 }
 
 // scanForLeaks periodically checks all running pods for consistent memory growth patterns.
@@ -505,6 +580,8 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
 	}
 
+	c.history.RecordActionCheckpoint(ctx, c.leaderIdentity, "CompletedDiagnostic", fmt.Sprintf("Pod %s/%s, Reason: %s", pod.Namespace, pod.Name, reason))
+
 	// Sends the report to Slack
 	notifications.SendEvidenceChain(c.config, evidence)
 
@@ -635,6 +712,10 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	// Generate the specific patch content using AI
+	if c.aiProvider == nil {
+		slog.Warn("Skipping remediation patch generation because AI provider is not configured", "pod", pod.Name)
+		return
+	}
 	newContent, err := c.aiProvider.GeneratePatch(ctx, currentContent, evidence.RootCause+"\n"+evidence.MetricProof)
 	if err != nil {
 		slog.Error("Failed to generate patch", "pod", pod.Name, "error", err)
@@ -656,20 +737,44 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		CommitMessage: "fix: automated resource adjustment by Fixora",
 	}
 
-	// Stash for interactive approval if in ClickToFix mode
-	if c.config.Mode == config.ClickToFix {
+	// Handle remediation behavior per operating mode
+	switch c.config.Mode {
+	case config.ClickToFix:
 		callbackID := fmt.Sprintf("fix-%d", time.Now().UnixNano())
-		c.pendingMu.Lock()
-		c.pendingFixes[callbackID] = PendingFix{
+		fix := PendingFix{
 			Options:      opts,
 			VCSType:      vcsType,
 			VCSToken:     token,
 			PodNamespace: pod.Namespace,
 			PodName:      pod.Name,
+			CreatedAt:    time.Now(),
 		}
-		c.pendingMu.Unlock()
+		if c.history != nil && c.history.HasDB() {
+			if err := c.history.SavePendingFix(ctx, callbackID, fix); err != nil {
+				slog.Error("Failed to persist pending fix", "callback_id", callbackID, "error", err)
+				return
+			}
+		} else {
+			c.pendingMu.Lock()
+			c.pendingFixes[callbackID] = fix
+			c.pendingMu.Unlock()
+		}
 
 		notifications.SendRemediationApproval(c.config, pod.Namespace, pod.Name, string(newContent), callbackID)
+		return
+	case config.DryRun:
+		slog.Info("Dry-run mode: skipping PR creation", "namespace", pod.Namespace, "pod", pod.Name)
+		msg := fmt.Sprintf("🧪 Dry-run: generated remediation for %s/%s (no PR created).", pod.Namespace, pod.Name)
+		if c.config.ModeDryRunIncludePatch {
+			msg = fmt.Sprintf("%s\n\nProposed patch preview:\n```yaml\n%s\n```", msg, truncateForPreview(string(newContent), 1200))
+		}
+		notifications.SendNotification(c.config, msg)
+		return
+	}
+
+	if !c.allowAutoFixPR() {
+		slog.Warn("Auto-fix PR rate limit reached, skipping PR creation", "namespace", pod.Namespace, "pod", pod.Name)
+		notifications.SendNotification(c.config, fmt.Sprintf("⏳ Auto-fix rate limit reached; skipped PR creation for %s/%s.", pod.Namespace, pod.Name))
 		return
 	}
 
@@ -684,21 +789,39 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 }
 
 func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
-	c.pendingMu.Lock()
-	fix, ok := c.pendingFixes[callbackID]
-	if ok {
-		delete(c.pendingFixes, callbackID)
+	var (
+		fix PendingFix
+		ok  bool
+		err error
+	)
+	if c.history != nil && c.history.HasDB() {
+		fix, ok, err = c.history.TakePendingFix(ctx, callbackID)
+		if err != nil {
+			slog.Error("Failed to retrieve pending fix", "id", callbackID, "error", err)
+			notifications.SendNotification(c.config, "❌ Failed to process pending remediation approval due to a storage error.")
+			return
+		}
+	} else {
+		c.pendingMu.Lock()
+		fix, ok = c.pendingFixes[callbackID]
+		if ok {
+			delete(c.pendingFixes, callbackID)
+		}
+		c.pendingMu.Unlock()
 	}
-	c.pendingMu.Unlock()
 
 	if !ok {
 		slog.Warn("No pending fix found for callback", "id", callbackID)
 		notifications.SendNotification(c.config, "⚠️ Could not find a pending fix for this approval. It may have expired or already been processed.")
 		return
 	}
+	if c.config.ModeApprovalTTL > 0 && time.Since(fix.CreatedAt) > c.config.ModeApprovalTTL {
+		slog.Warn("Pending fix approval expired", "id", callbackID, "namespace", fix.PodNamespace, "pod", fix.PodName)
+		notifications.SendNotification(c.config, fmt.Sprintf("⌛ Pending remediation approval expired for %s/%s.", fix.PodNamespace, fix.PodName))
+		return
+	}
 
 	var provider vcs.Provider
-	var err error
 	if fix.VCSToken != "" {
 		if fix.VCSType == "github" {
 			provider = vcs.NewGitHubProvider(fix.VCSToken)
@@ -881,3 +1004,73 @@ func (c *Controller) isVCSDomainTrusted(host string) bool {
 }
 
 func Int64Ptr(i int64) *int64 { return &i }
+
+func (c *Controller) IsLeader() bool {
+	if !c.config.HAEnabled {
+		return true
+	}
+	return c.isLeader.Load()
+}
+
+func (c *Controller) cleanupExpiredPendingFixes() {
+	if c.config.ModeApprovalTTL <= 0 {
+		return
+	}
+	if c.history != nil && c.history.HasDB() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := c.history.CleanupExpiredPendingFixes(ctx, c.config.ModeApprovalTTL); err != nil {
+			slog.Error("Failed to cleanup expired pending fixes from database", "error", err)
+		}
+		return
+	}
+	now := time.Now()
+	c.pendingMu.Lock()
+	for id, fix := range c.pendingFixes {
+		if now.Sub(fix.CreatedAt) > c.config.ModeApprovalTTL {
+			delete(c.pendingFixes, id)
+		}
+	}
+	c.pendingMu.Unlock()
+}
+
+func (c *Controller) allowAutoFixPR() bool {
+	maxPerHour := c.config.ModeAutoFixMaxPRPerHour
+	if maxPerHour <= 0 {
+		return true
+	}
+	if c.history != nil && c.history.HasDB() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		allowed, err := c.history.AllowAutoFixPR(ctx, maxPerHour)
+		if err != nil {
+			slog.Error("Failed to evaluate auto-fix rate limit in database", "error", err)
+			return false
+		}
+		return allowed
+	}
+	cutoff := time.Now().Add(-1 * time.Hour)
+	c.autoFixMu.Lock()
+	defer c.autoFixMu.Unlock()
+
+	kept := c.autoFixPRTimes[:0]
+	for _, ts := range c.autoFixPRTimes {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	c.autoFixPRTimes = kept
+
+	if len(c.autoFixPRTimes) >= maxPerHour {
+		return false
+	}
+	c.autoFixPRTimes = append(c.autoFixPRTimes, time.Now())
+	return true
+}
+
+func truncateForPreview(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n... [truncated]"
+}

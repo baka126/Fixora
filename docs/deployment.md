@@ -51,6 +51,14 @@ Fixora utilizes a hierarchical configuration model via `values.yaml` or injected
 | `slack.channel` | `SLACK_CHANNEL` | `string` | Target Slack channel ID or name (e.g., `#ops-diagnostics`). |
 | `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL (required for basic notifications). |
 | `mode` | `FIXORA_MODE` | `string` | Operating mode: `auto-fix`, `click-to-fix`, or `dry-run`. |
+| `modePolicy.approvalTTL` | `MODE_APPROVAL_TTL` | `duration` | Expiration window for `click-to-fix` approvals (e.g., `24h`). |
+| `modePolicy.autoFixMaxPRPerHour` | `MODE_AUTOFIX_MAX_PR_PER_HOUR` | `int` | Max PRs Fixora can create per hour in `auto-fix` mode (`0` = unlimited). |
+| `modePolicy.dryRunIncludePatch` | `MODE_DRY_RUN_INCLUDE_PATCH` | `boolean` | Include a truncated patch preview in `dry-run` notifications. |
+| `ha.enabled` | `HA_ENABLED` | `boolean` | Enables Kubernetes Lease-based leader election for HA replicas. |
+| `ha.leaseName` | `HA_LEASE_NAME` | `string` | Lease name used for leader election lock. |
+| `ha.leaseDuration` | `HA_LEASE_DURATION` | `duration` | Lease duration (e.g., `15s`). |
+| `ha.renewDeadline` | `HA_RENEW_DEADLINE` | `duration` | Leader renew deadline (e.g., `10s`). |
+| `ha.retryPeriod` | `HA_RETRY_PERIOD` | `duration` | Retry period for lease renew/acquire attempts. |
 | `ai.apiKey` | `AI_API_KEY` | `secret` | API Key for your designated LLM provider. |
 | `ai.provider` | `AI_PROVIDER` | `string` | Selected engine: `gemini`, `openai`, or `anthropic`. |
 | `ai.model` | `AI_MODEL` | `string` | (Optional) Specific model version (e.g., `gpt-4o-mini`). |
@@ -165,6 +173,11 @@ Depending on your `mode`:
 - **`auto-fix`**: Fixora will automatically create a remediation Pull Request.
 - **`click-to-fix`**: Fixora will provide an "Approve" button in the chat to trigger PR creation.
 - **`dry-run`**: Fixora will only report the findings without taking action.
+
+Mode policy controls:
+- **Approval TTL**: Pending `click-to-fix` approvals expire automatically after `modePolicy.approvalTTL`.
+- **Auto-fix PR budget**: `modePolicy.autoFixMaxPRPerHour` limits automated PR churn during noisy incidents.
+- **Dry-run preview**: `modePolicy.dryRunIncludePatch` controls whether a patch preview is posted with the report.
 
 ---
 

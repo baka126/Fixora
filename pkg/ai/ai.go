@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -42,7 +43,7 @@ func NewProvider(providerName, apiKey, modelName string) (Provider, error) {
 	case "anthropic":
 		return NewAnthropicProvider(apiKey, modelName)
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("unsupported AI provider: %s", providerName)
 	}
 }
 

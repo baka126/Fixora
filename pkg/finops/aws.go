@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 type InstancePricingResponse struct {
@@ -20,13 +21,17 @@ type InstancePricing struct {
 }
 
 type AWSPricingClient struct {
-	cache map[string]*PricingProfile
-	mu    sync.RWMutex
+	cache      map[string]*PricingProfile
+	httpClient *http.Client
+	mu         sync.RWMutex
 }
 
 func NewAWSPricingClient() *AWSPricingClient {
 	return &AWSPricingClient{
 		cache: make(map[string]*PricingProfile),
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 }
 
@@ -46,7 +51,7 @@ func (c *AWSPricingClient) GetProfileForInstance(vendor, region, instanceType st
 
 	// Fetch from API
 	url := fmt.Sprintf("https://go.runs-on.com/api/instances/%s?region=%s&platform=Linux/UNIX", instanceType, region)
-	resp, err := http.Get(url)
+	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +72,9 @@ func (c *AWSPricingClient) GetProfileForInstance(vendor, region, instanceType st
 
 	// Use the first result (usually region/AZ specific)
 	p := data.Results[0]
+	if p.Vcpus <= 0 || p.MemoryGiB <= 0 {
+		return nil, fmt.Errorf("invalid pricing dimensions for %s in %s: vcpus=%.2f memoryGiB=%.2f", instanceType, region, p.Vcpus, p.MemoryGiB)
+	}
 
 	// Derive CPU and Memory rates.
 	// Heuristic: Allocate 50% of instance cost to CPU and 50% to Memory.

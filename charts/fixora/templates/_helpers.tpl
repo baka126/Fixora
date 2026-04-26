@@ -60,3 +60,10 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Returns true if database is enabled (either embedded or external host is provided)
+*/}}
+{{- define "fixora.databaseEnabled" -}}
+{{- if or .Values.features.database.host .Values.features.database.embedded.enabled }}true{{- end }}
+{{- end }}
