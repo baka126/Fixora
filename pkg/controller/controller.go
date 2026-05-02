@@ -197,7 +197,7 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	defer c.queue.ShutDown()
 
 	podInformer := c.factory.Core().V1().Pods().Informer()
-	if !c.config.AlertmanagerEnabled {
+	if c.config.K8sWatcherEnabled {
 		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				c.enqueuePod(newObj)
@@ -218,12 +218,19 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	go wait.Until(c.runWorker, time.Second, stopCh)
 
 	// Start predictive leak scanner if enabled
-	if c.config.PredictiveEnabled {
+	if c.config.LeakScannerEnabled && c.config.PredictiveEnabled {
 		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
 	}
 
 	// Start application failure scanner (5xx and latency)
-	go wait.Until(c.scanForAppFailures, time.Minute, stopCh)
+	if c.config.PerformanceScannerEnabled {
+		go wait.Until(c.scanForAppFailures, 1*time.Minute, stopCh)
+	}
+
+	// Start Alertmanager scraper if enabled
+	if c.amClient != nil && c.config.AlertmanagerScraperEnabled {
+		go wait.Until(c.pullAlertsFromAlertmanager, 1*time.Minute, stopCh)
+	}
 
 	go wait.Until(c.cleanupExpiredPendingFixes, time.Minute, stopCh)
 
@@ -292,6 +299,10 @@ func (c *Controller) scanForLeaks() {
 
 	for _, pod := range pods.Items {
 		if pod.Status.Phase != v1.PodRunning {
+			continue
+		}
+
+		if !c.isNamespaceScoped(pod.Namespace) {
 			continue
 		}
 
@@ -431,48 +442,109 @@ func (c *Controller) scanForLeaks() {
 	}
 }
 
-// scanForAppFailures checks all running pods for high error rates or latency degradation.
+// scanForAppFailures checks for cluster-wide performance degradation using efficient bulk queries.
 func (c *Controller) scanForAppFailures() {
-	if c.promClient == nil {
+	bulk, ok := c.promClient.(metrics.BulkMetricsProvider)
+	if !ok {
+		slog.Debug("Prometheus provider does not support bulk queries; skipping performance scan")
 		return
 	}
 
-	slog.Info("Scanning for application performance degradation (5xx/Latency)")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	slog.Info("Performing bulk scan for application performance degradation (5xx/Latency)")
 
-	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	// 1. Bulk check for 5xx Error Rates
+	highErrorPods, err := bulk.GetHighErrorRatePods(c.config.PrometheusHighErrorRateThreshold)
+	if err == nil {
+		for _, p := range highErrorPods {
+			if !c.isNamespaceScoped(p.Namespace) {
+				continue
+			}
+			slog.Warn("Bulk scan: High HTTP error rate detected", "pod", p.PodName, "rate", fmt.Sprintf("%.2f%%", p.Value*100))
+			c.queue.Add(podWorkItem{
+				namespace: p.Namespace,
+				name:      p.PodName,
+				reason:    fmt.Sprintf("High Error Rate (%.1f%%)", p.Value*100),
+			})
+		}
+	} else {
+		slog.Error("Failed bulk query for error rates", "error", err)
+	}
+
+	// 2. Bulk check for P99 Latency
+	highLatencyPods, err := bulk.GetHighLatencyPods(c.config.PrometheusHighLatencyThreshold)
+	if err == nil {
+		for _, p := range highLatencyPods {
+			if !c.isNamespaceScoped(p.Namespace) {
+				continue
+			}
+			slog.Warn("Bulk scan: SLA breach - High latency detected", "pod", p.PodName, "p99", fmt.Sprintf("%.2fs", p.Value))
+			c.queue.Add(podWorkItem{
+				namespace: p.Namespace,
+				name:      p.PodName,
+				reason:    fmt.Sprintf("Latency Degradation (p99: %.2fs)", p.Value),
+			})
+		}
+	} else {
+		slog.Error("Failed bulk query for high latency", "error", err)
+	}
+}
+
+func (c *Controller) isNamespaceScoped(ns string) bool {
+	// If specific namespaces are included, check those first
+	if len(c.config.IncludedNamespaces) > 0 {
+		for _, included := range c.config.IncludedNamespaces {
+			if ns == included {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Otherwise check exclusions
+	for _, excluded := range c.config.ExcludedNamespaces {
+		if ns == excluded {
+			return false
+		}
+	}
+	return true
+}
+
+// pullAlertsFromAlertmanager scrapes active alerts from Alertmanager and triggers diagnostics for pod-related alerts.
+func (c *Controller) pullAlertsFromAlertmanager() {
+	if c.amClient == nil {
+		return
+	}
+
+	slog.Info("Scraping active alerts from Alertmanager")
+	alerts, err := c.amClient.GetAlerts()
 	if err != nil {
-		slog.Error("Failed to list pods for app failure scan", "error", err)
+		slog.Error("Failed to pull alerts from Alertmanager", "error", err)
 		return
 	}
 
-	for _, pod := range pods.Items {
-		if pod.Status.Phase != v1.PodRunning {
+	for _, alert := range alerts {
+		if alert.Status.State != "firing" {
 			continue
 		}
 
-		// Check 5xx Error Rate
-		errRate, err := c.promClient.GetHTTPErrorRate(pod.Namespace, pod.Name)
-		if err == nil && errRate > 0.05 { // 5% error rate threshold
-			slog.Warn("High HTTP error rate detected", "pod", pod.Name, "rate", fmt.Sprintf("%.2f%%", errRate*100))
-			c.queue.Add(podWorkItem{
-				namespace: pod.Namespace,
-				name:      pod.Name,
-				reason:    fmt.Sprintf("High Error Rate (%.1f%%)", errRate*100),
-			})
-			continue
-		}
+		ns := alert.Labels["namespace"]
+		pod := alert.Labels["pod"]
+		reason := alert.Labels["alertname"]
 
-		// Check P99 Latency
-		p99, err := c.promClient.GetP99Latency(pod.Namespace, pod.Name)
-		if err == nil && p99 > 2.0 { // 2 second SLA threshold
-			slog.Warn("SLA breach: High latency detected", "pod", pod.Name, "p99", fmt.Sprintf("%.2fs", p99))
-			c.queue.Add(podWorkItem{
-				namespace: pod.Namespace,
-				name:      pod.Name,
-				reason:    fmt.Sprintf("Latency Degradation (p99: %.2fs)", p99),
-			})
+		if ns != "" && pod != "" {
+			if !c.isNamespaceScoped(ns) {
+				continue
+			}
+
+			// Check history to avoid duplicate diagnostics for the same firing alert within a 30m window
+			ctx := context.Background()
+			if c.history.IsAlertRecentlyProcessed(ctx, ns, pod, reason, 30*time.Minute) {
+				continue
+			}
+
+			slog.Info("Alertmanager scraper triggered diagnostic", "pod", pod, "reason", reason)
+			c.DiagnosePodByName(ns, pod, reason)
+			c.history.MarkAlertProcessed(ctx, ns, pod, reason)
 		}
 	}
 }
@@ -480,6 +552,11 @@ func (c *Controller) scanForAppFailures() {
 // enqueuePod filters pod updates and adds problematic pods to the work queue.
 func (c *Controller) enqueuePod(obj interface{}) {
 	pod := obj.(*v1.Pod)
+
+	if !c.isNamespaceScoped(pod.Namespace) {
+		return
+	}
+
 	reason := ""
 
 	// Check for infrastructure/scheduling failures
