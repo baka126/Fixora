@@ -16,11 +16,13 @@ import (
 	"fixora/pkg/alertmanager"
 	"fixora/pkg/argocd"
 	"fixora/pkg/config"
+	"fixora/pkg/events"
 	"fixora/pkg/finops"
 	"fixora/pkg/metrics"
 	"fixora/pkg/notifications"
 	"fixora/pkg/prometheus"
 	"fixora/pkg/security"
+	"fixora/pkg/validation"
 	"fixora/pkg/vcs"
 	giturls "github.com/chainguard-dev/git-urls"
 	"k8s.io/api/core/v1"
@@ -68,6 +70,7 @@ type Controller struct {
 	glProvider      *vcs.GitLabProvider
 	queue           workqueue.RateLimitingInterface
 	history         *historyCache
+	eventStreamer   *events.EventStreamer
 	pendingFixes    map[string]PendingFix
 	pendingMu       sync.Mutex
 	autoFixPRTimes  []time.Time
@@ -147,6 +150,12 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		}
 	}
 
+	history := newHistoryCache(cfg)
+	var evtStreamer *events.EventStreamer
+	if history.HasDB() {
+		evtStreamer = events.NewEventStreamer(clientset, history.DB())
+	}
+
 	return &Controller{
 		clientset:       clientset,
 		factory:         factory,
@@ -159,7 +168,8 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		ghProvider:      ghProvider,
 		glProvider:      glProvider,
 		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "fixora"),
-		history:         newHistoryCache(cfg),
+		history:         history,
+		eventStreamer:   evtStreamer,
 		pendingFixes:    make(map[string]PendingFix),
 		leaderIdentity:  fmt.Sprintf("%s-%d", getHostname(), time.Now().UnixNano()),
 	}
@@ -195,6 +205,10 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 		})
 	}
 
+	if c.eventStreamer != nil {
+		c.eventStreamer.Start(c.factory, stopCh)
+	}
+
 	c.factory.Start(stopCh)
 	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {
 		return
@@ -207,6 +221,10 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	if c.config.PredictiveEnabled {
 		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
 	}
+
+	// Start application failure scanner (5xx and latency)
+	go wait.Until(c.scanForAppFailures, time.Minute, stopCh)
+
 	go wait.Until(c.cleanupExpiredPendingFixes, time.Minute, stopCh)
 
 	<-stopCh
@@ -370,21 +388,22 @@ func (c *Controller) scanForLeaks() {
 			}
 
 			// Gathers Kubernetes events
-			events, err := c.getPodEvents(ctx, &pod)
+			eventsTimeline, err := c.getPodEvents(ctx, &pod)
 			if err == nil {
-				evidence.EventTimeline = events
+				evidence.EventTimeline = eventsTimeline
 			}
 
 			// Execute Multi-Modal AI Forensics
 			if c.aiProvider != nil {
-				rootCause, err := c.aiProvider.PerformPredictiveForensics(ctx, pod.Namespace, pod.Name, historyStr, evidence.MetricProof)
+				aiResp, err := c.aiProvider.PerformPredictiveForensics(ctx, pod.Namespace, pod.Name, historyStr, evidence.MetricProof)
 				if err != nil {
 					slog.Error("AI Predictive Forensics failed", "pod", pod.Name, "error", err)
 					evidence.RootCause = "Predictive analysis failed: " + err.Error()
 				} else {
-					evidence.RootCause = rootCause
+					evidence.RootCause = aiResp.Analysis
+					evidence.AIConfidence = aiResp.Confidence
 					// Save the prediction to history
-					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", rootCause)
+					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", aiResp.Analysis)
 				}
 			} else {
 				evidence.RootCause = "AI Provider not configured"
@@ -398,6 +417,7 @@ func (c *Controller) scanForLeaks() {
 			// Assume AI fix will increase memory by 256MiB for leak prevention if OOM is imminent
 			newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
 			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
+			evidence.FinOpsDetails = fmt.Sprintf("Calculated using %s profile.\nCurrent: $%.2f/mo, Proposed: $%.2f/mo", pricingProfile.Name, currentCost, newCost)
 
 			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
 			notifications.SendEvidenceChain(c.config, evidence)
@@ -411,24 +431,109 @@ func (c *Controller) scanForLeaks() {
 	}
 }
 
-// enqueuePod filters pod updates and adds problematic pods to the work queue.
-func (c *Controller) enqueuePod(obj interface{}) {
-	pod := obj.(*v1.Pod)
-	for _, containerStatus := range pod.Status.ContainerStatuses {
-		reason := ""
-		if containerStatus.State.Waiting != nil && containerStatus.State.Waiting.Reason == "CrashLoopBackOff" {
-			reason = "CrashLoopBackOff"
-		} else if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.Reason == "OOMKilled" {
-			reason = "OOMKilled"
+// scanForAppFailures checks all running pods for high error rates or latency degradation.
+func (c *Controller) scanForAppFailures() {
+	if c.promClient == nil {
+		return
+	}
+
+	slog.Info("Scanning for application performance degradation (5xx/Latency)")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		slog.Error("Failed to list pods for app failure scan", "error", err)
+		return
+	}
+
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != v1.PodRunning {
+			continue
 		}
 
-		if reason != "" {
+		// Check 5xx Error Rate
+		errRate, err := c.promClient.GetHTTPErrorRate(pod.Namespace, pod.Name)
+		if err == nil && errRate > 0.05 { // 5% error rate threshold
+			slog.Warn("High HTTP error rate detected", "pod", pod.Name, "rate", fmt.Sprintf("%.2f%%", errRate*100))
 			c.queue.Add(podWorkItem{
 				namespace: pod.Namespace,
 				name:      pod.Name,
-				reason:    reason,
+				reason:    fmt.Sprintf("High Error Rate (%.1f%%)", errRate*100),
+			})
+			continue
+		}
+
+		// Check P99 Latency
+		p99, err := c.promClient.GetP99Latency(pod.Namespace, pod.Name)
+		if err == nil && p99 > 2.0 { // 2 second SLA threshold
+			slog.Warn("SLA breach: High latency detected", "pod", pod.Name, "p99", fmt.Sprintf("%.2fs", p99))
+			c.queue.Add(podWorkItem{
+				namespace: pod.Namespace,
+				name:      pod.Name,
+				reason:    fmt.Sprintf("Latency Degradation (p99: %.2fs)", p99),
 			})
 		}
+	}
+}
+
+// enqueuePod filters pod updates and adds problematic pods to the work queue.
+func (c *Controller) enqueuePod(obj interface{}) {
+	pod := obj.(*v1.Pod)
+	reason := ""
+
+	// Check for infrastructure/scheduling failures
+	if pod.Status.Phase == v1.PodPending {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == v1.PodScheduled && cond.Status == v1.ConditionFalse && cond.Reason == "Unschedulable" {
+				reason = "Pending (Unschedulable)"
+				break
+			}
+		}
+	}
+
+	// Check for node issues reflected on the pod
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
+			if cond.Reason == "NodeNotReady" {
+				reason = "NodeNotReady"
+				break
+			}
+		}
+	}
+
+	// Check container states for application and configuration errors
+	checkContainers := func(statuses []v1.ContainerStatus, prefix string) {
+		for _, status := range statuses {
+			if status.State.Waiting != nil {
+				r := status.State.Waiting.Reason
+				if r == "CrashLoopBackOff" || r == "CreateContainerConfigError" || r == "ImagePullBackOff" || r == "ErrImagePull" {
+					reason = prefix + r
+					return
+				}
+			} else if status.State.Terminated != nil {
+				r := status.State.Terminated.Reason
+				if r == "OOMKilled" {
+					reason = prefix + r
+					return
+				}
+			}
+		}
+	}
+
+	if reason == "" {
+		checkContainers(pod.Status.InitContainerStatuses, "Init:")
+	}
+	if reason == "" {
+		checkContainers(pod.Status.ContainerStatuses, "")
+	}
+
+	if reason != "" {
+		c.queue.Add(podWorkItem{
+			namespace: pod.Namespace,
+			name:      pod.Name,
+			reason:    reason,
+		})
 	}
 }
 
@@ -532,17 +637,38 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	}
 
 	// Gathers Kubernetes events
-	events, err := c.getPodEvents(ctx, pod)
+	eventsTimeline, err := c.getPodEvents(ctx, pod)
 	if err == nil {
-		evidence.EventTimeline = events
+		evidence.EventTimeline = eventsTimeline
 	}
 
 	// Execute Multi-Modal AI Forensics
 	var rootCause string
+	var logs string
 	if c.aiProvider != nil {
-		logs, err := c.getPodLogs(ctx, pod.Namespace, pod.Name)
+		var err error
+		logs, err = c.getPodLogs(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			slog.Warn("Error fetching logs", "pod", pod.Name, "error", err)
+		}
+
+		// Basic Stack Trace extraction for the interactive button
+		lines := strings.Split(logs, "\n")
+		var traceLines []string
+		inTrace := false
+		for _, line := range lines {
+			if strings.Contains(line, "stack trace:") || strings.Contains(line, "panic:") || strings.Contains(line, "goroutine") {
+				inTrace = true
+			}
+			if inTrace {
+				traceLines = append(traceLines, line)
+			}
+			if len(traceLines) > 50 {
+				break
+			}
+		}
+		if len(traceLines) > 0 {
+			evidence.StackTrace = strings.Join(traceLines, "\n")
 		}
 
 		forensicCtx := ai.ForensicContext{
@@ -550,24 +676,26 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			PodName:   pod.Name,
 			Reason:    reason,
 			Logs:      logs,
-			Events:    events,
+			Events:    eventsTimeline,
 			Metrics:   evidence.MetricProof,
 			History:   historyStr,
 		}
 
-		rootCause, err = c.aiProvider.PerformForensics(ctx, forensicCtx)
+		aiResp, err := c.aiProvider.PerformForensics(ctx, forensicCtx)
 		if err != nil {
 			slog.Error("AI Forensics failed", "pod", pod.Name, "error", err)
 			evidence.RootCause = "Forensic analysis failed: " + err.Error()
 		} else {
-			evidence.RootCause = rootCause
+			evidence.RootCause = aiResp.Analysis
+			evidence.AIConfidence = aiResp.Confidence
+			rootCause = aiResp.Analysis
 			c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause)
 		}
 	} else {
 		evidence.RootCause = "AI Provider not configured"
 	}
 
-	// FinOps Impact estimation for OOMKilled/CrashLoopBackOff
+	// FinOps Impact estimation
 	if c.promClient != nil {
 		pricingProfile := c.getPricingProfile(ctx, pod)
 		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
@@ -575,9 +703,28 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
 		// Assume AI fix will increase memory by 256MiB
 		newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
-		evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
+		
+		// Calculate CoD if applicable
+		var codStr string
+		errRate, _ := c.promClient.GetHTTPErrorRate(pod.Namespace, pod.Name)
+		p99, _ := c.promClient.GetP99Latency(pod.Namespace, pod.Name)
+		if errRate > 0 || p99 > 0 {
+			codStr = finops.CalculateCoD(errRate, 3600, c.config.RevenuePerRequest, p99*1000, c.config.LatencyThresholdMS, c.config.LatencyPenaltyPerHour)
+		}
+
+		if codStr != "" {
+			evidence.FinOpsImpact = fmt.Sprintf("%s. Infrastructure: %s/mo", codStr, finops.FormatImpact(currentCost, newCost, "$"))
+		} else {
+			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
+		}
+		evidence.FinOpsDetails = fmt.Sprintf("FinOps Breakdown:\n- Provider: %s\n- Current Infra Cost: $%.2f/mo\n- Projected Infra Cost: $%.2f/mo\n- Change: %s\n- CoD Analysis: %s", 
+			pricingProfile.Name, currentCost, newCost, finops.FormatImpact(currentCost, newCost, "$"), codStr)
 	} else {
 		evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
+	}
+
+	if c.config.Mode == config.ClickToFix {
+		evidence.ShowFixButton = true
 	}
 
 	c.history.RecordActionCheckpoint(ctx, c.leaderIdentity, "CompletedDiagnostic", fmt.Sprintf("Pod %s/%s, Reason: %s", pod.Namespace, pod.Name, reason))
@@ -716,18 +863,38 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		slog.Warn("Skipping remediation patch generation because AI provider is not configured", "pod", pod.Name)
 		return
 	}
-	newContent, err := c.aiProvider.GeneratePatch(ctx, currentContent, evidence.RootCause+"\n"+evidence.MetricProof)
+	aiResp, err := c.aiProvider.GeneratePatch(ctx, currentContent, evidence.RootCause+"\n"+evidence.MetricProof)
 	if err != nil {
 		slog.Error("Failed to generate patch", "pod", pod.Name, "error", err)
 		return
 	}
+
+	newContent := []byte(aiResp.Patch)
+	evidence.AIConfidence = aiResp.Confidence
+
+	// Pre-Flight Validation Sandbox
+	slog.Info("Running pre-flight validation on proposed fix", "pod", pod.Name)
+	var vResult validation.ValidationResult
+	if strings.Contains(filePath, "values.yaml") {
+		vResult = validation.ValidateYAML(newContent)
+	} else {
+		// Generic manifest validation
+		vResult = validation.ValidateManifest(newContent)
+	}
+
+	if !vResult.Valid {
+		slog.Error("Pre-flight validation failed; aborting remediation", "pod", pod.Name, "error", vResult.Error, "output", vResult.Output)
+		notifications.SendNotification(c.config, fmt.Sprintf("❌ Pre-flight validation failed for %s/%s. Fixora will not open a PR.\nError: %s", pod.Namespace, pod.Name, vResult.Output))
+		return
+	}
+	slog.Info("Pre-flight validation successful", "pod", pod.Name)
 
 	c.history.UpdatePatch(ctx, pod.Namespace, pod.Name, string(newContent))
 
 	branchName := fmt.Sprintf("fixora/patch-%s-%d", pod.Name, time.Now().Unix())
 	opts := vcs.PullRequestOptions{
 		Title:         fmt.Sprintf("Fixora: Automated Fix for %s/%s", pod.Namespace, pod.Name),
-		Body:          fmt.Sprintf("### Evidence Chain\n\n* **Root Cause:** %s\n* **Metric Proof:** %s\n\nGenerated by Fixora.", evidence.RootCause, evidence.MetricProof),
+		Body:          fmt.Sprintf("### Evidence Chain\n\n* **Root Cause:** %s\n* **Metric Proof:** %s\n* **AI Confidence:** %d%%\n\nGenerated by Fixora.", evidence.RootCause, evidence.MetricProof, aiResp.Confidence),
 		Head:          branchName,
 		Base:          baseBranch,
 		RepoOwner:     repoOwner,
@@ -737,8 +904,15 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		CommitMessage: "fix: automated resource adjustment by Fixora",
 	}
 
+	// Determine active mode based on AI confidence
+	effectiveMode := c.config.Mode
+	if aiResp.Confidence < 85 && effectiveMode == config.AutoFix {
+		slog.Warn("AI Confidence below 85%, downgrading from AutoFix to DryRun", "pod", pod.Name, "confidence", aiResp.Confidence)
+		effectiveMode = config.DryRun
+	}
+
 	// Handle remediation behavior per operating mode
-	switch c.config.Mode {
+	switch effectiveMode {
 	case config.ClickToFix:
 		callbackID := fmt.Sprintf("fix-%d", time.Now().UnixNano())
 		fix := PendingFix{
@@ -765,6 +939,9 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	case config.DryRun:
 		slog.Info("Dry-run mode: skipping PR creation", "namespace", pod.Namespace, "pod", pod.Name)
 		msg := fmt.Sprintf("🧪 Dry-run: generated remediation for %s/%s (no PR created).", pod.Namespace, pod.Name)
+		if aiResp.Confidence < 85 {
+			msg = fmt.Sprintf("⚠️ Low AI Confidence (%d%%): %s", aiResp.Confidence, msg)
+		}
 		if c.config.ModeDryRunIncludePatch {
 			msg = fmt.Sprintf("%s\n\nProposed patch preview:\n```yaml\n%s\n```", msg, truncateForPreview(string(newContent), 1200))
 		}
@@ -915,7 +1092,7 @@ func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) 
 }
 
 func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, error) {
-	events, err := c.clientset.CoreV1().Events(pod.Namespace).List(ctx, metav1.ListOptions{
+	eventsTimeline, err := c.clientset.CoreV1().Events(pod.Namespace).List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.namespace=%s", pod.Name, pod.Namespace),
 	})
 	if err != nil {
@@ -925,10 +1102,10 @@ func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, err
 	var sb strings.Builder
 	limit := 50
 	start := 0
-	if len(events.Items) > limit {
-		start = len(events.Items) - limit
+	if len(eventsTimeline.Items) > limit {
+		start = len(eventsTimeline.Items) - limit
 	}
-	for _, event := range events.Items[start:] {
+	for _, event := range eventsTimeline.Items[start:] {
 		scrubbedMessage := security.ScrubPII(event.Message)
 		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, scrubbedMessage))
 	}

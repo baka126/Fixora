@@ -1,22 +1,28 @@
-# Build stage
-FROM golang:1.25.5-alpine AS builder
+# Multi-stage build for Fixora
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
-
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+RUN go build -o fixora ./cmd/fixora/main.go
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o fixora ./cmd/fixora
+# Production Stage
+FROM alpine:3.20
 
-# Final stage
-FROM gcr.io/distroless/static-debian11
+# Install mandatory tools for Pre-Flight Validation Sandbox
+RUN apk add --no-cache \
+    kubectl \
+    helm \
+    ca-certificates \
+    tzdata
 
-WORKDIR /
-
+WORKDIR /app
 COPY --from=builder /app/fixora .
 
-USER 65532:65532
+# Run as non-root for security
+RUN adduser -D fixora
+USER fixora
 
-ENTRYPOINT ["/fixora"]
+ENTRYPOINT ["./fixora"]

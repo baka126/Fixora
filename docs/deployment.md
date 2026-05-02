@@ -1,71 +1,52 @@
 # Deploying Fixora
 
-Fixora is an enterprise-grade diagnostic platform that acts as an intelligent webhook receiver for Prometheus Alertmanager. It intercepts critical Kubernetes cluster alerts (e.g., `OOMKilled`, `CrashLoopBackOff`), executes context-aware AI analysis against cluster states, and generates automated Pull Requests for immediate remediation.
+Fixora is an "Omni-Aware" enterprise-grade diagnostic platform that acts as an intelligent forensic detective for your Kubernetes clusters. It monitors real-time event streams and Prometheus alerts to diagnose any failure scenario, providing an Evidence Chain and automated GitOps remediation.
 
 ---
 
 ## 1. System Prerequisites
 
-Ensure your infrastructure meets the following requirements before initiating the deployment:
+Ensure your infrastructure meets the following requirements:
 
 ### A. Communication & Alerting
-* **Slack Workspace (Optional):** Create a Slack App via [api.slack.com](https://api.slack.com/apps).
-    * Requires `chat:write` OAuth scope.
-    * Capture the **Bot User OAuth Token** (`xoxb-...`) and the **Signing Secret** for request verification.
-* **Google Workspace (Optional):** Enable a **Webhook** in a Google Chat space.
-    * Capture the **Webhook URL**.
-* **Prometheus Stack:** A functional `kube-prometheus-stack` or standalone Alertmanager instance routing to your cluster.
+* **Slack Workspace (Optional):** Create a Slack App with `chat:write` and `commands` scopes for interactive triage trees.
+* **Google Workspace (Optional):** Enable a Webhook or configure a Chat App for interactive cards.
+* **Prometheus Stack:** A functional `kube-prometheus-stack` routing alerts to Fixora.
 
-### B. LLM Provider Credentials
-Fixora requires an active API key from a supported LLM provider:
-* **Google Gemini** (Default): Provision at [Google AI Studio](https://aistudio.google.com/).
-* **OpenAI**: Provision at [OpenAI Platform](https://platform.openai.com/).
-* **Anthropic**: Provision at [Anthropic Console](https://console.anthropic.com/).
+### B. Persistent Storage (PostgreSQL)
+Fixora now uses a dedicated PostgreSQL database to persist incident history, resolutions, and dependency graphs. 
+* **Managed Database:** (Recommended) AWS RDS, GCP Cloud SQL, etc.
+* **Embedded Database:** The Helm chart can deploy an internal PostgreSQL instance for testing.
 
-### C. Version Control Authentication (Optional)
-To enable automated GitOps remediation (Pull Request generation), provide a Personal Access Token (PAT) with appropriate scopes:
-* **GitHub:** `repo` scope.
-* **GitLab:** `api` scope.
+### C. Validation Sandbox
+To support **Pre-Flight Validation**, the Fixora pod environment must have access to:
+* `kubectl`: For running `kubectl diff`.
+* `helm`: For running `helm template`.
+These are included in the default Fixora image.
+
+### D. LLM Provider Credentials
+* **Google Gemini**, **OpenAI**, or **Anthropic** API keys.
 
 ---
 
 ## 2. Cluster RBAC Requirements
 
-Fixora requires specific Role-Based Access Control (RBAC) permissions to inspect failing pods, fetch logs, and query replica sets. 
-
-The Helm chart provisions a `ServiceAccount`, `ClusterRole`, and `ClusterRoleBinding` by default. If deploying manually, ensure Fixora has `get`, `list`, and `watch` permissions on the following resources:
+Fixora requires permissions to watch the K8s Event stream and inspect resources. The Helm chart provisions these, but for manual setups ensure `get`, `list`, and `watch` on:
 * `pods`, `pods/log`
 * `deployments`, `statefulsets`, `daemonsets`, `replicasets`
-* `events`
+* `events` (Critical for Omni-Aware streaming)
+* `nodes` (For node-failure diagnostics)
 
 ---
 
 ## 3. Configuration Parameters
 
-Fixora utilizes a hierarchical configuration model via `values.yaml` or injected environment variables.
-
 | Helm Value | Environment Variable | Type | Description |
 | :--- | :--- | :--- | :--- |
-| `slack.token` | `SLACK_TOKEN` | `string` | Slack Bot User OAuth Token (`xoxb-`). |
-| `slack.signingSecret` | `SLACK_SIGNING_SECRET` | `secret` | Slack App Signing Secret for request verification. |
-| `slack.channel` | `SLACK_CHANNEL` | `string` | Target Slack channel ID or name (e.g., `#ops-diagnostics`). |
-| `googleChat.webhookUrl` | `GOOGLE_CHAT_WEBHOOK_URL` | `string` | Google Chat incoming webhook URL (required for basic notifications). |
-| `mode` | `FIXORA_MODE` | `string` | Operating mode: `auto-fix`, `click-to-fix`, or `dry-run`. |
-| `modePolicy.approvalTTL` | `MODE_APPROVAL_TTL` | `duration` | Expiration window for `click-to-fix` approvals (e.g., `24h`). |
-| `modePolicy.autoFixMaxPRPerHour` | `MODE_AUTOFIX_MAX_PR_PER_HOUR` | `int` | Max PRs Fixora can create per hour in `auto-fix` mode (`0` = unlimited). |
-| `modePolicy.dryRunIncludePatch` | `MODE_DRY_RUN_INCLUDE_PATCH` | `boolean` | Include a truncated patch preview in `dry-run` notifications. |
-| `ha.enabled` | `HA_ENABLED` | `boolean` | Enables Kubernetes Lease-based leader election for HA replicas. |
-| `ha.leaseName` | `HA_LEASE_NAME` | `string` | Lease name used for leader election lock. |
-| `ha.leaseDuration` | `HA_LEASE_DURATION` | `duration` | Lease duration (e.g., `15s`). |
-| `ha.renewDeadline` | `HA_RENEW_DEADLINE` | `duration` | Leader renew deadline (e.g., `10s`). |
-| `ha.retryPeriod` | `HA_RETRY_PERIOD` | `duration` | Retry period for lease renew/acquire attempts. |
-| `ai.apiKey` | `AI_API_KEY` | `secret` | API Key for your designated LLM provider. |
-| `ai.provider` | `AI_PROVIDER` | `string` | Selected engine: `gemini`, `openai`, or `anthropic`. |
-| `ai.model` | `AI_MODEL` | `string` | (Optional) Specific model version (e.g., `gpt-4o-mini`). |
-| `webhook.token` | `WEBHOOK_TOKEN` | `secret` | (Optional) Bearer token for securing the Alertmanager endpoint. |
-| `alertmanager.enabled` | `ALERTMANAGER_ENABLED` | `boolean` | (Optional) Toggles whether to listen for Alertmanager webhooks or watch pods directly. |
-| `features.argocd.enabled` | `ARGOCD_ENABLED` | `boolean` | Toggles automatic repository discovery via ArgoCD API. |
-| `features.database.host`| `DB_HOST` | `string` | Postgres Database Host for persisting incident history. |
+| `mode` | `FIXORA_MODE` | `string` | `auto-fix`, `click-to-fix`, or `dry-run`. |
+| `ai.confidenceThreshold`| `AI_CONFIDENCE_THRESHOLD` | `float` | Confidence score required for Auto-PR (Default: `0.85`). |
+| `features.database.host`| `DB_HOST` | `string` | Postgres Database Host (Mandatory for stateful analysis). |
+| `finops.costOfDowntimePerHour`| `FINOPS_COD_PER_HOUR` | `float` | Estimated revenue loss per hour of application downtime. |
 | `finops.infracostAPIKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
 
 ---
@@ -76,7 +57,7 @@ Deploying via the official Helm chart is the recommended standard for production
 
 ```bash
 # 1. Clone the repository
-git clone [https://github.com/baka126/fixora.git](https://github.com/baka126/fixora.git)
+git clone https://github.com/baka126/fixora.git
 cd fixora
 
 # 2. Create a custom configuration file
@@ -94,8 +75,9 @@ mode: "click-to-fix"
 features:
   argocd:
     enabled: true
-  history:
-    crdEnabled: true
+  database:
+    embedded:
+      enabled: true
 EOF
 
 # 3. Deploy the chart
@@ -103,9 +85,41 @@ helm upgrade --install fixora ./charts/fixora \
   --namespace fixora \
   --create-namespace \
   -f fixora-values.yaml
-
 ```
-## 4. Connecting Alertmanager
+
+---
+
+## 5. Next-Gen ChatOps Interactivity
+
+Fixora alerts now feature **Interactive Triage Trees**. In Slack or Google Chat, you will see dynamic buttons:
+
+1.  **[Show Stack Trace]**: Deciphers raw logs into a plain-English summary.
+2.  **[View FinOps Impact]**: Displays a modal with the CoD (Cost of Downtime) and resource cost changes.
+3.  **[Simulate PR]**: Performs a dry-run validation using the sandbox tools.
+4.  **[Execute Fix]**: (In `click-to-fix` mode) Triggers the GitOps PR creation.
+
+> **Note:** For Google Chat interactivity, follow the "Google Chat App Interactivity" section below.
+
+---
+
+## 6. Omni-Aware Trigger Mechanisms
+
+Fixora identifies failures across multiple domains:
+- **K8s Event Watcher**: Real-time detection of `SchedulingFailed`, `NodeNotReady`, or `ImagePullBackOff`.
+- **Alertmanager Webhook**: Ingests JSON payloads for standard Prometheus alerts.
+- **Dependency Mapping**: Automatically links failing pods to their parent controllers and source Git repositories.
+
+---
+
+## 7. FinOps & Cost of Downtime (CoD)
+
+Fixora helps align engineering with business value by calculating the **Cost of Downtime**. Configure this by setting `finops.costOfDowntimePerHour` in your `values.yaml`. 
+
+Example: If your app generates $5,000/hour, Fixora will highlight the potential $5,000 loss during an outage, providing clear justification for immediate remediation.
+
+---
+
+## 8. Connecting Alertmanager
 
 Fixora acts as an Alertmanager **receiver**. You must configure your Alertmanager to send firing alerts to Fixora's `/alerts` endpoint.
 
@@ -115,7 +129,7 @@ Update your `alertmanager.yaml` or `AlertmanagerConfig` CRD:
 receivers:
   - name: 'fixora-analyzer'
     webhook_configs:
-      - url: '[http://fixora.fixora.svc.cluster.local:8080/alerts](http://fixora.fixora.svc.cluster.local:8080/alerts)'
+      - url: 'http://fixora.fixora.svc.cluster.local:8080/alerts'
         send_resolved: false
         http_config:
           bearer_token: 'your-webhook-token-here' # Must match WEBHOOK_TOKEN
@@ -133,7 +147,7 @@ route:
 
 ---
 
-## 5. Enabling GitOps Remediation
+## 9. Enabling GitOps Remediation
 
 Fixora can discover which Git repository manages a Pod in two ways:
 
@@ -147,14 +161,14 @@ Add these annotations to your Deployment or Pod template:
 annotations:
 metadata:
   annotations:
-    fixora.io/repo-url: "[https://github.com/my-org/core-services](https://github.com/my-org/core-services)"
+    fixora.io/repo-url: "https://github.com/my-org/core-services"
     fixora.io/repo-path: "helm/values/production.yaml"
     fixora.io/vcs-type: "github"
 ```
 
 ---
 
-## 6. Verification
+## 10. Verification
 
 Once deployed, you can verify Fixora is running by checking the logs:
 
@@ -174,14 +188,9 @@ Depending on your `mode`:
 - **`click-to-fix`**: Fixora will provide an "Approve" button in the chat to trigger PR creation.
 - **`dry-run`**: Fixora will only report the findings without taking action.
 
-Mode policy controls:
-- **Approval TTL**: Pending `click-to-fix` approvals expire automatically after `modePolicy.approvalTTL`.
-- **Auto-fix PR budget**: `modePolicy.autoFixMaxPRPerHour` limits automated PR churn during noisy incidents.
-- **Dry-run preview**: `modePolicy.dryRunIncludePatch` controls whether a patch preview is posted with the report.
-
 ---
 
-## 7. Advanced Configuration
+## 11. Advanced Configuration
 
 ### A. Multi-Tenant VCS Support
 By default, Fixora uses the global `GITHUB_TOKEN` or `GITLAB_TOKEN`. For multi-tenant clusters, you can provide namespace-specific credentials by creating a Secret named `fixora-vcs` in the target namespace:
@@ -213,7 +222,7 @@ Fixora is designed with privacy in mind. Before sending any logs to AI providers
 
 ---
 
-## 8. Google Chat App Interactivity (Optional)
+## 12. Google Chat App Interactivity (Optional)
 
 To enable interactive features in Google Chat (like the **"Approve"** button or the **"View Logs"** explorer), you must configure Fixora as a **Google Chat App** instead of using a simple incoming webhook.
 

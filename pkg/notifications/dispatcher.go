@@ -19,6 +19,13 @@ type EvidenceChain struct {
 	FinOpsImpact           string
 	PredictiveWarning      bool
 	EstimatedHoursToOOM    float64
+	AIConfidence           int
+
+	// New fields for interactive triage
+	StackTrace    string
+	FinOpsDetails string
+	ShowFixButton bool
+	ShowPRButton  bool
 }
 
 func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
@@ -29,6 +36,8 @@ func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 	evidence.EventTimeline = security.ScrubPII(evidence.EventTimeline)
 	evidence.RootCause = security.ScrubPII(evidence.RootCause)
 	evidence.FinOpsImpact = security.ScrubPII(evidence.FinOpsImpact)
+	evidence.StackTrace = security.ScrubPII(evidence.StackTrace)
+	evidence.FinOpsDetails = security.ScrubPII(evidence.FinOpsDetails)
 
 	var errs []string
 

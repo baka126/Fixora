@@ -2,23 +2,36 @@
 
 > AI-Powered K8s Forensic Detective
 
-Fixora is a Read-Only Slackbot and diagnostic platform tailored for DevOps and platform teams. It focuses exclusively on diagnosing and safely remediating `OOMKilled` (Exit 137) and `CrashLoopBackOff` events in Kubernetes.
+Fixora is an "Omni-Aware" diagnostics platform and Slack/Google Chat bot tailored for DevOps and platform teams. It acts as an **Enterprise Reliability Platform**, emphasizing zero-trust security, undeniable mathematical evidence, and safe, isolated remediation.
 
 ## 🚀 Quick Links
 
 * [**Deployment Guide**](deployment.md) - Get Fixora running in your cluster.
-* [**Overview**](/) - Learn about the core architecture and features.
+* [**Architecture & Philosophy**](#core-architecture--philosophy) - Understand the design principles.
+
+## Core Architecture & Philosophy
+
+### Zero-Trust Security
+Fixora emphasizes minimal privileges. It securely queries APIs (Prometheus, K8s Metrics, K8s Event stream) without requiring direct, inbound production access.
+
+### The Evidence Chain
+AI alone is not trusted. Alerts follow a rigorous visual logic tree:
+`[Metric Proof] + [Dependency Graph Context] + [Historical Pattern] = [Root Cause] & [Confidence Score]`
+
+### FinOps & Cost of Downtime (CoD)
+Every diagnostic report explicitly states the dollar impact. This includes both the cost change of the proposed fix and the **Cost of Downtime (CoD)** for application errors, aligning engineering fixes with financial practices.
 
 ## Features
 
-- **Zero-Trust Security**: No inbound access required. Requests are cryptographically verified.
-- **Security & Privacy**: Built-in **PII Scrubbing** automatically removes emails, IPs, and tokens from logs before AI analysis.
-- **Evidence Chain**: Metric Proof + Cluster Context + Historical Pattern = Root Cause.
-- **FinOps Methodology**: Real-time **cost-impact analysis** for every fix, showing the dollar impact of resource changes.
-- **AI-Powered Forensics**: Multi-LLM support (Gemini, OpenAI, Anthropic) with custom model selection.
-- **Stateful Predictive Analysis**: Persists incident history in a dedicated database to identify recurring patterns and predict time-to-OOM.
-- **Operating Modes**: Choose between `auto-fix`, `click-to-fix`, and `dry-run`.
+- **Omni-Aware Diagnostics**: Handles a wide range of failures:
+    - **K8s Infrastructure**: Scheduling (`Pending`), Capacity (`NodeNotReady`), Configuration (`ImagePullBackOff`).
+    - **Application Layer**: HTTP 5xx spikes, latency degradation, and application panics.
+- **Real-time Event Streaming**: Actively watches the K8s Event stream to build real-time dependency graphs.
+- **AI Confidence Scoring**: Intelligent auto-downgrade logic. If AI confidence is below 85%, Fixora automatically switches from Auto-PR to Dry-Run mode.
+- **Pre-Flight Validation**: Before suggesting a GitOps PR, Fixora runs `helm template` or `kubectl diff` in a sandbox to ensure the fix is valid.
+- **Next-Gen ChatOps**: Interactive triage trees in Slack/Google Chat with dynamic buttons (e.g., `[Show Stack Trace]`, `[View FinOps Impact]`, `[Execute Fix]`).
+- **Security & Privacy**: Built-in **PII Scrubbing** automatically removes sensitive data from logs before AI analysis.
+- **Stateful Predictive Analysis**: Persists incident history in a dedicated PostgreSQL database to power predictive AI models.
 - **Multi-Platform Notifications**: Native support for **Slack** and **Google Workspace (Chat)**.
 - **GitOps Ready**: Automated PR/MR generation via GitHub/GitLab with **Multi-Tenant VCS** support.
-- **ArgoCD Integrated**: Automatic repository discovery.
 

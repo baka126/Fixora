@@ -123,6 +123,10 @@ func (h *historyCache) HasDB() bool {
 	return h.db != nil
 }
 
+func (h *historyCache) DB() *sql.DB {
+	return h.db
+}
+
 func (h *historyCache) RecordActionCheckpoint(ctx context.Context, identity string, actionType string, details string) {
 	if h.db == nil {
 		return

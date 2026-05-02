@@ -92,5 +92,15 @@ func (p *K8sMetricsProvider) GetPodMemoryCache(ns, pod string) (float64, error) 
 	return 0, fmt.Errorf("cache metrics are not supported by the K8s Metrics API (use Prometheus)")
 }
 
+// GetHTTPErrorRate is not supported by the K8s Metrics API.
+func (p *K8sMetricsProvider) GetHTTPErrorRate(ns, pod string) (float64, error) {
+	return 0, fmt.Errorf("HTTP error rate metrics are not supported by the K8s Metrics API")
+}
+
+// GetP99Latency is not supported by the K8s Metrics API.
+func (p *K8sMetricsProvider) GetP99Latency(ns, pod string) (float64, error) {
+	return 0, fmt.Errorf("P99 latency metrics are not supported by the K8s Metrics API")
+}
+
 // Ensure K8sMetricsProvider implements MetricsProvider
 var _ MetricsProvider = (*K8sMetricsProvider)(nil)

@@ -35,3 +35,21 @@ func FormatImpact(oldCost, newCost float64, currency string) string {
 	}
 	return "No cost change"
 }
+
+// CalculateCoD (Cost of Downtime) calculates the financial loss per hour.
+func CalculateCoD(errorRate float64, requestsPerHour float64, revenuePerRequest float64, latency float64, threshold float64, penalty float64) string {
+	// Error-based loss
+	lostRevenue := errorRate * requestsPerHour * revenuePerRequest
+
+	// Latency-based loss
+	latencyLoss := 0.0
+	if latency > threshold {
+		latencyLoss = penalty
+	}
+
+	totalLoss := lostRevenue + latencyLoss
+	if totalLoss > 0 {
+		return fmt.Sprintf("-$%.2f/hr (Projected Loss)", totalLoss)
+	}
+	return "No immediate financial loss"
+}

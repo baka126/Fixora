@@ -21,6 +21,7 @@ type Config struct {
 	SlackSigningSecret   string
 	SlackChannel         string
 	GoogleChatWebhookURL string
+	ServerPort           string
 	Mode                 OperatingMode
 	ModeApprovalTTL      time.Duration
 	ModeAutoFixMaxPRPerHour int
@@ -65,6 +66,11 @@ type Config struct {
 
 	InfracostAPIKey string
 	TrustedVCSDomains []string
+
+	// FinOps Tuning
+	RevenuePerRequest     float64
+	LatencyThresholdMS    float64
+	LatencyPenaltyPerHour float64
 }
 
 func Load() *Config {
@@ -75,6 +81,7 @@ func Load() *Config {
 		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
 		SlackChannel:         os.Getenv("SLACK_CHANNEL"),
 		GoogleChatWebhookURL: os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
+		ServerPort:           getEnv("SERVER_PORT", "8080"),
 		Mode:                 mode,
 		ModeApprovalTTL:      getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),
 		ModeAutoFixMaxPRPerHour: getEnvInt("MODE_AUTOFIX_MAX_PR_PER_HOUR", 20),
@@ -116,6 +123,10 @@ func Load() *Config {
 
 		InfracostAPIKey: os.Getenv("INFRACOST_API_KEY"),
 		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),
+
+		RevenuePerRequest:     getEnvFloat("REVENUE_PER_REQUEST", 0.0),
+		LatencyThresholdMS:    getEnvFloat("LATENCY_THRESHOLD_MS", 500.0),
+		LatencyPenaltyPerHour: getEnvFloat("LATENCY_PENALTY_PER_HOUR", 0.0),
 	}
 
 	if cfg.DBHost == "" {

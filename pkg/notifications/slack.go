@@ -53,11 +53,35 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		finOpsSection,
 	)
 
-	// Add Interactive Log Explorer Button
+	// Interactive Buttons
+	var actionElements []slack.BlockElement
+
 	if evidence.Namespace != "" && evidence.PodName != "" {
 		logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
 		logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
-		actionBlock := slack.NewActionBlock("", logBtn)
+		actionElements = append(actionElements, logBtn)
+	}
+
+	if evidence.StackTrace != "" {
+		traceActionID := fmt.Sprintf("view-trace-%s-%s", evidence.Namespace, evidence.PodName)
+		traceBtn := slack.NewButtonBlockElement("view_trace", traceActionID, slack.NewTextBlockObject("plain_text", "📜 Show Stack Trace", false, false))
+		actionElements = append(actionElements, traceBtn)
+	}
+
+	if evidence.FinOpsDetails != "" {
+		finOpsActionID := fmt.Sprintf("view-finops-%s-%s", evidence.Namespace, evidence.PodName)
+		finOpsBtn := slack.NewButtonBlockElement("view_finops", finOpsActionID, slack.NewTextBlockObject("plain_text", "💰 View FinOps Impact", false, false))
+		actionElements = append(actionElements, finOpsBtn)
+	}
+
+	if evidence.ShowFixButton {
+		fixBtn := slack.NewButtonBlockElement("execute_fix", "execute_fix", slack.NewTextBlockObject("plain_text", "⚡ Execute Fix", false, false))
+		fixBtn.Style = slack.StylePrimary
+		actionElements = append(actionElements, fixBtn)
+	}
+
+	if len(actionElements) > 0 {
+		actionBlock := slack.NewActionBlock("", actionElements...)
 		blocks = append(blocks, actionBlock)
 	}
 
@@ -130,38 +154,37 @@ func sendSlack(cfg *config.Config, msgOptions ...slack.MsgOption) error {
 }
 
 // SendLogModal opens a Slack modal containing the scrubbed logs.
-func SendLogModal(cfg *config.Config, triggerID, namespace, podName, logs string) error {
+func SendLogModal(cfg *config.Config, triggerID, namespace, podName, title, content string) error {
 	api := slack.New(cfg.SlackToken)
 
-	titleText := slack.NewTextBlockObject("plain_text", "Log Explorer", false, false)
+	titleText := slack.NewTextBlockObject("plain_text", title, false, false)
 	closeText := slack.NewTextBlockObject("plain_text", "Close", false, false)
 
-	headerText := slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("📄 *Scrubbed Logs for %s/%s*", namespace, podName), false, false)
+	headerText := slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("📄 *%s for %s/%s*", title, namespace, podName), false, false)
 	headerSection := slack.NewSectionBlock(headerText, nil, nil)
 
-	logContent := "No logs found or empty."
-	if logs != "" {
-		logContent = fmt.Sprintf("```\n%s\n```", logs)
+	formattedContent := "Empty."
+	if content != "" {
+		formattedContent = fmt.Sprintf("```\n%s\n```", content)
 	}
 
-	// Split logs if too long (Slack limit is 3000 chars per block)
-	var logBlocks []slack.Block
-	logBlocks = append(logBlocks, headerSection)
+	// Split content if too long (Slack limit is 3000 chars per block)
+	var blocks []slack.Block
+	blocks = append(blocks, headerSection)
 
-	if len(logContent) > 2900 {
-		// Just take the tail if too large for simple modal
-		logContent = "```\n... [truncated] ...\n" + logs[len(logs)-2800:] + "\n```"
+	if len(formattedContent) > 2900 {
+		formattedContent = "```\n... [truncated] ...\n" + content[len(content)-2800:] + "\n```"
 	}
 
-	logText := slack.NewTextBlockObject("mrkdwn", logContent, false, false)
-	logSection := slack.NewSectionBlock(logText, nil, nil)
-	logBlocks = append(logBlocks, logSection)
+	contentText := slack.NewTextBlockObject("mrkdwn", formattedContent, false, false)
+	contentSection := slack.NewSectionBlock(contentText, nil, nil)
+	blocks = append(blocks, contentSection)
 
 	modalRequest := slack.ModalViewRequest{
 		Type:   slack.VTModal,
 		Title:  titleText,
 		Close:  closeText,
-		Blocks: slack.Blocks{BlockSet: logBlocks},
+		Blocks: slack.Blocks{BlockSet: blocks},
 	}
 
 	_, err := api.OpenView(triggerID, modalRequest)
