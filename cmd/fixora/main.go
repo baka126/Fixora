@@ -3,10 +3,12 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
 	"path/filepath"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
@@ -27,9 +29,29 @@ func main() {
 
 	cfg := config.Load()
 
-	k8sConfig, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		log.Fatalf("Error building kubeconfig: %s", err.Error())
+	var k8sConfig *rest.Config
+	var err error
+
+	// Try in-cluster config first if no kubeconfig is explicitly provided OR if the file doesn't exist
+	if *kubeconfig == "" {
+		k8sConfig, err = rest.InClusterConfig()
+		if err != nil {
+			log.Fatalf("Error building in-cluster config: %s", err.Error())
+		}
+	} else {
+		// If kubeconfig is provided, check if it exists
+		if _, statErr := os.Stat(*kubeconfig); os.IsNotExist(statErr) {
+			// If provided but doesn't exist, fallback to in-cluster
+			k8sConfig, err = rest.InClusterConfig()
+			if err != nil {
+				log.Fatalf("Error building in-cluster config (fallback): %s", err.Error())
+			}
+		} else {
+			k8sConfig, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+			if err != nil {
+				log.Fatalf("Error building kubeconfig from flags: %s", err.Error())
+			}
+		}
 	}
 
 	clientset, err := kubernetes.NewForConfig(k8sConfig)
