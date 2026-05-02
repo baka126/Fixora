@@ -21,6 +21,7 @@ type Config struct {
 	SlackSigningSecret   string
 	SlackChannel         string
 	GoogleChatWebhookURL string
+	GoogleChatAppMode    bool
 	ServerPort           string
 	Mode                 OperatingMode
 	ModeApprovalTTL      time.Duration

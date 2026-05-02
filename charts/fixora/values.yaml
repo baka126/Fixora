@@ -43,6 +43,7 @@ slack:
 
 googleChat:
   webhookUrl: ""
+  appMode: false # Set to true if configured as a full Chat App (enables interactive buttons)
 
 prometheus:
   url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"

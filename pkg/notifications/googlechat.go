@@ -94,29 +94,56 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
 	)
 
-	// Interactive Buttons
-	var buttons []GoogleChatButton
-
-	if evidence.Namespace != "" && evidence.PodName != "" {
-		buttons = append(buttons, GoogleChatButton{
-			Text: "🔍 View Logs",
-			OnClick: GoogleChatOnClick{
-				Action: &GoogleChatAction{
-					Function: "view_logs",
-					Parameters: []GoogleChatActionParam{
-						{Key: "namespace", Value: evidence.Namespace},
-						{Key: "podName", Value: evidence.PodName},
-					},
-				},
-			},
+	// If not in App Mode, embed the timeline directly as buttons won't work in simple webhooks
+	if !cfg.GoogleChatAppMode && evidence.EventTimeline != "" {
+		timelineText := evidence.EventTimeline
+		if len(timelineText) > 1000 {
+			timelineText = "... [truncated] ...\n" + timelineText[len(timelineText)-1000:]
+		}
+		mainWidgets = append(mainWidgets, GoogleChatWidget{
+			TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br><pre>" + timelineText + "</pre>"},
 		})
+	}
 
-		if evidence.ShowEventButton {
+	// Interactive Buttons (Only if App Mode is enabled)
+	var buttons []GoogleChatButton
+	if cfg.GoogleChatAppMode {
+		if evidence.Namespace != "" && evidence.PodName != "" {
 			buttons = append(buttons, GoogleChatButton{
-				Text: "🕒 View Event Timeline",
+				Text: "🔍 View Logs",
 				OnClick: GoogleChatOnClick{
 					Action: &GoogleChatAction{
-						Function: "view_events",
+						Function: "view_logs",
+						Parameters: []GoogleChatActionParam{
+							{Key: "namespace", Value: evidence.Namespace},
+							{Key: "podName", Value: evidence.PodName},
+						},
+					},
+				},
+			})
+
+			if evidence.ShowEventButton {
+				buttons = append(buttons, GoogleChatButton{
+					Text: "🕒 View Event Timeline",
+					OnClick: GoogleChatOnClick{
+						Action: &GoogleChatAction{
+							Function: "view_events",
+							Parameters: []GoogleChatActionParam{
+								{Key: "namespace", Value: evidence.Namespace},
+								{Key: "podName", Value: evidence.PodName},
+							},
+						},
+					},
+				},
+			})
+		}
+
+		if evidence.StackTrace != "" {
+			buttons = append(buttons, GoogleChatButton{
+				Text: "📜 Show Stack Trace",
+				OnClick: GoogleChatOnClick{
+					Action: &GoogleChatAction{
+						Function: "view_trace",
 						Parameters: []GoogleChatActionParam{
 							{Key: "namespace", Value: evidence.Namespace},
 							{Key: "podName", Value: evidence.PodName},
@@ -127,37 +154,7 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		}
 	}
 
-	if evidence.StackTrace != "" {
-		buttons = append(buttons, GoogleChatButton{
-			Text: "📜 Show Stack Trace",
-			OnClick: GoogleChatOnClick{
-				Action: &GoogleChatAction{
-					Function: "view_trace",
-					Parameters: []GoogleChatActionParam{
-						{Key: "namespace", Value: evidence.Namespace},
-						{Key: "podName", Value: evidence.PodName},
-					},
-				},
-			},
-		})
-	}
-
-	if evidence.FinOpsDetails != "" {
-		buttons = append(buttons, GoogleChatButton{
-			Text: "💰 View FinOps Impact",
-			OnClick: GoogleChatOnClick{
-				Action: &GoogleChatAction{
-					Function: "view_finops",
-					Parameters: []GoogleChatActionParam{
-						{Key: "namespace", Value: evidence.Namespace},
-						{Key: "podName", Value: evidence.PodName},
-					},
-				},
-			},
-		})
-	}
-
-	if evidence.ShowFixButton {
+	if evidence.ShowFixButton && cfg.GoogleChatAppMode {
 		buttons = append(buttons, GoogleChatButton{
 			Text: "⚡ Execute Fix",
 			OnClick: GoogleChatOnClick{
