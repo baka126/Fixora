@@ -200,6 +200,9 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	if c.config.K8sWatcherEnabled {
 		slog.Info("K8s Watcher Plugin enabled")
 		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				c.enqueuePod(obj)
+			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				c.enqueuePod(newObj)
 			},
