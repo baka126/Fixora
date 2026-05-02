@@ -493,7 +493,12 @@ func (h *historyCache) IsAlertRecentlyProcessed(ctx context.Context, ns, pod, al
 			slog.Error("Failed to query processed alerts", "error", err)
 			return false
 		}
-		return time.Since(lastProcessed) < window
+		
+		isRecent := time.Since(lastProcessed) < window
+		if isRecent {
+			slog.Debug("Alert recently processed (locked)", "key", key, "last_processed", lastProcessed)
+		}
+		return isRecent
 	}
 
 	h.alertMu.RLock()
@@ -502,11 +507,16 @@ func (h *historyCache) IsAlertRecentlyProcessed(ctx context.Context, ns, pod, al
 	if !exists {
 		return false
 	}
-	return time.Since(last) < window
+	isRecent := time.Since(last) < window
+	if isRecent {
+		slog.Debug("Alert recently processed (locked in-memory)", "key", key, "last_processed", last)
+	}
+	return isRecent
 }
 
 func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertname string) {
 	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	slog.Debug("Marking alert as processed", "key", key)
 	if h.db != nil {
 		query := `
 			INSERT INTO processed_alerts (alert_key, last_processed_at)
@@ -542,12 +552,15 @@ func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod st
 		if err == nil {
 			// Lock exists, check if it's within the window
 			if time.Since(lockedAt) < window {
+				slog.Debug("Investigation lock active", "key", key, "locked_at", lockedAt)
 				return false
 			}
 			// Expired, update it
+			slog.Debug("Investigation lock expired, renewing", "key", key, "previous_lock", lockedAt)
 			_, err = tx.ExecContext(ctx, `UPDATE investigation_locks SET locked_at = $1 WHERE pod_key = $2`, time.Now(), key)
 		} else if err == sql.ErrNoRows {
 			// No lock, create it
+			slog.Debug("No investigation lock found, creating new one", "key", key)
 			_, err = tx.ExecContext(ctx, `INSERT INTO investigation_locks (pod_key, locked_at) VALUES ($1, $2)`, key, time.Now())
 		} else {
 			slog.Error("Failed to query investigation lock", "error", err)
@@ -570,8 +583,10 @@ func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod st
 	defer h.lockMu.Unlock()
 	last, exists := h.investigationLocks[key]
 	if exists && time.Since(last) < window {
+		slog.Debug("Investigation lock active in-memory", "key", key, "locked_at", last)
 		return false
 	}
+	slog.Debug("Creating/Renewing in-memory investigation lock", "key", key)
 	h.investigationLocks[key] = time.Now()
 	return true
 }
