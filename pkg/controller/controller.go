@@ -198,6 +198,7 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 
 	podInformer := c.factory.Core().V1().Pods().Informer()
 	if c.config.K8sWatcherEnabled {
+		slog.Info("K8s Watcher Plugin enabled")
 		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				c.enqueuePod(newObj)
@@ -211,24 +212,29 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 
 	c.factory.Start(stopCh)
 	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {
+		slog.Error("Failed to sync pod informer cache")
 		return
 	}
 
 	// Start diagnostic workers
+	slog.Info("Starting diagnostic worker")
 	go wait.Until(c.runWorker, time.Second, stopCh)
 
 	// Start predictive leak scanner if enabled
 	if c.config.LeakScannerEnabled && c.config.PredictiveEnabled {
+		slog.Info("Leak Scanner Plugin enabled", "interval", c.config.PredictiveScanInterval)
 		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
 	}
 
 	// Start application failure scanner (5xx and latency)
 	if c.config.PerformanceScannerEnabled {
+		slog.Info("Performance Scanner Plugin enabled", "interval", "1m")
 		go wait.Until(c.scanForAppFailures, 1*time.Minute, stopCh)
 	}
 
 	// Start Alertmanager scraper if enabled
 	if c.amClient != nil && c.config.AlertmanagerScraperEnabled {
+		slog.Info("Alertmanager Scraper Plugin enabled", "interval", "1m")
 		go wait.Until(c.pullAlertsFromAlertmanager, 1*time.Minute, stopCh)
 	}
 
@@ -287,7 +293,7 @@ func (c *Controller) scanForLeaks() {
 		return
 	}
 
-	slog.Info("Scanning for memory leak trajectories")
+	slog.Debug("Starting periodic memory leak scan")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -327,15 +333,18 @@ func (c *Controller) scanForLeaks() {
 				growthIncrease := (growthRate - state.LastGrowthRate) / state.LastGrowthRate
 
 				if timeSinceLast < cooldown && growthIncrease < 0.50 {
-					slog.Debug("Suppressing duplicate leak alert (cooldown/insignificant growth)", "pod", pod.Name, "time_since", timeSinceLast, "growth_increase", growthIncrease)
+					slog.Debug("Suppressing duplicate leak alert (cooldown/insignificant growth)", "ns", pod.Namespace, "pod", pod.Name, "time_since", timeSinceLast, "growth_increase", growthIncrease)
 					continue
 				}
 			}
 
 			// Global Investigation Lock check for Leaks
 			if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, 30*time.Minute) {
+				slog.Debug("Skipping leak investigation: already in progress", "ns", pod.Namespace, "pod", pod.Name)
 				continue
 			}
+
+			slog.Warn("Potential memory leak trajectory detected", "ns", pod.Namespace, "pod", pod.Name, "growth_pct", growthRate*100)
 
 			var metricProof strings.Builder
 			metricProof.WriteString(fmt.Sprintf("Memory Growth: %.1f%% in the last hour.\n", growthRate*100))
@@ -411,9 +420,10 @@ func (c *Controller) scanForLeaks() {
 
 			// Execute Multi-Modal AI Forensics
 			if c.aiProvider != nil {
+				slog.Info("Requesting AI predictive forensics", "ns", pod.Namespace, "pod", pod.Name)
 				aiResp, err := c.aiProvider.PerformPredictiveForensics(ctx, pod.Namespace, pod.Name, historyStr, evidence.MetricProof)
 				if err != nil {
-					slog.Error("AI Predictive Forensics failed", "pod", pod.Name, "error", err)
+					slog.Error("AI Predictive Forensics failed", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 					evidence.RootCause = "Predictive analysis failed: " + err.Error()
 				} else {
 					evidence.RootCause = aiResp.Analysis
@@ -435,11 +445,10 @@ func (c *Controller) scanForLeaks() {
 			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
 			evidence.FinOpsDetails = fmt.Sprintf("Calculated using %s profile.\nCurrent: $%.2f/mo, Proposed: $%.2f/mo", pricingProfile.Name, currentCost, newCost)
 
-			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
-			
 			// Save Investigation to DB
 			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak")
 			
+			slog.Info("Sending evidence chain to notification channels", "ns", pod.Namespace, "pod", pod.Name)
 			notifications.SendEvidenceChain(c.config, evidence)
 
 			// Update prediction state to handle cooldowns
@@ -449,17 +458,17 @@ func (c *Controller) scanForLeaks() {
 			c.handleRemediation(ctx, &pod, evidence, invID)
 		}
 	}
+	slog.Debug("Memory leak scan finished")
 }
 
 // scanForAppFailures checks for cluster-wide performance degradation using efficient bulk queries.
 func (c *Controller) scanForAppFailures() {
 	bulk, ok := c.promClient.(metrics.BulkMetricsProvider)
 	if !ok {
-		slog.Debug("Prometheus provider does not support bulk queries; skipping performance scan")
 		return
 	}
 
-	slog.Info("Performing bulk scan for application performance degradation (5xx/Latency)")
+	slog.Debug("Starting bulk performance scan")
 	ctx := context.Background()
 
 	// 1. Bulk check for 5xx Error Rates
@@ -472,10 +481,11 @@ func (c *Controller) scanForAppFailures() {
 			
 			// Deduplication check
 			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
+				slog.Debug("Skipping high error investigation: already in progress", "ns", p.Namespace, "pod", p.PodName)
 				continue
 			}
 
-			slog.Warn("Bulk scan: High HTTP error rate detected", "pod", p.PodName, "rate", fmt.Sprintf("%.2f%%", p.Value*100))
+			slog.Warn("Bulk scan found high HTTP error rate", "ns", p.Namespace, "pod", p.PodName, "rate", fmt.Sprintf("%.2f%%", p.Value*100))
 			c.queue.Add(podWorkItem{
 				namespace: p.Namespace,
 				name:      p.PodName,
@@ -496,10 +506,11 @@ func (c *Controller) scanForAppFailures() {
 
 			// Deduplication check
 			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
+				slog.Debug("Skipping latency investigation: already in progress", "ns", p.Namespace, "pod", p.PodName)
 				continue
 			}
 
-			slog.Warn("Bulk scan: SLA breach - High latency detected", "pod", p.PodName, "p99", fmt.Sprintf("%.2fs", p.Value))
+			slog.Warn("Bulk scan found high latency", "ns", p.Namespace, "pod", p.PodName, "p99", fmt.Sprintf("%.2fs", p.Value))
 			c.queue.Add(podWorkItem{
 				namespace: p.Namespace,
 				name:      p.PodName,
@@ -509,6 +520,7 @@ func (c *Controller) scanForAppFailures() {
 	} else {
 		slog.Error("Failed bulk query for high latency", "error", err)
 	}
+	slog.Debug("Bulk performance scan finished")
 }
 
 func (c *Controller) isNamespaceScoped(ns string) bool {
@@ -564,13 +576,14 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 		return
 	}
 
-	slog.Info("Scraping active alerts from Alertmanager")
+	slog.Debug("Scraping Alertmanager for firing alerts")
 	alerts, err := c.amClient.GetAlerts()
 	if err != nil {
 		slog.Error("Failed to pull alerts from Alertmanager", "error", err)
 		return
 	}
 
+	foundCount := 0
 	for _, alert := range alerts {
 		if alert.Status.State != "firing" {
 			continue
@@ -591,6 +604,7 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 		// Global Investigation Lock check
 		ctx := context.Background()
 		if !c.history.CheckAndLockInvestigation(ctx, ns, pod, 30*time.Minute) {
+			slog.Debug("Skipping alert trigger: pod already under investigation", "ns", ns, "pod", pod, "alert", reason)
 			continue
 		}
 
@@ -599,13 +613,17 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 			continue
 		}
 
-		slog.Info("Alertmanager scraper triggered diagnostic", "pod", pod, "reason", reason)
+		foundCount++
+		slog.Info("Actionable alert found, triggering diagnostic", "ns", ns, "pod", pod, "alert", reason)
 		
 		// Save Alert to DB
 		c.history.SaveAlert(ctx, alert, "PullScraper")
 
 		c.DiagnosePodByName(ns, pod, reason)
 		c.history.MarkAlertProcessed(ctx, ns, pod, reason)
+	}
+	if foundCount > 0 {
+		slog.Info("Alertmanager scrape cycle complete", "actionable_alerts_found", foundCount)
 	}
 }
 
@@ -693,9 +711,11 @@ func (c *Controller) enqueuePod(obj interface{}) {
 		// Global Investigation Lock check for k8s watcher
 		ctx := context.Background()
 		if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, 30*time.Minute) {
+			slog.Debug("Ignoring K8s Watcher trigger: pod already under investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 			return
 		}
 
+		slog.Info("K8s Watcher detected pod failure, enqueuing diagnostic", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 		c.queue.Add(podWorkItem{
 			namespace: pod.Namespace,
 			name:      pod.Name,
@@ -719,7 +739,7 @@ func (c *Controller) processNextItem() bool {
 	work := item.(podWorkItem)
 	err := c.processDiagnostic(work)
 	if err != nil {
-		slog.Error("Diagnostic failed", "pod", work.name, "error", err)
+		slog.Error("Diagnostic task failed", "ns", work.namespace, "pod", work.name, "error", err)
 		c.queue.AddRateLimited(item)
 	} else {
 		c.queue.Forget(item)
@@ -751,7 +771,7 @@ func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
 
 // diagnosePod performs the full forensic evidence gathering and AI correlation.
 func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string) {
-	slog.Info("Diagnosing Pod", "namespace", pod.Namespace, "name", pod.Name, "reason", reason)
+	slog.Info("Starting full forensics investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 
 	var historyStr string
 	historySummary := "This is the first time we've diagnosed this pod."
@@ -788,6 +808,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	// Gathers memory metrics for proof
 	if c.promClient != nil {
+		slog.Debug("Gathering metric proof from Prometheus", "ns", pod.Namespace, "pod", pod.Name)
 		usage, _ := c.promClient.GetPodUsage(pod.Namespace, pod.Name)
 		request, limit, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
 
@@ -804,6 +825,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	}
 
 	// Gathers Kubernetes events
+	slog.Debug("Fetching Kubernetes events", "ns", pod.Namespace, "pod", pod.Name)
 	eventsTimeline, err := c.getPodEvents(ctx, pod)
 	if err == nil {
 		evidence.EventTimeline = eventsTimeline
@@ -813,10 +835,11 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	var rootCause string
 	var logs string
 	if c.aiProvider != nil {
+		slog.Info("Requesting AI analysis for investigation", "ns", pod.Namespace, "pod", pod.Name)
 		var err error
 		logs, err = c.getPodLogs(ctx, pod.Namespace, pod.Name)
 		if err != nil {
-			slog.Warn("Error fetching logs", "pod", pod.Name, "error", err)
+			slog.Warn("Error fetching logs during investigation", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 		}
 
 		// Basic Stack Trace extraction for the interactive button
@@ -850,13 +873,13 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 		aiResp, err := c.aiProvider.PerformForensics(ctx, forensicCtx)
 		if err != nil {
-			slog.Error("AI Forensics failed", "pod", pod.Name, "error", err)
+			slog.Error("AI Forensics analysis failed", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 			evidence.RootCause = "Forensic analysis failed: " + err.Error()
 		} else {
 			evidence.RootCause = aiResp.Analysis
 			evidence.AIConfidence = aiResp.Confidence
 			rootCause = aiResp.Analysis
-			// Update to include InvestigationID if saved
+			slog.Info("AI analysis complete", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
 		}
 	} else {
 		evidence.RootCause = "AI Provider not configured"
@@ -864,6 +887,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	// FinOps Impact estimation
 	if c.promClient != nil {
+		slog.Debug("Calculating FinOps impact", "ns", pod.Namespace, "pod", pod.Name)
 		pricingProfile := c.getPricingProfile(ctx, pod)
 		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 		memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
@@ -886,8 +910,6 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		}
 		evidence.FinOpsDetails = fmt.Sprintf("FinOps Breakdown:\n- Provider: %s\n- Current Infra Cost: $%.2f/mo\n- Projected Infra Cost: $%.2f/mo\n- Change: %s\n- CoD Analysis: %s", 
 			pricingProfile.Name, currentCost, newCost, finops.FormatImpact(currentCost, newCost, "$"), codStr)
-	} else {
-		evidence.FinOpsImpact = "+$2.10/mo AWS compute cost vs. preventing a $5,000 outage"
 	}
 
 	if c.config.Mode == config.ClickToFix {
@@ -900,7 +922,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	c.history.RecordActionCheckpoint(ctx, c.leaderIdentity, "CompletedDiagnostic", fmt.Sprintf("Pod %s/%s, Reason: %s", pod.Namespace, pod.Name, reason))
 
-	// Sends the report to Slack
+	slog.Info("Dispatching diagnostic report to notifications", "ns", pod.Namespace, "pod", pod.Name)
 	notifications.SendEvidenceChain(c.config, evidence)
 
 	// Attempts automated remediation
@@ -955,7 +977,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 					for _, rsOwner := range rs.OwnerReferences {
 						info, err := c.argoClient.GetAppForResource(ctx, pod.Namespace, rsOwner.Name, rsOwner.Kind)
 						if err == nil {
-							slog.Info("Discovered Git info via ArgoCD", "app", rsOwner.Name, "repo", info.RepoURL)
+							slog.Info("Discovered Git info via ArgoCD", "ns", pod.Namespace, "pod", pod.Name, "repo", info.RepoURL)
 							repoURL = info.RepoURL
 							filePath = info.Path + "/values.yaml"
 							targetRevision = info.TargetRevision
@@ -975,6 +997,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	if repoURL == "" || filePath == "" {
+		slog.Debug("Skipping remediation: no repository metadata found", "ns", pod.Namespace, "pod", pod.Name)
 		return
 	}
 
@@ -984,18 +1007,18 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	u, err := giturls.Parse(repoURL)
 	if err != nil {
-		slog.Error("Failed to parse git URL", "url", repoURL, "error", err)
+		slog.Error("Failed to parse git URL for remediation", "ns", pod.Namespace, "pod", pod.Name, "url", repoURL, "error", err)
 		return
 	}
 
 	if !c.isVCSDomainTrusted(u.Host) {
-		slog.Warn("Refusing remediation for untrusted VCS domain", "host", u.Host, "pod", pod.Name)
+		slog.Warn("Refusing remediation for untrusted VCS domain", "ns", pod.Namespace, "pod", pod.Name, "host", u.Host)
 		return
 	}
 
 	pathParts := strings.Split(strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/"), "/")
 	if len(pathParts) < 2 {
-		slog.Warn("Invalid git path", "path", u.Path)
+		slog.Warn("Invalid git path for remediation", "ns", pod.Namespace, "pod", pod.Name, "path", u.Path)
 		return
 	}
 	repoOwner := pathParts[len(pathParts)-2]
@@ -1008,35 +1031,33 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	provider, token := c.getVCSProvider(ctx, pod.Namespace, vcsType)
 	if provider == nil {
-		slog.Warn("No VCS provider found for remediation", "type", vcsType, "pod", pod.Name)
+		slog.Warn("No VCS provider found for remediation", "ns", pod.Namespace, "pod", pod.Name, "type", vcsType)
 		return
 	}
 
 	// Check if a PR already exists for this pod to avoid duplicates
-	// We check for a branch name that contains the pod name
-	// This is a bit loose but works for our naming convention "fixora/patch-%s-%d"
 	branchPrefix := fmt.Sprintf("fixora/patch-%s-", pod.Name)
 	exists, prURL, err := provider.PullRequestExists(ctx, repoOwner, repoName, branchPrefix)
 	if err == nil && exists {
-		slog.Info("PR already exists for pod, skipping", "pod", pod.Name, "pr", prURL)
+		slog.Info("PR already exists for pod, skipping remediation", "ns", pod.Namespace, "pod", pod.Name, "pr", prURL)
 		return
 	}
 
 	// Fetch current config content to provide context for the AI patch generator
 	currentContent, err := provider.GetFileContent(ctx, repoOwner, repoName, filePath, baseBranch)
 	if err != nil {
-		slog.Error("Failed to fetch current content", "repo", repoName, "path", filePath, "error", err)
+		slog.Error("Failed to fetch current config content from VCS", "ns", pod.Namespace, "pod", pod.Name, "repo", repoName, "error", err)
 		return
 	}
 
 	// Generate the specific patch content using AI
 	if c.aiProvider == nil {
-		slog.Warn("Skipping remediation patch generation because AI provider is not configured", "pod", pod.Name)
 		return
 	}
+	slog.Info("Requesting AI to generate resource adjustment patch", "ns", pod.Namespace, "pod", pod.Name)
 	aiResp, err := c.aiProvider.GeneratePatch(ctx, currentContent, evidence.RootCause+"\n"+evidence.MetricProof)
 	if err != nil {
-		slog.Error("Failed to generate patch", "pod", pod.Name, "error", err)
+		slog.Error("Failed to generate AI remediation patch", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 		return
 	}
 
@@ -1044,21 +1065,20 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	evidence.AIConfidence = aiResp.Confidence
 
 	// Pre-Flight Validation Sandbox
-	slog.Info("Running pre-flight validation on proposed fix", "pod", pod.Name)
+	slog.Info("Running pre-flight validation on proposed fix", "ns", pod.Namespace, "pod", pod.Name)
 	var vResult validation.ValidationResult
 	if strings.Contains(filePath, "values.yaml") {
 		vResult = validation.ValidateYAML(newContent)
 	} else {
-		// Generic manifest validation
 		vResult = validation.ValidateManifest(newContent)
 	}
 
 	if !vResult.Valid {
-		slog.Error("Pre-flight validation failed; aborting remediation", "pod", pod.Name, "error", vResult.Error, "output", vResult.Output)
+		slog.Error("Pre-flight validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "error", vResult.Output)
 		notifications.SendNotification(c.config, fmt.Sprintf("❌ Pre-flight validation failed for %s/%s. Fixora will not open a PR.\nError: %s", pod.Namespace, pod.Name, vResult.Output))
 		return
 	}
-	slog.Info("Pre-flight validation successful", "pod", pod.Name)
+	slog.Info("Pre-flight validation successful", "ns", pod.Namespace, "pod", pod.Name)
 
 	c.history.UpdatePatch(ctx, pod.Namespace, pod.Name, string(newContent))
 
@@ -1075,14 +1095,12 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		CommitMessage: "fix: automated resource adjustment by Fixora",
 	}
 
-	// Determine active mode based on AI confidence
 	effectiveMode := c.config.Mode
 	if aiResp.Confidence < 85 && effectiveMode == config.AutoFix {
-		slog.Warn("AI Confidence below 85%, downgrading from AutoFix to DryRun", "pod", pod.Name, "confidence", aiResp.Confidence)
+		slog.Warn("AI Confidence below threshold, downgrading to DryRun", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
 		effectiveMode = config.DryRun
 	}
 
-	// Handle remediation behavior per operating mode
 	switch effectiveMode {
 	case config.ClickToFix:
 		callbackID := fmt.Sprintf("fix-%d", time.Now().UnixNano())
@@ -1096,7 +1114,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		}
 		if c.history != nil && c.history.HasDB() {
 			if err := c.history.SavePendingFix(ctx, callbackID, fix); err != nil {
-				slog.Error("Failed to persist pending fix", "callback_id", callbackID, "error", err)
+				slog.Error("Failed to persist pending fix", "ns", pod.Namespace, "pod", pod.Name, "callback_id", callbackID, "error", err)
 				return
 			}
 		} else {
@@ -1105,10 +1123,11 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			c.pendingMu.Unlock()
 		}
 
+		slog.Info("Remediation pending user approval", "ns", pod.Namespace, "pod", pod.Name, "callback_id", callbackID)
 		notifications.SendRemediationApproval(c.config, pod.Namespace, pod.Name, string(newContent), callbackID)
 		return
 	case config.DryRun:
-		slog.Info("Dry-run mode: skipping PR creation", "namespace", pod.Namespace, "pod", pod.Name)
+		slog.Info("Dry-run mode: remediation generated but no PR created", "ns", pod.Namespace, "pod", pod.Name)
 		msg := fmt.Sprintf("🧪 Dry-run: generated remediation for %s/%s (no PR created).", pod.Namespace, pod.Name)
 		if aiResp.Confidence < 85 {
 			msg = fmt.Sprintf("⚠️ Low AI Confidence (%d%%): %s", aiResp.Confidence, msg)
@@ -1121,17 +1140,17 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	if !c.allowAutoFixPR() {
-		slog.Warn("Auto-fix PR rate limit reached, skipping PR creation", "namespace", pod.Namespace, "pod", pod.Name)
+		slog.Warn("Auto-fix PR rate limit reached, skipping PR creation", "ns", pod.Namespace, "pod", pod.Name)
 		notifications.SendNotification(c.config, fmt.Sprintf("⏳ Auto-fix rate limit reached; skipped PR creation for %s/%s.", pod.Namespace, pod.Name))
 		return
 	}
 
-	// Execute the PR creation
+	slog.Info("Opening remediation Pull Request", "ns", pod.Namespace, "pod", pod.Name, "repo", repoName)
 	prURL, err = provider.CreatePullRequest(ctx, opts)
 	if err != nil {
-		slog.Error("Error creating PR", "pod", pod.Name, "error", err)
+		slog.Error("Failed to create remediation PR", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 	} else if prURL != "" {
-		slog.Info("Created PR", "url", prURL)
+		slog.Info("Successfully created remediation PR", "ns", pod.Namespace, "pod", pod.Name, "url", prURL)
 		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", pod.Namespace, pod.Name, prURL))
 	}
 }
@@ -1145,7 +1164,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	if c.history != nil && c.history.HasDB() {
 		fix, ok, err = c.history.TakePendingFix(ctx, callbackID)
 		if err != nil {
-			slog.Error("Failed to retrieve pending fix", "id", callbackID, "error", err)
+			slog.Error("Failed to retrieve pending fix from storage", "callback_id", callbackID, "error", err)
 			notifications.SendNotification(c.config, "❌ Failed to process pending remediation approval due to a storage error.")
 			return
 		}
@@ -1159,12 +1178,15 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	}
 
 	if !ok {
-		slog.Warn("No pending fix found for callback", "id", callbackID)
+		slog.Warn("No pending fix found for callback", "callback_id", callbackID)
 		notifications.SendNotification(c.config, "⚠️ Could not find a pending fix for this approval. It may have expired or already been processed.")
 		return
 	}
+
+	slog.Info("User approved remediation, executing PR creation", "ns", fix.PodNamespace, "pod", fix.PodName)
+
 	if c.config.ModeApprovalTTL > 0 && time.Since(fix.CreatedAt) > c.config.ModeApprovalTTL {
-		slog.Warn("Pending fix approval expired", "id", callbackID, "namespace", fix.PodNamespace, "pod", fix.PodName)
+		slog.Warn("Pending fix approval expired", "ns", fix.PodNamespace, "pod", fix.PodName, "callback_id", callbackID)
 		notifications.SendNotification(c.config, fmt.Sprintf("⌛ Pending remediation approval expired for %s/%s.", fix.PodNamespace, fix.PodName))
 		return
 	}
@@ -1193,13 +1215,12 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 		return
 	}
 
-	slog.Info("Executing pending PR creation", "namespace", fix.PodNamespace, "name", fix.PodName)
 	prURL, err := provider.CreatePullRequest(ctx, fix.Options)
 	if err != nil {
-		slog.Error("Error creating pending PR", "pod", fix.PodName, "error", err)
+		slog.Error("Failed to create pending PR", "ns", fix.PodNamespace, "pod", fix.PodName, "error", err)
 		notifications.SendNotification(c.config, fmt.Sprintf("❌ Remediation PR creation failed for %s/%s: %v", fix.PodNamespace, fix.PodName, err))
 	} else if prURL != "" {
-		slog.Info("Created PR from pending fix", "url", prURL)
+		slog.Info("Successfully created approved remediation PR", "ns", fix.PodNamespace, "pod", fix.PodName, "url", prURL)
 		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", fix.PodNamespace, fix.PodName, prURL))
 	}
 }
@@ -1290,11 +1311,11 @@ func (c *Controller) PerformRolloutRestart(namespace, deploymentName string) {
 
 	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
 	if err != nil {
-		slog.Error("Error getting Deployment", "namespace", namespace, "name", deploymentName, "error", err)
+		slog.Error("Error getting Deployment for rollout restart", "ns", namespace, "name", deploymentName, "error", err)
 		return
 	}
 
-	slog.Info("Triggering rollout restart", "namespace", deployment.Namespace, "name", deployment.Name)
+	slog.Info("Triggering rollout restart for Deployment", "ns", deployment.Namespace, "name", deployment.Name)
 	notifications.SendNotification(c.config, fmt.Sprintf("Triggering rollout restart for Deployment %s/%s", deployment.Namespace, deployment.Name))
 
 	if deployment.Spec.Template.Annotations == nil {
@@ -1304,7 +1325,7 @@ func (c *Controller) PerformRolloutRestart(namespace, deploymentName string) {
 
 	_, err = c.clientset.AppsV1().Deployments(deployment.Namespace).Update(ctx, deployment, metav1.UpdateOptions{})
 	if err != nil {
-		slog.Error("Error updating Deployment", "namespace", deployment.Namespace, "name", deployment.Name, "error", err)
+		slog.Error("Failed to update Deployment for rollout restart", "ns", deployment.Namespace, "name", deployment.Name, "error", err)
 		return
 	}
 }
@@ -1316,15 +1337,15 @@ func (c *Controller) getVCSProvider(ctx context.Context, namespace, vcsType stri
 	if err == nil {
 		if vcsType == "github" {
 			if token, ok := secret.Data["github-token"]; ok {
-				slog.Info("Using namespace-specific GitHub token", "namespace", namespace)
+				slog.Debug("Using namespace-specific GitHub token", "ns", namespace)
 				return vcs.NewGitHubProvider(string(token)), string(token)
 			}
 		} else if vcsType == "gitlab" {
 			if token, ok := secret.Data["gitlab-token"]; ok {
-				slog.Info("Using namespace-specific GitLab token", "namespace", namespace)
+				slog.Debug("Using namespace-specific GitLab token", "ns", namespace)
 				p, err := vcs.NewGitLabProvider(string(token), c.config.GitLabBaseURL)
 				if err != nil {
-					slog.Error("Failed to create namespace-specific GitLab provider", "namespace", namespace, "error", err)
+					slog.Error("Failed to create namespace-specific GitLab provider", "ns", namespace, "error", err)
 					return nil, ""
 				}
 				return p, string(token)
