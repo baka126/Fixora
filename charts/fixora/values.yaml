@@ -7,7 +7,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "main"
+  tag: "v0.1.0"
 
 imagePullSecrets: []
 nameOverride: ""
