@@ -241,6 +241,9 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 
 func getEnvSlice(key string, fallback []string) []string {
 	if value, ok := os.LookupEnv(key); ok {
+		if value == "" {
+			return []string{}
+		}
 		return strings.Split(value, ",")
 	}
 	return fallback
@@ -248,6 +251,9 @@ func getEnvSlice(key string, fallback []string) []string {
 
 func getEnvMap(key string, fallback map[string]string) map[string]string {
 	if value, ok := os.LookupEnv(key); ok {
+		if value == "" {
+			return map[string]string{}
+		}
 		m := make(map[string]string)
 		pairs := strings.Split(value, ",")
 		for _, pair := range pairs {
