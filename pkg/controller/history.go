@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -31,11 +32,16 @@ type PredictionState struct {
 type historyCache struct {
 	config *config.Config
 	db     *sql.DB
+	
+	// In-memory fallback for alert tracking when DB is not configured
+	recentAlerts map[string]time.Time
+	alertMu      sync.RWMutex
 }
 
 func newHistoryCache(cfg *config.Config) *historyCache {
 	hc := &historyCache{
-		config: cfg,
+		config:       cfg,
+		recentAlerts: make(map[string]time.Time),
 	}
 
 	if cfg.DBHost != "" {
@@ -53,7 +59,7 @@ func newHistoryCache(cfg *config.Config) *historyCache {
 			}
 		}
 	} else {
-		slog.Warn("DBHost is empty, history cache will be disabled")
+		slog.Warn("DBHost is empty, history cache will be limited to in-memory for some features")
 	}
 
 	return hc
@@ -110,6 +116,11 @@ func (h *historyCache) initDB() {
 			timestamp TIMESTAMP NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_leader_checkpoints_timestamp ON leader_checkpoints (timestamp);`,
+		`CREATE TABLE IF NOT EXISTS processed_alerts (
+			alert_key VARCHAR(512) PRIMARY KEY,
+			last_processed_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_processed_alerts_timestamp ON processed_alerts (last_processed_at);`,
 	}
 	for _, q := range queries {
 		_, err := h.db.Exec(q)
@@ -365,4 +376,48 @@ func (h *historyCache) AllowAutoFixPR(ctx context.Context, maxPerHour int) (bool
 		return false, err
 	}
 	return true, nil
+}
+
+func (h *historyCache) IsAlertRecentlyProcessed(ctx context.Context, ns, pod, alertname string, window time.Duration) bool {
+	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	if h.db != nil {
+		var lastProcessed time.Time
+		err := h.db.QueryRowContext(ctx, `SELECT last_processed_at FROM processed_alerts WHERE alert_key = $1`, key).Scan(&lastProcessed)
+		if err == sql.ErrNoRows {
+			return false
+		} else if err != nil {
+			slog.Error("Failed to query processed alerts", "error", err)
+			return false
+		}
+		return time.Since(lastProcessed) < window
+	}
+
+	h.alertMu.RLock()
+	defer h.alertMu.RUnlock()
+	last, exists := h.recentAlerts[key]
+	if !exists {
+		return false
+	}
+	return time.Since(last) < window
+}
+
+func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertname string) {
+	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	if h.db != nil {
+		query := `
+			INSERT INTO processed_alerts (alert_key, last_processed_at)
+			VALUES ($1, $2)
+			ON CONFLICT (alert_key)
+			DO UPDATE SET last_processed_at = EXCLUDED.last_processed_at
+		`
+		_, err := h.db.ExecContext(ctx, query, key, time.Now())
+		if err != nil {
+			slog.Error("Failed to mark alert as processed in DB", "error", err)
+		}
+		return
+	}
+
+	h.alertMu.Lock()
+	defer h.alertMu.Unlock()
+	h.recentAlerts[key] = time.Now()
 }
