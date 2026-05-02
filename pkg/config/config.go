@@ -199,14 +199,14 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func getEnvBool(key string, fallback bool) bool {
+func getEnvBool(key string) bool {
 	if value, ok := os.LookupEnv(key); ok {
 		b, err := strconv.ParseBool(value)
 		if err == nil {
 			return b
 		}
 	}
-	return fallback
+	return false
 }
 
 func getEnvFloat(key string, fallback float64) float64 {
@@ -241,25 +241,39 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 
 func getEnvSlice(key string, fallback []string) []string {
 	if value, ok := os.LookupEnv(key); ok {
-		if value == "" {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
 			return []string{}
 		}
-		return strings.Split(value, ",")
+		parts := strings.Split(trimmed, ",")
+		var result []string
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				result = append(result, p)
+			}
+		}
+		return result
 	}
 	return fallback
 }
 
 func getEnvMap(key string, fallback map[string]string) map[string]string {
 	if value, ok := os.LookupEnv(key); ok {
-		if value == "" {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
 			return map[string]string{}
 		}
 		m := make(map[string]string)
-		pairs := strings.Split(value, ",")
+		pairs := strings.Split(trimmed, ",")
 		for _, pair := range pairs {
 			kv := strings.Split(pair, "=")
 			if len(kv) == 2 {
-				m[kv[0]] = kv[1]
+				k := strings.TrimSpace(kv[0])
+				v := strings.TrimSpace(kv[1])
+				if k != "" {
+					m[k] = v
+				}
 			}
 		}
 		if len(m) > 0 {
