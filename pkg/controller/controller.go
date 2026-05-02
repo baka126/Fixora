@@ -419,7 +419,7 @@ func (c *Controller) scanForLeaks() {
 					evidence.RootCause = aiResp.Analysis
 					evidence.AIConfidence = aiResp.Confidence
 					// Save the prediction to history
-					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", aiResp.Analysis)
+					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", aiResp.Analysis, 0)
 				}
 			} else {
 				evidence.RootCause = "AI Provider not configured"
@@ -436,13 +436,17 @@ func (c *Controller) scanForLeaks() {
 			evidence.FinOpsDetails = fmt.Sprintf("Calculated using %s profile.\nCurrent: $%.2f/mo, Proposed: $%.2f/mo", pricingProfile.Name, currentCost, newCost)
 
 			slog.Warn("Potential memory leak detected", "namespace", pod.Namespace, "pod", pod.Name, "increase_pct", growthRate*100)
+			
+			// Save Investigation to DB
+			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak")
+			
 			notifications.SendEvidenceChain(c.config, evidence)
 
 			// Update prediction state to handle cooldowns
 			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate)
 
 			// Attempt automated remediation for predicted leaks
-			c.handleRemediation(ctx, &pod, evidence)
+			c.handleRemediation(ctx, &pod, evidence, invID)
 		}
 	}
 }
@@ -596,6 +600,10 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 		}
 
 		slog.Info("Alertmanager scraper triggered diagnostic", "pod", pod, "reason", reason)
+		
+		// Save Alert to DB
+		c.history.SaveAlert(ctx, alert, "PullScraper")
+
 		c.DiagnosePodByName(ns, pod, reason)
 		c.history.MarkAlertProcessed(ctx, ns, pod, reason)
 	}
@@ -848,7 +856,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			evidence.RootCause = aiResp.Analysis
 			evidence.AIConfidence = aiResp.Confidence
 			rootCause = aiResp.Analysis
-			c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause)
+			// Update to include InvestigationID if saved
 		}
 	} else {
 		evidence.RootCause = "AI Provider not configured"
@@ -886,13 +894,17 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		evidence.ShowFixButton = true
 	}
 
+	// Save the full investigation Evidence Chain to DB
+	invID := c.history.SaveInvestigation(ctx, evidence, reason)
+	c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause, invID)
+
 	c.history.RecordActionCheckpoint(ctx, c.leaderIdentity, "CompletedDiagnostic", fmt.Sprintf("Pod %s/%s, Reason: %s", pod.Namespace, pod.Name, reason))
 
 	// Sends the report to Slack
 	notifications.SendEvidenceChain(c.config, evidence)
 
 	// Attempts automated remediation
-	c.handleRemediation(ctx, pod, evidence)
+	c.handleRemediation(ctx, pod, evidence, invID)
 }
 
 // getGranularMetrics attempts to fetch RSS and Cache metrics from the provider.
@@ -931,7 +943,7 @@ func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.
 }
 
 // handleRemediation attempts to open a Pull Request with a fix by discovering the pod's source repository.
-func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain) {
+func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain, investigationID int64) {
 	var repoURL, filePath, vcsType, targetRevision string
 
 	// Attempt discovery via ArgoCD API/CRD

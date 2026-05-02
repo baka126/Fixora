@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -10,14 +11,17 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"fixora/pkg/alertmanager"
 	"fixora/pkg/config"
+	"fixora/pkg/notifications"
 )
 
 type Incident struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Reason     string    `json:"reason"`
-	RootCause  string    `json:"root_cause"`
-	AppliedFix string    `json:"applied_fix,omitempty"` // The patch we generated
+	Timestamp       time.Time `json:"timestamp"`
+	Reason          string    `json:"reason"`
+	RootCause       string    `json:"root_cause"`
+	AppliedFix      string    `json:"applied_fix,omitempty"` // The patch we generated
+	InvestigationID int64     `json:"investigation_id,omitempty"`
 }
 
 type PodHistory struct {
@@ -72,6 +76,23 @@ func newHistoryCache(cfg *config.Config) *historyCache {
 
 func (h *historyCache) initDB() {
 	queries := []string{
+		`CREATE TABLE IF NOT EXISTS investigations (
+			id SERIAL PRIMARY KEY,
+			namespace VARCHAR(255) NOT NULL,
+			pod_name VARCHAR(255) NOT NULL,
+			timestamp TIMESTAMP NOT NULL,
+			reason TEXT NOT NULL,
+			metric_proof TEXT,
+			cluster_context TEXT,
+			historical_pattern TEXT,
+			event_timeline TEXT,
+			stack_trace TEXT,
+			root_cause TEXT,
+			ai_confidence INTEGER,
+			finops_impact TEXT,
+			finops_details TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_investigations_pod ON investigations (namespace, pod_name);`,
 		`CREATE TABLE IF NOT EXISTS incident_history (
 			id SERIAL PRIMARY KEY,
 			namespace VARCHAR(255) NOT NULL,
@@ -79,9 +100,24 @@ func (h *historyCache) initDB() {
 			timestamp TIMESTAMP NOT NULL,
 			reason TEXT NOT NULL,
 			root_cause TEXT NOT NULL,
-			applied_fix TEXT
+			applied_fix TEXT,
+			investigation_id INTEGER REFERENCES investigations(id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_incident_pod ON incident_history (namespace, pod_name);`,
+		`CREATE TABLE IF NOT EXISTS alerts (
+			id SERIAL PRIMARY KEY,
+			alert_key VARCHAR(512) NOT NULL,
+			namespace VARCHAR(255),
+			pod_name VARCHAR(255),
+			alertname VARCHAR(255) NOT NULL,
+			labels JSONB,
+			annotations JSONB,
+			status VARCHAR(50),
+			source VARCHAR(255),
+			received_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_alerts_pod ON alerts (namespace, pod_name);`,
+		`CREATE INDEX IF NOT EXISTS idx_alerts_received ON alerts (received_at);`,
 		`CREATE TABLE IF NOT EXISTS predictions (
 			id SERIAL PRIMARY KEY,
 			namespace VARCHAR(255) NOT NULL,
@@ -164,7 +200,7 @@ func (h *historyCache) getFromDB(ctx context.Context, namespace, podName string)
 		return nil, false
 	}
 
-	query := `SELECT timestamp, reason, root_cause, COALESCE(applied_fix, '') FROM incident_history WHERE namespace = $1 AND pod_name = $2 ORDER BY timestamp ASC`
+	query := `SELECT timestamp, reason, root_cause, COALESCE(applied_fix, ''), COALESCE(investigation_id, 0) FROM incident_history WHERE namespace = $1 AND pod_name = $2 ORDER BY timestamp ASC`
 	rows, err := h.db.QueryContext(ctx, query, namespace, podName)
 	if err != nil {
 		slog.Error("Failed to query DB for incidents", "error", err)
@@ -175,7 +211,7 @@ func (h *historyCache) getFromDB(ctx context.Context, namespace, podName string)
 	var incidents []Incident
 	for rows.Next() {
 		var inc Incident
-		if err := rows.Scan(&inc.Timestamp, &inc.Reason, &inc.RootCause, &inc.AppliedFix); err == nil {
+		if err := rows.Scan(&inc.Timestamp, &inc.Reason, &inc.RootCause, &inc.AppliedFix, &inc.InvestigationID); err == nil {
 			incidents = append(incidents, inc)
 		}
 	}
@@ -191,10 +227,67 @@ func (h *historyCache) saveToDB(ctx context.Context, namespace, podName string, 
 		return
 	}
 
-	query := `INSERT INTO incident_history (namespace, pod_name, timestamp, reason, root_cause, applied_fix) VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err := h.db.ExecContext(ctx, query, namespace, podName, inc.Timestamp, inc.Reason, inc.RootCause, inc.AppliedFix)
+	var investigationID interface{}
+	if inc.InvestigationID > 0 {
+		investigationID = inc.InvestigationID
+	}
+
+	query := `INSERT INTO incident_history (namespace, pod_name, timestamp, reason, root_cause, applied_fix, investigation_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := h.db.ExecContext(ctx, query, namespace, podName, inc.Timestamp, inc.Reason, inc.RootCause, inc.AppliedFix, investigationID)
 	if err != nil {
 		slog.Error("Failed to insert incident to DB", "error", err)
+	}
+}
+
+func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notifications.EvidenceChain, reason string) int64 {
+	if h.db == nil {
+		return 0
+	}
+
+	query := `
+		INSERT INTO investigations (
+			namespace, pod_name, timestamp, reason, metric_proof, cluster_context,
+			historical_pattern, event_timeline, stack_trace, root_cause,
+			ai_confidence, finops_impact, finops_details
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		RETURNING id
+	`
+	var id int64
+	err := h.db.QueryRowContext(ctx, query,
+		evidence.Namespace, evidence.PodName, time.Now(), reason, evidence.MetricProof, evidence.ClusterContext,
+		evidence.HistoricalPattern, evidence.EventTimeline, evidence.StackTrace, evidence.RootCause,
+		evidence.AIConfidence, evidence.FinOpsImpact, evidence.FinOpsDetails,
+	).Scan(&id)
+
+	if err != nil {
+		slog.Error("Failed to save investigation to DB", "error", err)
+		return 0
+	}
+	return id
+}
+
+func (h *historyCache) SaveAlert(ctx context.Context, alert alertmanager.Alert, source string) {
+	if h.db == nil {
+		return
+	}
+
+	ns := alert.Labels["namespace"]
+	pod := alert.Labels["pod"]
+	alertname := alert.Labels["alertname"]
+	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+
+	labelsJSON, _ := json.Marshal(alert.Labels)
+	annotationsJSON, _ := json.Marshal(alert.Annotations)
+
+	query := `
+		INSERT INTO alerts (alert_key, namespace, pod_name, alertname, labels, annotations, status, source, received_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+	_, err := h.db.ExecContext(ctx, query,
+		key, ns, pod, alertname, labelsJSON, annotationsJSON, alert.Status.State, source, time.Now(),
+	)
+	if err != nil {
+		slog.Error("Failed to save alert to DB", "error", err)
 	}
 }
 
@@ -225,11 +318,12 @@ func (h *historyCache) Get(ctx context.Context, namespace, podName string) (*Pod
 	return nil, false
 }
 
-func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, rootCause string) {
+func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, rootCause string, investigationID int64) {
 	inc := Incident{
-		Timestamp: time.Now(),
-		Reason:    reason,
-		RootCause: rootCause,
+		Timestamp:       time.Now(),
+		Reason:          reason,
+		RootCause:       rootCause,
+		InvestigationID: investigationID,
 	}
 
 	if h.db != nil {
