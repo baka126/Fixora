@@ -26,7 +26,6 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 	metricSection := createSlackSection("📊 *Metric Proof*", evidence.MetricProof)
 	contextSection := createSlackSection("🔍 *Cluster Context*", evidence.ClusterContext)
 	patternSection := createSlackSection("📈 *Historical Pattern*", evidence.HistoricalPattern)
-	timelineSection := createSlackSection("🕒 *Event Timeline*", evidence.EventTimeline)
 	rootCauseSection := createSlackSection("🧠 *Root Cause*", evidence.RootCause)
 	finOpsSection := createSlackSection("💰 *FinOps Impact*", evidence.FinOpsImpact)
 
@@ -43,23 +42,33 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		oomSection := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", oomText, false, false), nil, nil)
 		blocks = append(blocks, oomSection)
 	}
+blocks = append(blocks,
+	contextSection,
+	patternSection,
+	divider,
+	rootCauseSection,
+	finOpsSection,
+)
 
-	blocks = append(blocks,
-		contextSection,
-		patternSection,
-		timelineSection,
-		divider,
-		rootCauseSection,
-		finOpsSection,
-	)
+// Interactive Buttons
+var actionElements []slack.BlockElement
 
-	// Interactive Buttons
-	var actionElements []slack.BlockElement
+if evidence.Namespace != "" && evidence.PodName != "" {
+	logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
+	logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
+	actionElements = append(actionElements, logBtn)
 
-	if evidence.Namespace != "" && evidence.PodName != "" {
-		logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
-		logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
-		actionElements = append(actionElements, logBtn)
+	if evidence.ShowEventButton {
+		eventActionID := fmt.Sprintf("view-events-%s-%s", evidence.Namespace, evidence.PodName)
+		eventBtn := slack.NewButtonBlockElement("view_events", eventActionID, slack.NewTextBlockObject("plain_text", "🕒 View Event Timeline", false, false))
+		actionElements = append(actionElements, eventBtn)
+	}
+}
+		if evidence.ShowEventButton {
+			eventActionID := fmt.Sprintf("view-events-%s-%s", evidence.Namespace, evidence.PodName)
+			eventBtn := slack.NewButtonBlockElement("view_events", eventActionID, slack.NewTextBlockObject("plain_text", "🕒 View Event Timeline", false, false))
+			actionElements = append(actionElements, eventBtn)
+		}
 	}
 
 	if evidence.StackTrace != "" {

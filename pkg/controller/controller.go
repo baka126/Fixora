@@ -413,6 +413,7 @@ func (c *Controller) scanForLeaks() {
 				HistoricalPattern:   historySummary,
 				PredictiveWarning:   true,
 				EstimatedHoursToOOM: hoursToOOM,
+				ShowEventButton:     true,
 			}
 
 			// Gathers Kubernetes events
@@ -807,6 +808,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		PodName:           pod.Name,
 		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s", pod.Namespace, pod.Name, reason),
 		HistoricalPattern: historySummary,
+		ShowEventButton:   true,
 	}
 
 	// Gathers related alerts from Alertmanager API
@@ -1296,6 +1298,15 @@ func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) 
 	}
 
 	return strings.Join(relevantLines, "\n"), nil
+}
+
+// GetPodEvents fetches and scrubs events for a specific pod. Public for use by server.
+func (c *Controller) GetPodEvents(ctx context.Context, namespace, podName string) (string, error) {
+	pod, err := c.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return c.getPodEvents(ctx, pod)
 }
 
 func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, error) {

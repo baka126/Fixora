@@ -92,7 +92,6 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 	mainWidgets = append(mainWidgets,
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
-		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
 	)
 
 	// Interactive Buttons
@@ -111,6 +110,21 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 				},
 			},
 		})
+
+		if evidence.ShowEventButton {
+			buttons = append(buttons, GoogleChatButton{
+				Text: "🕒 View Event Timeline",
+				OnClick: GoogleChatOnClick{
+					Action: &GoogleChatAction{
+						Function: "view_events",
+						Parameters: []GoogleChatActionParam{
+							{Key: "namespace", Value: evidence.Namespace},
+							{Key: "podName", Value: evidence.PodName},
+						},
+					},
+				},
+			})
+		}
 	}
 
 	if evidence.StackTrace != "" {

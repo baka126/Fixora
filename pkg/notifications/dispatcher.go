@@ -27,6 +27,7 @@ type EvidenceChain struct {
 	FinOpsDetails string
 	ShowFixButton bool
 	ShowPRButton  bool
+	ShowEventButton bool
 }
 
 func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
