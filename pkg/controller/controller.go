@@ -636,17 +636,23 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 
 // enqueuePod filters pod updates and adds problematic pods to the work queue.
 func (c *Controller) enqueuePod(obj interface{}) {
-	pod := obj.(*v1.Pod)
+	pod, ok := obj.(*v1.Pod)
+	if !ok {
+		return
+	}
 
 	if !c.isNamespaceScoped(pod.Namespace) {
 		return
 	}
 
+	slog.Debug("Watcher evaluating pod status", "ns", pod.Namespace, "pod", pod.Name, "phase", pod.Status.Phase)
+
 	reason := ""
 
 	// 1. Check Pod Phase-level failures
 	if pod.Status.Phase == v1.PodFailed {
-		reason = "PodFailed: " + pod.Status.Reason // Catches Evicted, DeadlineExceeded at pod level
+		reason = "PodFailed: " + pod.Status.Reason
+		slog.Debug("Pod in Failed phase", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 	}
 
 	// 2. Check for infrastructure/scheduling failures
@@ -676,12 +682,14 @@ func (c *Controller) enqueuePod(obj interface{}) {
 		for _, status := range statuses {
 			if status.State.Waiting != nil {
 				r := status.State.Waiting.Reason
+				slog.Debug("Container waiting", "ns", pod.Namespace, "pod", pod.Name, "container", status.Name, "reason", r)
 				if r == "CrashLoopBackOff" || r == "CreateContainerConfigError" || r == "ImagePullBackOff" || r == "ErrImagePull" || r == "CreateContainerError" {
 					reason = prefix + r
 					return
 				}
 			} else if status.State.Terminated != nil {
 				r := status.State.Terminated.Reason
+				slog.Debug("Container terminated", "ns", pod.Namespace, "pod", pod.Name, "container", status.Name, "reason", r, "exitCode", status.State.Terminated.ExitCode)
 				if r == "OOMKilled" || r == "ContainerCannotRun" || r == "DeadlineExceeded" {
 					reason = prefix + r
 					return
