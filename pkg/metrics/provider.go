@@ -6,6 +6,12 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+type PodMetricResult struct {
+	Namespace string
+	PodName   string
+	Value     float64
+}
+
 // MetricsProvider is the unified interface for gathering K8s resource metrics.
 type MetricsProvider interface {
 	// GetPodUsage returns the current memory usage for a pod.
@@ -31,4 +37,13 @@ type MetricsProvider interface {
 
 	// GetP99Latency returns the 99th percentile latency for a pod.
 	GetP99Latency(ns, pod string) (float64, error)
+}
+
+// BulkMetricsProvider extends MetricsProvider with methods to find problematic pods across the cluster in one query.
+type BulkMetricsProvider interface {
+	MetricsProvider
+	// GetHighErrorRatePods finds all pods exceeding the error rate threshold.
+	GetHighErrorRatePods(threshold float64) ([]PodMetricResult, error)
+	// GetHighLatencyPods finds all pods exceeding the latency threshold.
+	GetHighLatencyPods(threshold float64) ([]PodMetricResult, error)
 }

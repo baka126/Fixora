@@ -78,6 +78,12 @@ spec:
                   name: {{ include "fixora.fullname" . }}
                   key: infracost-api-key
             {{- end }}
+            - name: REVENUE_PER_REQUEST
+              value: {{ .Values.finops.revenuePerRequest | quote }}
+            - name: LATENCY_THRESHOLD_MS
+              value: {{ .Values.finops.latencyThresholdMS | quote }}
+            - name: LATENCY_PENALTY_PER_HOUR
+              value: {{ .Values.finops.latencyPenaltyPerHour | quote }}
             {{- if .Values.vcs.github.token }}
             - name: GITHUB_TOKEN
               valueFrom:
@@ -94,6 +100,8 @@ spec:
             {{- end }}
             - name: GITLAB_BASE_URL
               value: {{ .Values.vcs.gitlab.baseUrl | quote }}
+            - name: TRUSTED_VCS_DOMAINS
+              value: {{ join "," .Values.vcs.trustedDomains | quote }}
             - name: WEBHOOK_TOKEN
               value: {{ .Values.webhook.token | quote }}
             - name: WEBHOOK_USER
@@ -140,8 +148,38 @@ spec:
                   name: {{ include "fixora.fullname" . }}
                   key: argocd-token
             {{- end }}
+
+            # Modular Feature Toggles
+            - name: K8S_WATCHER_ENABLED
+              value: {{ .Values.features.k8sWatcher.enabled | quote }}
+            - name: PERFORMANCE_SCANNER_ENABLED
+              value: {{ .Values.features.performanceScanner.enabled | quote }}
+            - name: LEAK_SCANNER_ENABLED
+              value: {{ .Values.features.leakScanner.enabled | quote }}
+            - name: ALERTMANAGER_SCRAPER_ENABLED
+              value: {{ .Values.features.alertmanagerScraper.enabled | quote }}
+            
+            # Thresholds
+            - name: PROMETHEUS_HIGH_ERROR_RATE_THRESHOLD
+              value: {{ .Values.features.performanceScanner.thresholds.errorRate | quote }}
+            - name: PROMETHEUS_HIGH_LATENCY_THRESHOLD
+              value: {{ .Values.features.performanceScanner.thresholds.latency | quote }}
+
+            # Scoping
+            - name: INCLUDED_NAMESPACES
+              value: {{ join "," .Values.scoping.includedNamespaces | quote }}
+            - name: EXCLUDED_NAMESPACES
+              value: {{ join "," .Values.scoping.excludedNamespaces | quote }}
+
             - name: PREDICTIVE_ENABLED
               value: {{ if and .Values.features.predictive.enabled (include "fixora.databaseEnabled" .) }}"true"{{ else }}"false"{{ end }}
+            - name: PREDICTIVE_GROWTH_THRESHOLD
+              value: {{ .Values.features.predictive.growthThreshold | quote }}
+            - name: PREDICTIVE_SCAN_INTERVAL
+              value: {{ .Values.features.predictive.scanInterval | quote }}
+            - name: PREDICTIVE_MIN_DATA_POINTS
+              value: {{ .Values.features.predictive.minDataPoints | quote }}
+
             {{- if .Values.features.database.host }}
             - name: DB_HOST
               value: {{ .Values.features.database.host | quote }}

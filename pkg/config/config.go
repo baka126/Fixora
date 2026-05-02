@@ -58,6 +58,20 @@ type Config struct {
 	DBPassword string
 	DBName     string
 
+	// Modular Feature Toggles
+	K8sWatcherEnabled          bool
+	PerformanceScannerEnabled   bool
+	LeakScannerEnabled         bool
+	AlertmanagerScraperEnabled bool
+
+	// Performance Scanner Thresholds
+	PrometheusHighErrorRateThreshold float64
+	PrometheusHighLatencyThreshold   float64
+
+	// Scoping
+	IncludedNamespaces []string
+	ExcludedNamespaces []string
+
 	// Feature Toggles & Predictive Tuning
 	PredictiveEnabled         bool
 	PredictiveGrowthThreshold float64
@@ -115,6 +129,20 @@ func Load() *Config {
 		DBUser:     os.Getenv("DB_USER"),
 		DBPassword: os.Getenv("DB_PASSWORD"),
 		DBName:     getEnv("DB_NAME", "fixora"),
+
+		// Modular Feature Toggles (Defaulting to safe defaults for scale)
+		K8sWatcherEnabled:          getEnvBool("K8S_WATCHER_ENABLED", true),
+		PerformanceScannerEnabled:   getEnvBool("PERFORMANCE_SCANNER_ENABLED", false),
+		LeakScannerEnabled:         getEnvBool("LEAK_SCANNER_ENABLED", false),
+		AlertmanagerScraperEnabled: getEnvBool("ALERTMANAGER_SCRAPER_ENABLED", false),
+
+		// Thresholds
+		PrometheusHighErrorRateThreshold: getEnvFloat("PROMETHEUS_HIGH_ERROR_RATE_THRESHOLD", 0.05),
+		PrometheusHighLatencyThreshold:   getEnvFloat("PROMETHEUS_HIGH_LATENCY_THRESHOLD", 2.0),
+
+		// Scoping
+		IncludedNamespaces: getEnvSlice("INCLUDED_NAMESPACES", []string{}),
+		ExcludedNamespaces: getEnvSlice("EXCLUDED_NAMESPACES", []string{"kube-system", "monitoring"}),
 
 		PredictiveEnabled:         getEnvBool("PREDICTIVE_ENABLED", true),
 		PredictiveGrowthThreshold: getEnvFloat("PREDICTIVE_GROWTH_THRESHOLD", 0.20),
