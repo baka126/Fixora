@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/generative-ai-go/genai"
@@ -24,6 +25,9 @@ func NewGeminiProvider(apiKey, modelName string) (*GeminiProvider, error) {
 		modelName = "gemini-1.5-flash"
 	}
 	model := client.GenerativeModel(modelName)
+	// Force JSON response
+	model.ResponseMIMEType = "application/json"
+
 	return &GeminiProvider{
 		client: client,
 		model:  model,
@@ -31,6 +35,8 @@ func NewGeminiProvider(apiKey, modelName string) (*GeminiProvider, error) {
 }
 
 func (g *GeminiProvider) AnalyzeLog(ctx context.Context, logs string) (string, error) {
+	// Simple analysis remains plain text for now or we can update it too. 
+	// For Step 3, we focus on the main flows.
 	prompt := fmt.Sprintf(PromptAnalyzeLog, logs)
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
@@ -72,46 +78,65 @@ func (g *GeminiProvider) AnalyzeRootCause(ctx context.Context, evidence string) 
 	return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
 }
 
-func (g *GeminiProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (string, error) {
+func (g *GeminiProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (AIResponse, error) {
 	prompt := fmt.Sprintf(PromptForensics,
 		forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
 		forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)
 
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
-		return "", err
+		return AIResponse{}, err
 	}
 
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "No analysis generated", nil
+		return AIResponse{Analysis: "No analysis generated", Confidence: 0}, nil
 	}
 
-	return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
+	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Analysis: raw, Confidence: 50}, nil // Fallback
+	}
+
+	return aiResp, nil
 }
 
-func (g *GeminiProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (string, error) {
+func (g *GeminiProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (AIResponse, error) {
 	prompt := fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics)
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
-		return "", err
+		return AIResponse{}, err
 	}
 
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "No predictive analysis generated", nil
+		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0}, nil
 	}
 
-	return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
+	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Analysis: raw, Confidence: 50}, nil
+	}
+
+	return aiResp, nil
 }
 
-func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
+func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) (AIResponse, error) {
 	prompt := fmt.Sprintf(PromptGeneratePatch,
 		string(currentContent), evidence)
 
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
-		return nil, err
+		return AIResponse{}, err
 	}
 
-	rawResponse := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
-	return CleanPatch(rawResponse), nil
+	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		// If unmarshal fails, we might have raw patch content
+		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
+	}
+
+	aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	return aiResp, nil
 }

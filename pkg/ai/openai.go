@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/sashabaranov/go-openai"
@@ -86,11 +87,14 @@ func (o *OpenAIProvider) AnalyzeRootCause(ctx context.Context, evidence string) 
 	return resp.Choices[0].Message.Content, nil
 }
 
-func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (string, error) {
+func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (AIResponse, error) {
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
 			Model: o.model,
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role: openai.ChatMessageRoleUser,
@@ -103,17 +107,26 @@ func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 	)
 
 	if err != nil {
-		return "", err
+		return AIResponse{}, err
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	raw := resp.Choices[0].Message.Content
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Analysis: raw, Confidence: 50}, nil
+	}
+
+	return aiResp, nil
 }
 
-func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (string, error) {
+func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (AIResponse, error) {
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
 			Model: o.model,
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
@@ -124,17 +137,26 @@ func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespa
 	)
 
 	if err != nil {
-		return "", err
+		return AIResponse{}, err
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	raw := resp.Choices[0].Message.Content
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Analysis: raw, Confidence: 50}, nil
+	}
+
+	return aiResp, nil
 }
 
-func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
+func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) (AIResponse, error) {
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
 			Model: o.model,
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
@@ -145,8 +167,15 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byt
 	)
 
 	if err != nil {
-		return nil, err
+		return AIResponse{}, err
 	}
 
-	return CleanPatch(resp.Choices[0].Message.Content), nil
+	raw := resp.Choices[0].Message.Content
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
+	}
+
+	aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	return aiResp, nil
 }

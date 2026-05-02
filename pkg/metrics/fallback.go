@@ -136,5 +136,43 @@ func (f *FallbackProvider) GetPodMemoryCache(ns, pod string) (float64, error) {
 	return f.Secondary.GetPodMemoryCache(ns, pod)
 }
 
+// GetHTTPErrorRate attempts to get HTTP error rate from Primary, falling back to Secondary.
+func (f *FallbackProvider) GetHTTPErrorRate(ns, pod string) (float64, error) {
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, fmt.Errorf("no metrics providers configured")
+	}
+
+	if f.Primary != nil {
+		val, err := f.Primary.GetHTTPErrorRate(ns, pod)
+		if err == nil {
+			return val, nil
+		}
+		if f.Secondary == nil {
+			return 0, err
+		}
+	}
+
+	return f.Secondary.GetHTTPErrorRate(ns, pod)
+}
+
+// GetP99Latency attempts to get P99 latency from Primary, falling back to Secondary.
+func (f *FallbackProvider) GetP99Latency(ns, pod string) (float64, error) {
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, fmt.Errorf("no metrics providers configured")
+	}
+
+	if f.Primary != nil {
+		val, err := f.Primary.GetP99Latency(ns, pod)
+		if err == nil {
+			return val, nil
+		}
+		if f.Secondary == nil {
+			return 0, err
+		}
+	}
+
+	return f.Secondary.GetP99Latency(ns, pod)
+}
+
 // Ensure FallbackProvider implements MetricsProvider
 var _ MetricsProvider = (*FallbackProvider)(nil)

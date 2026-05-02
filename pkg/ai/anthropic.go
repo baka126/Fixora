@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	anthropic "github.com/liushuangls/go-anthropic/v2"
@@ -107,7 +108,7 @@ func (a *AnthropicProvider) AnalyzeRootCause(ctx context.Context, evidence strin
 	return *resp.Content[0].Text, nil
 }
 
-func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (string, error) {
+func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (AIResponse, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -127,17 +128,23 @@ func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx Fo
 	})
 
 	if err != nil {
-		return "", err
+		return AIResponse{}, err
 	}
 
 	if len(resp.Content) == 0 {
-		return "No content in response", nil
+		return AIResponse{Analysis: "No content in response", Confidence: 0}, nil
 	}
 
-	return *resp.Content[0].Text, nil
+	raw := *resp.Content[0].Text
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Analysis: raw, Confidence: 50}, nil
+	}
+
+	return aiResp, nil
 }
 
-func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (string, error) {
+func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (AIResponse, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -155,17 +162,23 @@ func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, name
 	})
 
 	if err != nil {
-		return "", err
+		return AIResponse{}, err
 	}
 
 	if len(resp.Content) == 0 {
-		return "No predictive analysis generated", nil
+		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0}, nil
 	}
 
-	return *resp.Content[0].Text, nil
+	raw := *resp.Content[0].Text
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Analysis: raw, Confidence: 50}, nil
+	}
+
+	return aiResp, nil
 }
 
-func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) ([]byte, error) {
+func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) (AIResponse, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -183,14 +196,21 @@ func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []
 	})
 
 	if err != nil {
-		return nil, err
+		return AIResponse{}, err
 	}
 
 	if len(resp.Content) == 0 {
-		return nil, fmt.Errorf("no patch generated")
+		return AIResponse{}, fmt.Errorf("no patch generated")
 	}
 
-	return CleanPatch(*resp.Content[0].Text), nil
+	raw := *resp.Content[0].Text
+	var aiResp AIResponse
+	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
+		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
+	}
+
+	aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	return aiResp, nil
 }
 
 func StringPtr(s string) *string {

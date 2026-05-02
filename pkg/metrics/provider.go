@@ -25,4 +25,10 @@ type MetricsProvider interface {
 
 	// GetHistory returns a historical matrix of memory usage (if supported by the provider).
 	GetHistory(ns, pod string, d time.Duration) (model.Matrix, error)
+
+	// GetHTTPErrorRate returns the 5xx error rate for a pod.
+	GetHTTPErrorRate(ns, pod string) (float64, error)
+
+	// GetP99Latency returns the 99th percentile latency for a pod.
+	GetP99Latency(ns, pod string) (float64, error)
 }

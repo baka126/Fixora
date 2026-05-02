@@ -95,24 +95,73 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br>" + evidence.EventTimeline}},
 	)
 
-	// Add Interactive Log Explorer Button
+	// Interactive Buttons
+	var buttons []GoogleChatButton
+
 	if evidence.Namespace != "" && evidence.PodName != "" {
-		mainWidgets = append(mainWidgets, GoogleChatWidget{
-			ButtonList: &GoogleChatButtonList{
-				Buttons: []GoogleChatButton{
-					{
-						Text: "🔍 View Logs",
-						OnClick: GoogleChatOnClick{
-							Action: &GoogleChatAction{
-								Function: "view_logs",
-								Parameters: []GoogleChatActionParam{
-									{Key: "namespace", Value: evidence.Namespace},
-									{Key: "podName", Value: evidence.PodName},
-								},
-							},
-						},
+		buttons = append(buttons, GoogleChatButton{
+			Text: "🔍 View Logs",
+			OnClick: GoogleChatOnClick{
+				Action: &GoogleChatAction{
+					Function: "view_logs",
+					Parameters: []GoogleChatActionParam{
+						{Key: "namespace", Value: evidence.Namespace},
+						{Key: "podName", Value: evidence.PodName},
 					},
 				},
+			},
+		})
+	}
+
+	if evidence.StackTrace != "" {
+		buttons = append(buttons, GoogleChatButton{
+			Text: "📜 Show Stack Trace",
+			OnClick: GoogleChatOnClick{
+				Action: &GoogleChatAction{
+					Function: "view_trace",
+					Parameters: []GoogleChatActionParam{
+						{Key: "namespace", Value: evidence.Namespace},
+						{Key: "podName", Value: evidence.PodName},
+					},
+				},
+			},
+		})
+	}
+
+	if evidence.FinOpsDetails != "" {
+		buttons = append(buttons, GoogleChatButton{
+			Text: "💰 View FinOps Impact",
+			OnClick: GoogleChatOnClick{
+				Action: &GoogleChatAction{
+					Function: "view_finops",
+					Parameters: []GoogleChatActionParam{
+						{Key: "namespace", Value: evidence.Namespace},
+						{Key: "podName", Value: evidence.PodName},
+					},
+				},
+			},
+		})
+	}
+
+	if evidence.ShowFixButton {
+		buttons = append(buttons, GoogleChatButton{
+			Text: "⚡ Execute Fix",
+			OnClick: GoogleChatOnClick{
+				Action: &GoogleChatAction{
+					Function: "execute_fix",
+					Parameters: []GoogleChatActionParam{
+						{Key: "namespace", Value: evidence.Namespace},
+						{Key: "podName", Value: evidence.PodName},
+					},
+				},
+			},
+		})
+	}
+
+	if len(buttons) > 0 {
+		mainWidgets = append(mainWidgets, GoogleChatWidget{
+			ButtonList: &GoogleChatButtonList{
+				Buttons: buttons,
 			},
 		})
 	}
