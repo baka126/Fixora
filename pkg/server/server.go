@@ -50,9 +50,12 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		slog.Error("Failed to decode Alertmanager webhook payload", "error", err)
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
+
+	slog.Info("Received Alertmanager webhook", "alert_count", len(payload.Alerts))
 
 	for _, alert := range payload.Alerts {
 		ns := alert.Labels["namespace"]
@@ -60,8 +63,10 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		reason := alert.Labels["alertname"]
 
 		if ns != "" && pod != "" {
-			slog.Info("Received Alertmanager trigger", "pod", pod, "reason", reason)
+			slog.Info("Alertmanager webhook triggered diagnostic", "ns", ns, "pod", pod, "reason", reason)
 			go s.controller.DiagnosePodByName(ns, pod, reason)
+		} else {
+			slog.Debug("Ignoring non-pod Alertmanager alert from webhook", "labels", alert.Labels)
 		}
 	}
 
@@ -71,6 +76,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
 	err := r.ParseForm()
 	if err != nil {
+		slog.Error("Failed to parse Slack interaction form", "error", err)
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}
@@ -78,6 +84,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	payloadRaw := r.FormValue("payload")
 	var payload slack.InteractionCallback
 	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
+		slog.Error("Failed to unmarshal Slack interaction payload", "error", err)
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
@@ -88,6 +95,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	}
 
 	action := payload.ActionCallback.BlockActions[0]
+	slog.Info("Received Slack interaction", "user", payload.User.Name, "action_id", action.ActionID)
 
 	// Handle Modal Explorers (Logs, Trace, FinOps)
 	if strings.HasPrefix(action.ActionID, "view-") {
@@ -96,6 +104,8 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			viewType := parts[1] // logs, trace, finops
 			namespace := parts[2]
 			podName := strings.Join(parts[3:], "-")
+
+			slog.Info("Opening forensic explorer modal", "type", viewType, "ns", namespace, "pod", podName)
 
 			var title, content string
 
@@ -128,7 +138,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 
 			err = notifications.SendLogModal(s.config, payload.TriggerID, namespace, podName, title, content)
 			if err != nil {
-				slog.Error("Failed to open modal", "error", err)
+				slog.Error("Failed to open Slack modal", "type", viewType, "error", err)
 			}
 			w.WriteHeader(http.StatusOK)
 			return
@@ -142,7 +152,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			// In block actions, the action block can have a block_id as the callback
 			callbackID = action.BlockID
 		}
-		slog.Info("Received Slack approval", "callback_id", callbackID)
+		slog.Info("User approved remediation via Slack", "user", payload.User.Name, "callback_id", callbackID)
 		go s.controller.SubmitPendingFix(r.Context(), callbackID)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -155,9 +165,12 @@ func (s *Server) handleGoogleChatInteraction(w http.ResponseWriter, r *http.Requ
 	// Generic handler for Google Chat card interactions
 	var payload map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		slog.Error("Failed to decode Google Chat interaction payload", "error", err)
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
+
+	slog.Info("Received Google Chat interaction")
 
 	// Logic for parsing Google Chat's specific payload format (omitted for brevity in Step 6 logic)
 	// but follows same UUID/Database pattern as Slack.
