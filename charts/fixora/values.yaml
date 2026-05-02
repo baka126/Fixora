@@ -9,6 +9,8 @@ image:
   pullPolicy: IfNotPresent
   tag: "v0.1.0"
 
+logLevel: "INFO" # DEBUG, INFO, WARN, ERROR
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

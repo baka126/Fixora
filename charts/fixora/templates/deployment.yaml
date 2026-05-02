@@ -36,6 +36,8 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/fixora"]
           env:
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
             {{- if .Values.slack.token }}
             - name: SLACK_TOKEN
               valueFrom:
