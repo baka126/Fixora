@@ -199,19 +199,19 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func getEnvBool(key string) bool {
+func getEnvBool(key string, fallback bool) bool {
 	if value, ok := os.LookupEnv(key); ok {
-		b, err := strconv.ParseBool(value)
+		b, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err == nil {
 			return b
 		}
 	}
-	return false
+	return fallback
 }
 
 func getEnvFloat(key string, fallback float64) float64 {
 	if value, ok := os.LookupEnv(key); ok {
-		f, err := strconv.ParseFloat(value, 64)
+		f, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 		if err == nil {
 			return f
 		}
@@ -221,7 +221,7 @@ func getEnvFloat(key string, fallback float64) float64 {
 
 func getEnvInt(key string, fallback int) int {
 	if value, ok := os.LookupEnv(key); ok {
-		i, err := strconv.Atoi(value)
+		i, err := strconv.Atoi(strings.TrimSpace(value))
 		if err == nil {
 			return i
 		}
@@ -231,7 +231,7 @@ func getEnvInt(key string, fallback int) int {
 
 func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	if value, ok := os.LookupEnv(key); ok {
-		d, err := time.ParseDuration(value)
+		d, err := time.ParseDuration(strings.TrimSpace(value))
 		if err == nil {
 			return d
 		}
