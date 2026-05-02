@@ -531,18 +531,22 @@ func (c *Controller) isNamespaceScoped(ns string) bool {
 	if len(c.config.IncludedNamespaces) > 0 {
 		for _, included := range c.config.IncludedNamespaces {
 			if ns == included {
+				slog.Debug("Namespace included", "ns", ns)
 				return true
 			}
 		}
+		slog.Debug("Namespace NOT in inclusion list", "ns", ns)
 		return false
 	}
 
 	// Otherwise check exclusions
 	for _, excluded := range c.config.ExcludedNamespaces {
 		if ns == excluded {
+			slog.Debug("Namespace explicitly excluded", "ns", ns)
 			return false
 		}
 	}
+	slog.Debug("Namespace allowed by default scoping", "ns", ns)
 	return true
 }
 
