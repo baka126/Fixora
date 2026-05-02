@@ -36,12 +36,17 @@ type historyCache struct {
 	// In-memory fallback for alert tracking when DB is not configured
 	recentAlerts map[string]time.Time
 	alertMu      sync.RWMutex
+
+	// In-memory fallback for investigation locks
+	investigationLocks map[string]time.Time
+	lockMu             sync.RWMutex
 }
 
 func newHistoryCache(cfg *config.Config) *historyCache {
 	hc := &historyCache{
-		config:       cfg,
-		recentAlerts: make(map[string]time.Time),
+		config:             cfg,
+		recentAlerts:       make(map[string]time.Time),
+		investigationLocks: make(map[string]time.Time),
 	}
 
 	if cfg.DBHost != "" {
@@ -121,6 +126,11 @@ func (h *historyCache) initDB() {
 			last_processed_at TIMESTAMP NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_processed_alerts_timestamp ON processed_alerts (last_processed_at);`,
+		`CREATE TABLE IF NOT EXISTS investigation_locks (
+			pod_key VARCHAR(512) PRIMARY KEY,
+			locked_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_investigation_locks_timestamp ON investigation_locks (locked_at);`,
 	}
 	for _, q := range queries {
 		_, err := h.db.Exec(q)
@@ -420,4 +430,54 @@ func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertnam
 	h.alertMu.Lock()
 	defer h.alertMu.Unlock()
 	h.recentAlerts[key] = time.Now()
+}
+
+func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod string, window time.Duration) bool {
+	key := fmt.Sprintf("%s/%s", ns, pod)
+	if h.db != nil {
+		tx, err := h.db.BeginTx(ctx, nil)
+		if err != nil {
+			slog.Error("Failed to begin transaction for investigation lock", "error", err)
+			return false
+		}
+		defer tx.Rollback()
+
+		var lockedAt time.Time
+		err = tx.QueryRowContext(ctx, `SELECT locked_at FROM investigation_locks WHERE pod_key = $1 FOR UPDATE`, key).Scan(&lockedAt)
+		
+		if err == nil {
+			// Lock exists, check if it's within the window
+			if time.Since(lockedAt) < window {
+				return false
+			}
+			// Expired, update it
+			_, err = tx.ExecContext(ctx, `UPDATE investigation_locks SET locked_at = $1 WHERE pod_key = $2`, time.Now(), key)
+		} else if err == sql.ErrNoRows {
+			// No lock, create it
+			_, err = tx.ExecContext(ctx, `INSERT INTO investigation_locks (pod_key, locked_at) VALUES ($1, $2)`, key, time.Now())
+		} else {
+			slog.Error("Failed to query investigation lock", "error", err)
+			return false
+		}
+
+		if err != nil {
+			slog.Error("Failed to manage investigation lock", "error", err)
+			return false
+		}
+
+		if err := tx.Commit(); err != nil {
+			slog.Error("Failed to commit investigation lock", "error", err)
+			return false
+		}
+		return true
+	}
+
+	h.lockMu.Lock()
+	defer h.lockMu.Unlock()
+	last, exists := h.investigationLocks[key]
+	if exists && time.Since(last) < window {
+		return false
+	}
+	h.investigationLocks[key] = time.Now()
+	return true
 }

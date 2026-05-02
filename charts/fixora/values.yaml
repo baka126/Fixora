@@ -98,6 +98,12 @@ features:
   # Pull firing alerts from Alertmanager API
   alertmanagerScraper:
     enabled: false
+    # Optional label filters to reduce noise
+    includeLabels: {}
+      # fixora: "true"
+      # severity: "critical"
+    excludeLabels: {}
+      # alertname: "Watchdog"
 
   # ArgoCD integration for repo discovery
   argocd:

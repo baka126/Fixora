@@ -332,6 +332,11 @@ func (c *Controller) scanForLeaks() {
 				}
 			}
 
+			// Global Investigation Lock check for Leaks
+			if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, 30*time.Minute) {
+				continue
+			}
+
 			var metricProof strings.Builder
 			metricProof.WriteString(fmt.Sprintf("Memory Growth: %.1f%% in the last hour.\n", growthRate*100))
 			metricProof.WriteString(fmt.Sprintf("Current Usage: %.2f MiB.\n", last/1024/1024))
@@ -451,6 +456,7 @@ func (c *Controller) scanForAppFailures() {
 	}
 
 	slog.Info("Performing bulk scan for application performance degradation (5xx/Latency)")
+	ctx := context.Background()
 
 	// 1. Bulk check for 5xx Error Rates
 	highErrorPods, err := bulk.GetHighErrorRatePods(c.config.PrometheusHighErrorRateThreshold)
@@ -459,6 +465,12 @@ func (c *Controller) scanForAppFailures() {
 			if !c.isNamespaceScoped(p.Namespace) {
 				continue
 			}
+			
+			// Deduplication check
+			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
+				continue
+			}
+
 			slog.Warn("Bulk scan: High HTTP error rate detected", "pod", p.PodName, "rate", fmt.Sprintf("%.2f%%", p.Value*100))
 			c.queue.Add(podWorkItem{
 				namespace: p.Namespace,
@@ -477,6 +489,12 @@ func (c *Controller) scanForAppFailures() {
 			if !c.isNamespaceScoped(p.Namespace) {
 				continue
 			}
+
+			// Deduplication check
+			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
+				continue
+			}
+
 			slog.Warn("Bulk scan: SLA breach - High latency detected", "pod", p.PodName, "p99", fmt.Sprintf("%.2fs", p.Value))
 			c.queue.Add(podWorkItem{
 				namespace: p.Namespace,
@@ -509,6 +527,33 @@ func (c *Controller) isNamespaceScoped(ns string) bool {
 	return true
 }
 
+func (c *Controller) matchesAlertFilters(alert alertmanager.Alert) bool {
+	// 1. Check Include Labels (Must match all provided includes)
+	if len(c.config.AlertmanagerIncludeLabels) > 0 {
+		for k, v := range c.config.AlertmanagerIncludeLabels {
+			if alert.Labels[k] != v {
+				return false
+			}
+		}
+	}
+
+	// 2. Check Exclude Labels (Must not match any provide exclude)
+	if len(c.config.AlertmanagerExcludeLabels) > 0 {
+		for k, v := range c.config.AlertmanagerExcludeLabels {
+			if alert.Labels[k] == v {
+				return false
+			}
+		}
+	}
+
+	// 3. Essential label check: Must have pod and namespace to be actionable by Fixora
+	if alert.Labels["namespace"] == "" || alert.Labels["pod"] == "" {
+		return false
+	}
+
+	return true
+}
+
 // pullAlertsFromAlertmanager scrapes active alerts from Alertmanager and triggers diagnostics for pod-related alerts.
 func (c *Controller) pullAlertsFromAlertmanager() {
 	if c.amClient == nil {
@@ -527,25 +572,32 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 			continue
 		}
 
+		if !c.matchesAlertFilters(alert) {
+			continue
+		}
+
 		ns := alert.Labels["namespace"]
 		pod := alert.Labels["pod"]
 		reason := alert.Labels["alertname"]
 
-		if ns != "" && pod != "" {
-			if !c.isNamespaceScoped(ns) {
-				continue
-			}
-
-			// Check history to avoid duplicate diagnostics for the same firing alert within a 30m window
-			ctx := context.Background()
-			if c.history.IsAlertRecentlyProcessed(ctx, ns, pod, reason, 30*time.Minute) {
-				continue
-			}
-
-			slog.Info("Alertmanager scraper triggered diagnostic", "pod", pod, "reason", reason)
-			c.DiagnosePodByName(ns, pod, reason)
-			c.history.MarkAlertProcessed(ctx, ns, pod, reason)
+		if !c.isNamespaceScoped(ns) {
+			continue
 		}
+
+		// Global Investigation Lock check
+		ctx := context.Background()
+		if !c.history.CheckAndLockInvestigation(ctx, ns, pod, 30*time.Minute) {
+			continue
+		}
+
+		// Double-check recent alert processing specifically for Alertmanager source
+		if c.history.IsAlertRecentlyProcessed(ctx, ns, pod, reason, 30*time.Minute) {
+			continue
+		}
+
+		slog.Info("Alertmanager scraper triggered diagnostic", "pod", pod, "reason", reason)
+		c.DiagnosePodByName(ns, pod, reason)
+		c.history.MarkAlertProcessed(ctx, ns, pod, reason)
 	}
 }
 
@@ -559,8 +611,13 @@ func (c *Controller) enqueuePod(obj interface{}) {
 
 	reason := ""
 
-	// Check for infrastructure/scheduling failures
-	if pod.Status.Phase == v1.PodPending {
+	// 1. Check Pod Phase-level failures
+	if pod.Status.Phase == v1.PodFailed {
+		reason = "PodFailed: " + pod.Status.Reason // Catches Evicted, DeadlineExceeded at pod level
+	}
+
+	// 2. Check for infrastructure/scheduling failures
+	if reason == "" && pod.Status.Phase == v1.PodPending {
 		for _, cond := range pod.Status.Conditions {
 			if cond.Type == v1.PodScheduled && cond.Status == v1.ConditionFalse && cond.Reason == "Unschedulable" {
 				reason = "Pending (Unschedulable)"
@@ -569,29 +626,35 @@ func (c *Controller) enqueuePod(obj interface{}) {
 		}
 	}
 
-	// Check for node issues reflected on the pod
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
-			if cond.Reason == "NodeNotReady" {
-				reason = "NodeNotReady"
-				break
+	// 3. Check for node issues reflected on the pod
+	if reason == "" {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
+				if cond.Reason == "NodeNotReady" {
+					reason = "NodeNotReady"
+					break
+				}
 			}
 		}
 	}
 
-	// Check container states for application and configuration errors
+	// 4. Check container states for application and configuration errors
 	checkContainers := func(statuses []v1.ContainerStatus, prefix string) {
 		for _, status := range statuses {
 			if status.State.Waiting != nil {
 				r := status.State.Waiting.Reason
-				if r == "CrashLoopBackOff" || r == "CreateContainerConfigError" || r == "ImagePullBackOff" || r == "ErrImagePull" {
+				if r == "CrashLoopBackOff" || r == "CreateContainerConfigError" || r == "ImagePullBackOff" || r == "ErrImagePull" || r == "CreateContainerError" {
 					reason = prefix + r
 					return
 				}
 			} else if status.State.Terminated != nil {
 				r := status.State.Terminated.Reason
-				if r == "OOMKilled" {
+				if r == "OOMKilled" || r == "ContainerCannotRun" || r == "DeadlineExceeded" {
 					reason = prefix + r
+					return
+				}
+				if status.State.Terminated.ExitCode != 0 {
+					reason = fmt.Sprintf("%sExitCode:%d", prefix, status.State.Terminated.ExitCode)
 					return
 				}
 			}
@@ -605,7 +668,26 @@ func (c *Controller) enqueuePod(obj interface{}) {
 		checkContainers(pod.Status.ContainerStatuses, "")
 	}
 
+	// 5. Check for Running but Unready (Health Check Failures)
+	if reason == "" && pod.Status.Phase == v1.PodRunning {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
+				// Only enqueue if it's been unready for a bit (avoid noise during startup)
+				if time.Since(cond.LastTransitionTime.Time) > 30*time.Second {
+					reason = "Unready (Health Check Failure?)"
+					break
+				}
+			}
+		}
+	}
+
 	if reason != "" {
+		// Global Investigation Lock check for k8s watcher
+		ctx := context.Background()
+		if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, 30*time.Minute) {
+			return
+		}
+
 		c.queue.Add(podWorkItem{
 			namespace: pod.Namespace,
 			name:      pod.Name,

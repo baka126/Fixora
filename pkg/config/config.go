@@ -72,6 +72,10 @@ type Config struct {
 	IncludedNamespaces []string
 	ExcludedNamespaces []string
 
+	// Alertmanager Filtering
+	AlertmanagerIncludeLabels map[string]string
+	AlertmanagerExcludeLabels map[string]string
+
 	// Feature Toggles & Predictive Tuning
 	PredictiveEnabled         bool
 	PredictiveGrowthThreshold float64
@@ -143,6 +147,10 @@ func Load() *Config {
 		// Scoping
 		IncludedNamespaces: getEnvSlice("INCLUDED_NAMESPACES", []string{}),
 		ExcludedNamespaces: getEnvSlice("EXCLUDED_NAMESPACES", []string{"kube-system", "monitoring"}),
+
+		// Alertmanager Filtering
+		AlertmanagerIncludeLabels: getEnvMap("ALERTMANAGER_INCLUDE_LABELS", map[string]string{}),
+		AlertmanagerExcludeLabels: getEnvMap("ALERTMANAGER_EXCLUDE_LABELS", map[string]string{}),
 
 		PredictiveEnabled:         getEnvBool("PREDICTIVE_ENABLED", true),
 		PredictiveGrowthThreshold: getEnvFloat("PREDICTIVE_GROWTH_THRESHOLD", 0.20),
@@ -234,6 +242,23 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 func getEnvSlice(key string, fallback []string) []string {
 	if value, ok := os.LookupEnv(key); ok {
 		return strings.Split(value, ",")
+	}
+	return fallback
+}
+
+func getEnvMap(key string, fallback map[string]string) map[string]string {
+	if value, ok := os.LookupEnv(key); ok {
+		m := make(map[string]string)
+		pairs := strings.Split(value, ",")
+		for _, pair := range pairs {
+			kv := strings.Split(pair, "=")
+			if len(kv) == 2 {
+				m[kv[0]] = kv[1]
+			}
+		}
+		if len(m) > 0 {
+			return m
+		}
 	}
 	return fallback
 }

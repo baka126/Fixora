@@ -171,6 +171,12 @@ spec:
             - name: EXCLUDED_NAMESPACES
               value: {{ join "," .Values.scoping.excludedNamespaces | quote }}
 
+            # Alertmanager Filtering
+            - name: ALERTMANAGER_INCLUDE_LABELS
+              value: {{ range $k, $v := .Values.features.alertmanagerScraper.includeLabels }}{{ $k }}={{ $v }},{{ end }}
+            - name: ALERTMANAGER_EXCLUDE_LABELS
+              value: {{ range $k, $v := .Values.features.alertmanagerScraper.excludeLabels }}{{ $k }}={{ $v }},{{ end }}
+
             - name: PREDICTIVE_ENABLED
               value: {{ if and .Values.features.predictive.enabled (include "fixora.databaseEnabled" .) }}"true"{{ else }}"false"{{ end }}
             - name: PREDICTIVE_GROWTH_THRESHOLD
