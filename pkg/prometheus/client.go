@@ -165,6 +165,23 @@ func (c *Client) GetP99Latency(namespace, pod string) (float64, error) {
 	return float64(vector[0].Value), nil
 }
 
+// GetHTTPRequestsPerSecond returns the total requests per second over the last 5 minutes.
+func (c *Client) GetHTTPRequestsPerSecond(namespace, pod string) (float64, error) {
+	query := fmt.Sprintf(`sum(rate(http_requests_total{namespace="%s", pod=~".*%s.*"}[5m]))`, namespace, pod)
+
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return 0, err
+	}
+
+	vector, ok := result.(model.Vector)
+	if !ok || len(vector) == 0 {
+		return 0, fmt.Errorf("no RPS data found for pod %s/%s", namespace, pod)
+	}
+
+	return float64(vector[0].Value), nil
+}
+
 func (c *Client) GetPodMemoryRSS(namespace, podName string) (float64, error) {
 	query := fmt.Sprintf(`sum(container_memory_rss{namespace="%s", pod="%s", container!=""})`, namespace, podName)
 	result, _, err := c.api.Query(context.TODO(), query, time.Now())
@@ -195,5 +212,63 @@ func (c *Client) GetPodMemoryCache(namespace, podName string) (float64, error) {
 	return float64(vector[0].Value), nil
 }
 
-// Ensure Client implements metrics.MetricsProvider
-var _ metrics.MetricsProvider = (*Client)(nil)
+// Ensure Client implements metrics.BulkMetricsProvider
+var _ metrics.BulkMetricsProvider = (*Client)(nil)
+
+// GetHighErrorRatePods finds all pods exceeding the error rate threshold in a single query.
+func (c *Client) GetHighErrorRatePods(threshold float64) ([]metrics.PodMetricResult, error) {
+	query := fmt.Sprintf(`
+		(
+			sum by (namespace, pod) (rate(http_requests_total{status=~"5.."}[5m]))
+			/
+			sum by (namespace, pod) (rate(http_requests_total[5m]))
+		) > %f
+	`, threshold)
+
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	vector, ok := result.(model.Vector)
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+	}
+
+	var results []metrics.PodMetricResult
+	for _, sample := range vector {
+		results = append(results, metrics.PodMetricResult{
+			Namespace: string(sample.Metric["namespace"]),
+			PodName:   string(sample.Metric["pod"]),
+			Value:     float64(sample.Value),
+		})
+	}
+	return results, nil
+}
+
+// GetHighLatencyPods finds all pods exceeding the latency threshold in a single query.
+func (c *Client) GetHighLatencyPods(threshold float64) ([]metrics.PodMetricResult, error) {
+	query := fmt.Sprintf(`
+		histogram_quantile(0.99, sum by (le, namespace, pod) (rate(http_request_duration_seconds_bucket[5m]))) > %f
+	`, threshold)
+
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	vector, ok := result.(model.Vector)
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+	}
+
+	var results []metrics.PodMetricResult
+	for _, sample := range vector {
+		results = append(results, metrics.PodMetricResult{
+			Namespace: string(sample.Metric["namespace"]),
+			PodName:   string(sample.Metric["pod"]),
+			Value:     float64(sample.Value),
+		})
+	}
+	return results, nil
+}

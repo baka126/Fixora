@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"fixora/pkg/config"
@@ -26,9 +27,12 @@ type EvidenceChain struct {
 	FinOpsDetails string
 	ShowFixButton bool
 	ShowPRButton  bool
+	ShowEventButton bool
 }
 
 func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
+	slog.Info("Dispatching forensic report to configured notification channels", "ns", evidence.Namespace, "pod", evidence.PodName, "predictive", evidence.PredictiveWarning)
+
 	// Defensive Scrubbing for all fields to prevent leakage of AI-repeated PII or metrics data
 	evidence.MetricProof = security.ScrubPII(evidence.MetricProof)
 	evidence.ClusterContext = security.ScrubPII(evidence.ClusterContext)
@@ -41,12 +45,22 @@ func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 
 	var errs []string
 
-	if err := sendSlackEvidenceChain(cfg, evidence); err != nil {
-		errs = append(errs, fmt.Sprintf("slack: %v", err))
+	if cfg.SlackToken != "" {
+		if err := sendSlackEvidenceChain(cfg, evidence); err != nil {
+			slog.Error("Failed to send report to Slack", "ns", evidence.Namespace, "pod", evidence.PodName, "error", err)
+			errs = append(errs, fmt.Sprintf("slack: %v", err))
+		} else {
+			slog.Debug("Successfully sent report to Slack", "ns", evidence.Namespace, "pod", evidence.PodName)
+		}
 	}
 
-	if err := sendGoogleChatEvidenceChain(cfg, evidence); err != nil {
-		errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+	if cfg.GoogleChatWebhookURL != "" {
+		if err := sendGoogleChatEvidenceChain(cfg, evidence); err != nil {
+			slog.Error("Failed to send report to Google Chat", "ns", evidence.Namespace, "pod", evidence.PodName, "error", err)
+			errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+		} else {
+			slog.Debug("Successfully sent report to Google Chat", "ns", evidence.Namespace, "pod", evidence.PodName)
+		}
 	}
 
 	if len(errs) > 0 {
@@ -56,15 +70,20 @@ func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 }
 
 func SendNotification(cfg *config.Config, message string) error {
+	slog.Info("Dispatching system notification", "msg_preview", truncateForLog(message, 50))
 	message = security.ScrubPII(message)
 	var errs []string
 
-	if err := sendSlackNotification(cfg, message); err != nil {
-		errs = append(errs, fmt.Sprintf("slack: %v", err))
+	if cfg.SlackToken != "" {
+		if err := sendSlackNotification(cfg, message); err != nil {
+			errs = append(errs, fmt.Sprintf("slack: %v", err))
+		}
 	}
 
-	if err := sendGoogleChatNotification(cfg, message); err != nil {
-		errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+	if cfg.GoogleChatWebhookURL != "" {
+		if err := sendGoogleChatNotification(cfg, message); err != nil {
+			errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+		}
 	}
 
 	if len(errs) > 0 {
@@ -74,15 +93,20 @@ func SendNotification(cfg *config.Config, message string) error {
 }
 
 func SendInteractiveNotification(cfg *config.Config, message, callbackID string) error {
+	slog.Info("Dispatching interactive notification", "callback_id", callbackID)
 	message = security.ScrubPII(message)
 	var errs []string
 
-	if err := sendSlackInteractiveNotification(cfg, message, callbackID); err != nil {
-		errs = append(errs, fmt.Sprintf("slack: %v", err))
+	if cfg.SlackToken != "" {
+		if err := sendSlackInteractiveNotification(cfg, message, callbackID); err != nil {
+			errs = append(errs, fmt.Sprintf("slack: %v", err))
+		}
 	}
 
-	if err := sendGoogleChatInteractiveNotification(cfg, message, callbackID); err != nil {
-		errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+	if cfg.GoogleChatWebhookURL != "" {
+		if err := sendGoogleChatInteractiveNotification(cfg, message, callbackID); err != nil {
+			errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+		}
 	}
 
 	if len(errs) > 0 {
@@ -92,20 +116,32 @@ func SendInteractiveNotification(cfg *config.Config, message, callbackID string)
 }
 
 func SendRemediationApproval(cfg *config.Config, namespace, pod, patch, callbackID string) error {
+	slog.Info("Dispatching remediation approval request", "ns", namespace, "pod", pod, "callback_id", callbackID)
 	// Patch is already scrubbed by AI generation process in controller, but defensive scrub here too
 	patch = security.ScrubPII(patch)
 	var errs []string
 
-	if err := sendSlackRemediationApproval(cfg, namespace, pod, patch, callbackID); err != nil {
-		errs = append(errs, fmt.Sprintf("slack: %v", err))
+	if cfg.SlackToken != "" {
+		if err := sendSlackRemediationApproval(cfg, namespace, pod, patch, callbackID); err != nil {
+			errs = append(errs, fmt.Sprintf("slack: %v", err))
+		}
 	}
 
-	if err := sendGoogleChatRemediationApproval(cfg, namespace, pod, patch, callbackID); err != nil {
-		errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+	if cfg.GoogleChatWebhookURL != "" {
+		if err := sendGoogleChatRemediationApproval(cfg, namespace, pod, patch, callbackID); err != nil {
+			errs = append(errs, fmt.Sprintf("googlechat: %v", err))
+		}
 	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to send remediation approval: %s", strings.Join(errs, ", "))
 	}
 	return nil
+}
+
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }

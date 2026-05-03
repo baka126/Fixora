@@ -26,7 +26,6 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 	metricSection := createSlackSection("📊 *Metric Proof*", evidence.MetricProof)
 	contextSection := createSlackSection("🔍 *Cluster Context*", evidence.ClusterContext)
 	patternSection := createSlackSection("📈 *Historical Pattern*", evidence.HistoricalPattern)
-	timelineSection := createSlackSection("🕒 *Event Timeline*", evidence.EventTimeline)
 	rootCauseSection := createSlackSection("🧠 *Root Cause*", evidence.RootCause)
 	finOpsSection := createSlackSection("💰 *FinOps Impact*", evidence.FinOpsImpact)
 
@@ -47,37 +46,57 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 	blocks = append(blocks,
 		contextSection,
 		patternSection,
-		timelineSection,
+	)
+
+	// If not in App Mode, embed the timeline directly as buttons won't work in simple webhooks
+	if !cfg.SlackAppMode && evidence.EventTimeline != "" {
+		timelineText := evidence.EventTimeline
+		if len(timelineText) > 2000 {
+			timelineText = "... [truncated] ...\n" + timelineText[len(timelineText)-2000:]
+		}
+		timelineSection := createSlackSection("🕒 *Event Timeline*", "```\n"+timelineText+"\n```")
+		blocks = append(blocks, timelineSection)
+	}
+
+	blocks = append(blocks,
 		divider,
 		rootCauseSection,
 		finOpsSection,
 	)
 
-	// Interactive Buttons
+	// Interactive Buttons (Only if App Mode is enabled)
 	var actionElements []slack.BlockElement
 
-	if evidence.Namespace != "" && evidence.PodName != "" {
-		logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
-		logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
-		actionElements = append(actionElements, logBtn)
-	}
+	if cfg.SlackAppMode {
+		if evidence.Namespace != "" && evidence.PodName != "" {
+			logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
+			logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
+			actionElements = append(actionElements, logBtn)
 
-	if evidence.StackTrace != "" {
-		traceActionID := fmt.Sprintf("view-trace-%s-%s", evidence.Namespace, evidence.PodName)
-		traceBtn := slack.NewButtonBlockElement("view_trace", traceActionID, slack.NewTextBlockObject("plain_text", "📜 Show Stack Trace", false, false))
-		actionElements = append(actionElements, traceBtn)
-	}
+			if evidence.ShowEventButton {
+				eventActionID := fmt.Sprintf("view-events-%s-%s", evidence.Namespace, evidence.PodName)
+				eventBtn := slack.NewButtonBlockElement("view_events", eventActionID, slack.NewTextBlockObject("plain_text", "🕒 View Event Timeline", false, false))
+				actionElements = append(actionElements, eventBtn)
+			}
+		}
 
-	if evidence.FinOpsDetails != "" {
-		finOpsActionID := fmt.Sprintf("view-finops-%s-%s", evidence.Namespace, evidence.PodName)
-		finOpsBtn := slack.NewButtonBlockElement("view_finops", finOpsActionID, slack.NewTextBlockObject("plain_text", "💰 View FinOps Impact", false, false))
-		actionElements = append(actionElements, finOpsBtn)
-	}
+		if evidence.StackTrace != "" {
+			traceActionID := fmt.Sprintf("view-trace-%s-%s", evidence.Namespace, evidence.PodName)
+			traceBtn := slack.NewButtonBlockElement("view_trace", traceActionID, slack.NewTextBlockObject("plain_text", "📜 Show Stack Trace", false, false))
+			actionElements = append(actionElements, traceBtn)
+		}
 
-	if evidence.ShowFixButton {
-		fixBtn := slack.NewButtonBlockElement("execute_fix", "execute_fix", slack.NewTextBlockObject("plain_text", "⚡ Execute Fix", false, false))
-		fixBtn.Style = slack.StylePrimary
-		actionElements = append(actionElements, fixBtn)
+		if evidence.FinOpsDetails != "" {
+			finOpsActionID := fmt.Sprintf("view-finops-%s-%s", evidence.Namespace, evidence.PodName)
+			finOpsBtn := slack.NewButtonBlockElement("view_finops", finOpsActionID, slack.NewTextBlockObject("plain_text", "💰 View FinOps Impact", false, false))
+			actionElements = append(actionElements, finOpsBtn)
+		}
+
+		if evidence.ShowFixButton {
+			fixBtn := slack.NewButtonBlockElement("execute_fix", "execute_fix", slack.NewTextBlockObject("plain_text", "⚡ Execute Fix", false, false))
+			fixBtn.Style = slack.StylePrimary
+			actionElements = append(actionElements, fixBtn)
+		}
 	}
 
 	if len(actionElements) > 0 {

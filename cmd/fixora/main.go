@@ -2,9 +2,10 @@ package main
 
 import (
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -18,7 +19,31 @@ import (
 	"fixora/pkg/server"
 )
 
+func initLogger() {
+	level := slog.LevelInfo
+	if os.Getenv("LOG_LEVEL") != "" {
+		switch strings.ToUpper(os.Getenv("LOG_LEVEL")) {
+		case "DEBUG":
+			level = slog.LevelDebug
+		case "WARN":
+			level = slog.LevelWarn
+		case "ERROR":
+			level = slog.LevelError
+		}
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: level,
+	}
+
+	handler := slog.NewJSONHandler(os.Stdout, opts)
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+}
+
 func main() {
+	initLogger()
+
 	var kubeconfig *string
 	if home := homedir.HomeDir(); home != "" {
 		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
@@ -28,6 +53,7 @@ func main() {
 	flag.Parse()
 
 	cfg := config.Load()
+	slog.Info("Starting Fixora", "mode", cfg.Mode, "log_level", os.Getenv("LOG_LEVEL"))
 
 	var k8sConfig *rest.Config
 	var err error
@@ -36,37 +62,44 @@ func main() {
 	if *kubeconfig == "" {
 		k8sConfig, err = rest.InClusterConfig()
 		if err != nil {
-			log.Fatalf("Error building in-cluster config: %s", err.Error())
+			slog.Error("Error building in-cluster config", "error", err)
+			os.Exit(1)
 		}
 	} else {
 		// If kubeconfig is provided, check if it exists
 		if _, statErr := os.Stat(*kubeconfig); os.IsNotExist(statErr) {
 			// If provided but doesn't exist, fallback to in-cluster
+			slog.Info("Kubeconfig not found at path, falling back to in-cluster config", "path", *kubeconfig)
 			k8sConfig, err = rest.InClusterConfig()
 			if err != nil {
-				log.Fatalf("Error building in-cluster config (fallback): %s", err.Error())
+				slog.Error("Error building in-cluster config (fallback)", "error", err)
+				os.Exit(1)
 			}
 		} else {
 			k8sConfig, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
 			if err != nil {
-				log.Fatalf("Error building kubeconfig from flags: %s", err.Error())
+				slog.Error("Error building kubeconfig from flags", "path", *kubeconfig, "error", err)
+				os.Exit(1)
 			}
 		}
 	}
 
 	clientset, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
-		log.Fatalf("Error creating clientset: %s", err.Error())
+		slog.Error("Error creating clientset", "error", err)
+		os.Exit(1)
 	}
 
 	dynamicClient, err := dynamic.NewForConfig(k8sConfig)
 	if err != nil {
-		log.Fatalf("Error creating dynamic client: %s", err.Error())
+		slog.Error("Error creating dynamic client", "error", err)
+		os.Exit(1)
 	}
 
 	metricsClient, err := metricsclientset.NewForConfig(k8sConfig)
 	if err != nil {
-		log.Fatalf("Error creating metrics client: %s", err.Error())
+		slog.Error("Error creating metrics client", "error", err)
+		os.Exit(1)
 	}
 
 	stopCh := make(chan struct{})
@@ -74,9 +107,12 @@ func main() {
 
 	ctrl := controller.NewController(clientset, dynamicClient, metricsClient, cfg)
 	srv := server.New(ctrl, cfg)
+	
+	slog.Info("Initialization complete, starting services")
 	go srv.Start()
 
 	go ctrl.Run(stopCh)
 
 	<-stopCh
+	slog.Info("Shutting down Fixora")
 }

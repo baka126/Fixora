@@ -9,6 +9,8 @@ image:
   pullPolicy: IfNotPresent
   tag: "v0.1.0"
 
+logLevel: "INFO" # DEBUG, INFO, WARN, ERROR
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -38,9 +40,11 @@ slack:
   token: ""
   signingSecret: ""
   channel: ""
+  appMode: false # Set to true to enable interactive buttons and modals (requires Slack App configuration)
 
 googleChat:
   webhookUrl: ""
+  appMode: false # Set to true if configured as a full Chat App (enables interactive buttons)
 
 prometheus:
   url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
@@ -74,20 +78,56 @@ webhook:
 # FinOps Config
 finops:
   infracostAPIKey: ""
+  revenuePerRequest: 0.0
+  latencyThresholdMS: 500.0
+  latencyPenaltyPerHour: 0.0
 
-# Feature Toggles
+# Feature Toggles (Modular Architecture)
 features:
+  # Watch K8s Events and Pod status changes (Highly efficient)
+  k8sWatcher:
+    enabled: true
+  
+  # Scan for 5xx errors and Latency spikes via Prometheus (Bulk queries)
+  performanceScanner:
+    enabled: false
+    thresholds:
+      errorRate: 0.05    # 5% threshold
+      latency: 2.0      # 2 second P99 threshold
+  
+  # Scan for memory leak trajectories via Prometheus
+  leakScanner:
+    enabled: false
+  
+  # Pull firing alerts from Alertmanager API
+  alertmanagerScraper:
+    enabled: false
+    # Optional label filters to reduce noise
+    includeLabels: {}
+      # fixora: "true"
+      # severity: "critical"
+    excludeLabels: {}
+      # alertname: "Watchdog"
+
+  # ArgoCD integration for repo discovery
   argocd:
     enabled: false
     namespace: "argocd"
     url: ""
     token: ""
+
+  # Predictive analysis & historical state
   predictive:
     enabled: true
+    growthThreshold: 0.20
+    scanInterval: 5m
+    minDataPoints: 10
+
+  # Dedicated database for state and history
   database:
     host: ""
     port: "5432"
-    user: ""
+    user: "fixora"
     password: ""
     name: "fixora"
     embedded:
@@ -101,6 +141,11 @@ features:
         size: 8Gi
         storageClassName: ""
       resources: {}
+
+# Scoping (Scale-aware)
+scoping:
+  includedNamespaces: [] # Empty means all namespaces except excluded
+  excludedNamespaces: ["kube-system", "monitoring", "fixora"]
 
 # Gateway API support
 httpRoute:
@@ -124,21 +169,14 @@ ingress:
         - path: /
           pathType: ImplementationSpecific
   tls: []
-  #  - secretName: chart-example-tls
-  #    hosts:
-  #      - chart-example.local
 
 vcs:
-  # Global VCS tokens. These are used if no namespace-specific secret is found.
   github:
     token: ""
   gitlab:
     token: ""
     baseUrl: ""
-  # Multi-tenant / Namespace-specific VCS Support:
-  # Fixora can use different tokens for different namespaces.
-  # To use this, create a secret named 'fixora-vcs' in the target application namespace:
-  # kubectl create secret generic fixora-vcs --from-literal=github-token=YOUR_TOKEN -n target-namespace
+  trustedDomains: ["github.com", "gitlab.com"]
 
 service:
   type: ClusterIP

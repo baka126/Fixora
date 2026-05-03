@@ -102,5 +102,10 @@ func (p *K8sMetricsProvider) GetP99Latency(ns, pod string) (float64, error) {
 	return 0, fmt.Errorf("P99 latency metrics are not supported by the K8s Metrics API")
 }
 
+// GetHTTPRequestsPerSecond is not supported by the K8s Metrics API.
+func (p *K8sMetricsProvider) GetHTTPRequestsPerSecond(ns, pod string) (float64, error) {
+	return 0, fmt.Errorf("RPS metrics are not supported by the K8s Metrics API")
+}
+
 // Ensure K8sMetricsProvider implements MetricsProvider
 var _ MetricsProvider = (*K8sMetricsProvider)(nil)

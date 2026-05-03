@@ -20,7 +20,9 @@ type Config struct {
 	SlackToken           string
 	SlackSigningSecret   string
 	SlackChannel         string
+	SlackAppMode         bool
 	GoogleChatWebhookURL string
+	GoogleChatAppMode    bool
 	ServerPort           string
 	Mode                 OperatingMode
 	ModeApprovalTTL      time.Duration
@@ -58,6 +60,24 @@ type Config struct {
 	DBPassword string
 	DBName     string
 
+	// Modular Feature Toggles
+	K8sWatcherEnabled          bool
+	PerformanceScannerEnabled   bool
+	LeakScannerEnabled         bool
+	AlertmanagerScraperEnabled bool
+
+	// Performance Scanner Thresholds
+	PrometheusHighErrorRateThreshold float64
+	PrometheusHighLatencyThreshold   float64
+
+	// Scoping
+	IncludedNamespaces []string
+	ExcludedNamespaces []string
+
+	// Alertmanager Filtering
+	AlertmanagerIncludeLabels map[string]string
+	AlertmanagerExcludeLabels map[string]string
+
 	// Feature Toggles & Predictive Tuning
 	PredictiveEnabled         bool
 	PredictiveGrowthThreshold float64
@@ -80,7 +100,9 @@ func Load() *Config {
 		SlackToken:           os.Getenv("SLACK_TOKEN"),
 		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
 		SlackChannel:         os.Getenv("SLACK_CHANNEL"),
+		SlackAppMode:         getEnvBool("SLACK_APP_MODE", false),
 		GoogleChatWebhookURL: os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
+		GoogleChatAppMode:    getEnvBool("GOOGLE_CHAT_APP_MODE", false),
 		ServerPort:           getEnv("SERVER_PORT", "8080"),
 		Mode:                 mode,
 		ModeApprovalTTL:      getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),
@@ -115,6 +137,24 @@ func Load() *Config {
 		DBUser:     os.Getenv("DB_USER"),
 		DBPassword: os.Getenv("DB_PASSWORD"),
 		DBName:     getEnv("DB_NAME", "fixora"),
+
+		// Modular Feature Toggles (Defaulting to safe defaults for scale)
+		K8sWatcherEnabled:          getEnvBool("K8S_WATCHER_ENABLED", true),
+		PerformanceScannerEnabled:   getEnvBool("PERFORMANCE_SCANNER_ENABLED", false),
+		LeakScannerEnabled:         getEnvBool("LEAK_SCANNER_ENABLED", false),
+		AlertmanagerScraperEnabled: getEnvBool("ALERTMANAGER_SCRAPER_ENABLED", false),
+
+		// Thresholds
+		PrometheusHighErrorRateThreshold: getEnvFloat("PROMETHEUS_HIGH_ERROR_RATE_THRESHOLD", 0.05),
+		PrometheusHighLatencyThreshold:   getEnvFloat("PROMETHEUS_HIGH_LATENCY_THRESHOLD", 2.0),
+
+		// Scoping
+		IncludedNamespaces: getEnvSlice("INCLUDED_NAMESPACES", []string{}),
+		ExcludedNamespaces: getEnvSlice("EXCLUDED_NAMESPACES", []string{"kube-system", "monitoring"}),
+
+		// Alertmanager Filtering
+		AlertmanagerIncludeLabels: getEnvMap("ALERTMANAGER_INCLUDE_LABELS", map[string]string{}),
+		AlertmanagerExcludeLabels: getEnvMap("ALERTMANAGER_EXCLUDE_LABELS", map[string]string{}),
 
 		PredictiveEnabled:         getEnvBool("PREDICTIVE_ENABLED", true),
 		PredictiveGrowthThreshold: getEnvFloat("PREDICTIVE_GROWTH_THRESHOLD", 0.20),
@@ -165,7 +205,7 @@ func getEnv(key, fallback string) string {
 
 func getEnvBool(key string, fallback bool) bool {
 	if value, ok := os.LookupEnv(key); ok {
-		b, err := strconv.ParseBool(value)
+		b, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err == nil {
 			return b
 		}
@@ -175,7 +215,7 @@ func getEnvBool(key string, fallback bool) bool {
 
 func getEnvFloat(key string, fallback float64) float64 {
 	if value, ok := os.LookupEnv(key); ok {
-		f, err := strconv.ParseFloat(value, 64)
+		f, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 		if err == nil {
 			return f
 		}
@@ -185,7 +225,7 @@ func getEnvFloat(key string, fallback float64) float64 {
 
 func getEnvInt(key string, fallback int) int {
 	if value, ok := os.LookupEnv(key); ok {
-		i, err := strconv.Atoi(value)
+		i, err := strconv.Atoi(strings.TrimSpace(value))
 		if err == nil {
 			return i
 		}
@@ -195,7 +235,7 @@ func getEnvInt(key string, fallback int) int {
 
 func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	if value, ok := os.LookupEnv(key); ok {
-		d, err := time.ParseDuration(value)
+		d, err := time.ParseDuration(strings.TrimSpace(value))
 		if err == nil {
 			return d
 		}
@@ -205,7 +245,44 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 
 func getEnvSlice(key string, fallback []string) []string {
 	if value, ok := os.LookupEnv(key); ok {
-		return strings.Split(value, ",")
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return []string{}
+		}
+		parts := strings.Split(trimmed, ",")
+		var result []string
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				result = append(result, p)
+			}
+		}
+		return result
+	}
+	return fallback
+}
+
+func getEnvMap(key string, fallback map[string]string) map[string]string {
+	if value, ok := os.LookupEnv(key); ok {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return map[string]string{}
+		}
+		m := make(map[string]string)
+		pairs := strings.Split(trimmed, ",")
+		for _, pair := range pairs {
+			kv := strings.Split(pair, "=")
+			if len(kv) == 2 {
+				k := strings.TrimSpace(kv[0])
+				v := strings.TrimSpace(kv[1])
+				if k != "" {
+					m[k] = v
+				}
+			}
+		}
+		if len(m) > 0 {
+			return m
+		}
 	}
 	return fallback
 }

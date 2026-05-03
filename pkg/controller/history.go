@@ -3,20 +3,25 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
 
+	"fixora/pkg/alertmanager"
 	"fixora/pkg/config"
+	"fixora/pkg/notifications"
 )
 
 type Incident struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Reason     string    `json:"reason"`
-	RootCause  string    `json:"root_cause"`
-	AppliedFix string    `json:"applied_fix,omitempty"` // The patch we generated
+	Timestamp       time.Time `json:"timestamp"`
+	Reason          string    `json:"reason"`
+	RootCause       string    `json:"root_cause"`
+	AppliedFix      string    `json:"applied_fix,omitempty"` // The patch we generated
+	InvestigationID int64     `json:"investigation_id,omitempty"`
 }
 
 type PodHistory struct {
@@ -31,11 +36,26 @@ type PredictionState struct {
 type historyCache struct {
 	config *config.Config
 	db     *sql.DB
+	
+	// In-memory fallback for alert tracking when DB is not configured
+	recentAlerts map[string]time.Time
+	alertMu      sync.RWMutex
+
+	// In-memory fallback for investigation locks
+	investigationLocks map[string]time.Time
+	lockMu             sync.RWMutex
+
+	// In-memory fallback for incident history
+	incidents  map[string][]Incident
+	incidentMu sync.RWMutex
 }
 
 func newHistoryCache(cfg *config.Config) *historyCache {
 	hc := &historyCache{
-		config: cfg,
+		config:             cfg,
+		recentAlerts:       make(map[string]time.Time),
+		investigationLocks: make(map[string]time.Time),
+		incidents:          make(map[string][]Incident),
 	}
 
 	if cfg.DBHost != "" {
@@ -53,7 +73,7 @@ func newHistoryCache(cfg *config.Config) *historyCache {
 			}
 		}
 	} else {
-		slog.Warn("DBHost is empty, history cache will be disabled")
+		slog.Warn("DBHost is empty, history cache will be limited to in-memory for some features")
 	}
 
 	return hc
@@ -61,6 +81,23 @@ func newHistoryCache(cfg *config.Config) *historyCache {
 
 func (h *historyCache) initDB() {
 	queries := []string{
+		`CREATE TABLE IF NOT EXISTS investigations (
+			id SERIAL PRIMARY KEY,
+			namespace VARCHAR(255) NOT NULL,
+			pod_name VARCHAR(255) NOT NULL,
+			timestamp TIMESTAMP NOT NULL,
+			reason TEXT NOT NULL,
+			metric_proof TEXT,
+			cluster_context TEXT,
+			historical_pattern TEXT,
+			event_timeline TEXT,
+			stack_trace TEXT,
+			root_cause TEXT,
+			ai_confidence INTEGER,
+			finops_impact TEXT,
+			finops_details TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_investigations_pod ON investigations (namespace, pod_name);`,
 		`CREATE TABLE IF NOT EXISTS incident_history (
 			id SERIAL PRIMARY KEY,
 			namespace VARCHAR(255) NOT NULL,
@@ -68,9 +105,24 @@ func (h *historyCache) initDB() {
 			timestamp TIMESTAMP NOT NULL,
 			reason TEXT NOT NULL,
 			root_cause TEXT NOT NULL,
-			applied_fix TEXT
+			applied_fix TEXT,
+			investigation_id INTEGER REFERENCES investigations(id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_incident_pod ON incident_history (namespace, pod_name);`,
+		`CREATE TABLE IF NOT EXISTS alerts (
+			id SERIAL PRIMARY KEY,
+			alert_key VARCHAR(512) NOT NULL,
+			namespace VARCHAR(255),
+			pod_name VARCHAR(255),
+			alertname VARCHAR(255) NOT NULL,
+			labels JSONB,
+			annotations JSONB,
+			status VARCHAR(50),
+			source VARCHAR(255),
+			received_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_alerts_pod ON alerts (namespace, pod_name);`,
+		`CREATE INDEX IF NOT EXISTS idx_alerts_received ON alerts (received_at);`,
 		`CREATE TABLE IF NOT EXISTS predictions (
 			id SERIAL PRIMARY KEY,
 			namespace VARCHAR(255) NOT NULL,
@@ -110,6 +162,16 @@ func (h *historyCache) initDB() {
 			timestamp TIMESTAMP NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_leader_checkpoints_timestamp ON leader_checkpoints (timestamp);`,
+		`CREATE TABLE IF NOT EXISTS processed_alerts (
+			alert_key VARCHAR(512) PRIMARY KEY,
+			last_processed_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_processed_alerts_timestamp ON processed_alerts (last_processed_at);`,
+		`CREATE TABLE IF NOT EXISTS investigation_locks (
+			pod_key VARCHAR(512) PRIMARY KEY,
+			locked_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_investigation_locks_timestamp ON investigation_locks (locked_at);`,
 	}
 	for _, q := range queries {
 		_, err := h.db.Exec(q)
@@ -143,7 +205,7 @@ func (h *historyCache) getFromDB(ctx context.Context, namespace, podName string)
 		return nil, false
 	}
 
-	query := `SELECT timestamp, reason, root_cause, COALESCE(applied_fix, '') FROM incident_history WHERE namespace = $1 AND pod_name = $2 ORDER BY timestamp ASC`
+	query := `SELECT timestamp, reason, root_cause, COALESCE(applied_fix, ''), COALESCE(investigation_id, 0) FROM incident_history WHERE namespace = $1 AND pod_name = $2 ORDER BY timestamp ASC`
 	rows, err := h.db.QueryContext(ctx, query, namespace, podName)
 	if err != nil {
 		slog.Error("Failed to query DB for incidents", "error", err)
@@ -154,7 +216,7 @@ func (h *historyCache) getFromDB(ctx context.Context, namespace, podName string)
 	var incidents []Incident
 	for rows.Next() {
 		var inc Incident
-		if err := rows.Scan(&inc.Timestamp, &inc.Reason, &inc.RootCause, &inc.AppliedFix); err == nil {
+		if err := rows.Scan(&inc.Timestamp, &inc.Reason, &inc.RootCause, &inc.AppliedFix, &inc.InvestigationID); err == nil {
 			incidents = append(incidents, inc)
 		}
 	}
@@ -170,10 +232,67 @@ func (h *historyCache) saveToDB(ctx context.Context, namespace, podName string, 
 		return
 	}
 
-	query := `INSERT INTO incident_history (namespace, pod_name, timestamp, reason, root_cause, applied_fix) VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err := h.db.ExecContext(ctx, query, namespace, podName, inc.Timestamp, inc.Reason, inc.RootCause, inc.AppliedFix)
+	var investigationID interface{}
+	if inc.InvestigationID > 0 {
+		investigationID = inc.InvestigationID
+	}
+
+	query := `INSERT INTO incident_history (namespace, pod_name, timestamp, reason, root_cause, applied_fix, investigation_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := h.db.ExecContext(ctx, query, namespace, podName, inc.Timestamp, inc.Reason, inc.RootCause, inc.AppliedFix, investigationID)
 	if err != nil {
 		slog.Error("Failed to insert incident to DB", "error", err)
+	}
+}
+
+func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notifications.EvidenceChain, reason string) int64 {
+	if h.db == nil {
+		return 0
+	}
+
+	query := `
+		INSERT INTO investigations (
+			namespace, pod_name, timestamp, reason, metric_proof, cluster_context,
+			historical_pattern, event_timeline, stack_trace, root_cause,
+			ai_confidence, finops_impact, finops_details
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		RETURNING id
+	`
+	var id int64
+	err := h.db.QueryRowContext(ctx, query,
+		evidence.Namespace, evidence.PodName, time.Now(), reason, evidence.MetricProof, evidence.ClusterContext,
+		evidence.HistoricalPattern, evidence.EventTimeline, evidence.StackTrace, evidence.RootCause,
+		evidence.AIConfidence, evidence.FinOpsImpact, evidence.FinOpsDetails,
+	).Scan(&id)
+
+	if err != nil {
+		slog.Error("Failed to save investigation to DB", "error", err)
+		return 0
+	}
+	return id
+}
+
+func (h *historyCache) SaveAlert(ctx context.Context, alert alertmanager.Alert, source string) {
+	if h.db == nil {
+		return
+	}
+
+	ns := alert.Labels["namespace"]
+	pod := alert.Labels["pod"]
+	alertname := alert.Labels["alertname"]
+	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+
+	labelsJSON, _ := json.Marshal(alert.Labels)
+	annotationsJSON, _ := json.Marshal(alert.Annotations)
+
+	query := `
+		INSERT INTO alerts (alert_key, namespace, pod_name, alertname, labels, annotations, status, source, received_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+	_, err := h.db.ExecContext(ctx, query,
+		key, ns, pod, alertname, labelsJSON, annotationsJSON, alert.Status.State, source, time.Now(),
+	)
+	if err != nil {
+		slog.Error("Failed to save alert to DB", "error", err)
 	}
 }
 
@@ -201,24 +320,47 @@ func (h *historyCache) Get(ctx context.Context, namespace, podName string) (*Pod
 	if h.db != nil {
 		return h.getFromDB(ctx, namespace, podName)
 	}
+
+	h.incidentMu.RLock()
+	defer h.incidentMu.RUnlock()
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+	if incidents, ok := h.incidents[key]; ok && len(incidents) > 0 {
+		return &PodHistory{Incidents: incidents}, true
+	}
 	return nil, false
 }
 
-func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, rootCause string) {
+func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, rootCause string, investigationID int64) {
 	inc := Incident{
-		Timestamp: time.Now(),
-		Reason:    reason,
-		RootCause: rootCause,
+		Timestamp:       time.Now(),
+		Reason:          reason,
+		RootCause:       rootCause,
+		InvestigationID: investigationID,
 	}
 
 	if h.db != nil {
 		h.saveToDB(ctx, namespace, podName, inc)
+		return
 	}
+
+	h.incidentMu.Lock()
+	defer h.incidentMu.Unlock()
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+	h.incidents[key] = append(h.incidents[key], inc)
 }
 
 func (h *historyCache) UpdatePatch(ctx context.Context, namespace, podName, patch string) {
 	if h.db != nil {
 		h.updatePatchDB(ctx, namespace, podName, patch)
+		return
+	}
+
+	h.incidentMu.Lock()
+	defer h.incidentMu.Unlock()
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+	if incidents, ok := h.incidents[key]; ok && len(incidents) > 0 {
+		incidents[len(incidents)-1].AppliedFix = patch
+		h.incidents[key] = incidents
 	}
 }
 
@@ -365,4 +507,113 @@ func (h *historyCache) AllowAutoFixPR(ctx context.Context, maxPerHour int) (bool
 		return false, err
 	}
 	return true, nil
+}
+
+func (h *historyCache) IsAlertRecentlyProcessed(ctx context.Context, ns, pod, alertname string, window time.Duration) bool {
+	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	if h.db != nil {
+		var lastProcessed time.Time
+		err := h.db.QueryRowContext(ctx, `SELECT last_processed_at FROM processed_alerts WHERE alert_key = $1`, key).Scan(&lastProcessed)
+		if err == sql.ErrNoRows {
+			return false
+		} else if err != nil {
+			slog.Error("Failed to query processed alerts", "error", err)
+			return false
+		}
+		
+		isRecent := time.Since(lastProcessed) < window
+		if isRecent {
+			slog.Debug("Alert recently processed (locked)", "key", key, "last_processed", lastProcessed)
+		}
+		return isRecent
+	}
+
+	h.alertMu.RLock()
+	defer h.alertMu.RUnlock()
+	last, exists := h.recentAlerts[key]
+	if !exists {
+		return false
+	}
+	isRecent := time.Since(last) < window
+	if isRecent {
+		slog.Debug("Alert recently processed (locked in-memory)", "key", key, "last_processed", last)
+	}
+	return isRecent
+}
+
+func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertname string) {
+	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	slog.Debug("Marking alert as processed", "key", key)
+	if h.db != nil {
+		query := `
+			INSERT INTO processed_alerts (alert_key, last_processed_at)
+			VALUES ($1, $2)
+			ON CONFLICT (alert_key)
+			DO UPDATE SET last_processed_at = EXCLUDED.last_processed_at
+		`
+		_, err := h.db.ExecContext(ctx, query, key, time.Now())
+		if err != nil {
+			slog.Error("Failed to mark alert as processed in DB", "error", err)
+		}
+		return
+	}
+
+	h.alertMu.Lock()
+	defer h.alertMu.Unlock()
+	h.recentAlerts[key] = time.Now()
+}
+
+func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod string, window time.Duration) bool {
+	key := fmt.Sprintf("%s/%s", ns, pod)
+	if h.db != nil {
+		tx, err := h.db.BeginTx(ctx, nil)
+		if err != nil {
+			slog.Error("Failed to begin transaction for investigation lock", "error", err)
+			return false
+		}
+		defer tx.Rollback()
+
+		var lockedAt time.Time
+		err = tx.QueryRowContext(ctx, `SELECT locked_at FROM investigation_locks WHERE pod_key = $1 FOR UPDATE`, key).Scan(&lockedAt)
+		
+		if err == nil {
+			// Lock exists, check if it's within the window
+			if time.Since(lockedAt) < window {
+				slog.Debug("Investigation lock active", "key", key, "locked_at", lockedAt)
+				return false
+			}
+			// Expired, update it
+			slog.Debug("Investigation lock expired, renewing", "key", key, "previous_lock", lockedAt)
+			_, err = tx.ExecContext(ctx, `UPDATE investigation_locks SET locked_at = $1 WHERE pod_key = $2`, time.Now(), key)
+		} else if err == sql.ErrNoRows {
+			// No lock, create it
+			slog.Debug("No investigation lock found, creating new one", "key", key)
+			_, err = tx.ExecContext(ctx, `INSERT INTO investigation_locks (pod_key, locked_at) VALUES ($1, $2)`, key, time.Now())
+		} else {
+			slog.Error("Failed to query investigation lock", "error", err)
+			return false
+		}
+
+		if err != nil {
+			slog.Error("Failed to manage investigation lock", "error", err)
+			return false
+		}
+
+		if err := tx.Commit(); err != nil {
+			slog.Error("Failed to commit investigation lock", "error", err)
+			return false
+		}
+		return true
+	}
+
+	h.lockMu.Lock()
+	defer h.lockMu.Unlock()
+	last, exists := h.investigationLocks[key]
+	if exists && time.Since(last) < window {
+		slog.Debug("Investigation lock active in-memory", "key", key, "locked_at", last)
+		return false
+	}
+	slog.Debug("Creating/Renewing in-memory investigation lock", "key", key)
+	h.investigationLocks[key] = time.Now()
+	return true
 }
