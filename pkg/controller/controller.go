@@ -1081,6 +1081,8 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	var aggregatedContext strings.Builder
 	repoMap := make(map[string]struct{ Owner, Name, BaseBranch string })
+	
+	tokenizer := security.NewTokenizer()
 
 	for repoURL, info := range deps {
 		u, err := giturls.Parse(repoURL)
@@ -1114,7 +1116,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				contentStr = ai.CompressYAML(contentStr)
 			}
 			if c.config.PrivacyScrubGitContent {
-				contentStr = security.ScrubPII(contentStr)
+				contentStr = tokenizer.Tokenize(contentStr)
 			}
 			aggregatedContext.WriteString(fmt.Sprintf("[REPO: %s/%s, FILE: %s]\n%s\n\n", repoOwner, repoName, path, contentStr))
 		}
@@ -1142,9 +1144,13 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	patchesByRepo := make(map[string][]vcs.FileChange)
 	for _, p := range aiResp.Patches {
 		key := fmt.Sprintf("%s/%s", p.RepoOwner, p.RepoName)
+		content := p.Content
+		if c.config.PrivacyScrubGitContent {
+			content = tokenizer.Detokenize(content)
+		}
 		patchesByRepo[key] = append(patchesByRepo[key], vcs.FileChange{
 			FilePath:   p.FilePath,
-			NewContent: []byte(p.Content),
+			NewContent: []byte(content),
 		})
 	}
 
