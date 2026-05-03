@@ -165,6 +165,23 @@ func (c *Client) GetP99Latency(namespace, pod string) (float64, error) {
 	return float64(vector[0].Value), nil
 }
 
+// GetHTTPRequestsPerSecond returns the total requests per second over the last 5 minutes.
+func (c *Client) GetHTTPRequestsPerSecond(namespace, pod string) (float64, error) {
+	query := fmt.Sprintf(`sum(rate(http_requests_total{namespace="%s", pod=~".*%s.*"}[5m]))`, namespace, pod)
+
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return 0, err
+	}
+
+	vector, ok := result.(model.Vector)
+	if !ok || len(vector) == 0 {
+		return 0, fmt.Errorf("no RPS data found for pod %s/%s", namespace, pod)
+	}
+
+	return float64(vector[0].Value), nil
+}
+
 func (c *Client) GetPodMemoryRSS(namespace, podName string) (float64, error) {
 	query := fmt.Sprintf(`sum(container_memory_rss{namespace="%s", pod="%s", container!=""})`, namespace, podName)
 	result, _, err := c.api.Query(context.TODO(), query, time.Now())

@@ -44,6 +44,10 @@ type historyCache struct {
 	// In-memory fallback for investigation locks
 	investigationLocks map[string]time.Time
 	lockMu             sync.RWMutex
+
+	// In-memory fallback for incident history
+	incidents  map[string][]Incident
+	incidentMu sync.RWMutex
 }
 
 func newHistoryCache(cfg *config.Config) *historyCache {
@@ -51,6 +55,7 @@ func newHistoryCache(cfg *config.Config) *historyCache {
 		config:             cfg,
 		recentAlerts:       make(map[string]time.Time),
 		investigationLocks: make(map[string]time.Time),
+		incidents:          make(map[string][]Incident),
 	}
 
 	if cfg.DBHost != "" {
@@ -315,6 +320,13 @@ func (h *historyCache) Get(ctx context.Context, namespace, podName string) (*Pod
 	if h.db != nil {
 		return h.getFromDB(ctx, namespace, podName)
 	}
+
+	h.incidentMu.RLock()
+	defer h.incidentMu.RUnlock()
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+	if incidents, ok := h.incidents[key]; ok && len(incidents) > 0 {
+		return &PodHistory{Incidents: incidents}, true
+	}
 	return nil, false
 }
 
@@ -328,12 +340,27 @@ func (h *historyCache) Update(ctx context.Context, namespace, podName, reason, r
 
 	if h.db != nil {
 		h.saveToDB(ctx, namespace, podName, inc)
+		return
 	}
+
+	h.incidentMu.Lock()
+	defer h.incidentMu.Unlock()
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+	h.incidents[key] = append(h.incidents[key], inc)
 }
 
 func (h *historyCache) UpdatePatch(ctx context.Context, namespace, podName, patch string) {
 	if h.db != nil {
 		h.updatePatchDB(ctx, namespace, podName, patch)
+		return
+	}
+
+	h.incidentMu.Lock()
+	defer h.incidentMu.Unlock()
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+	if incidents, ok := h.incidents[key]; ok && len(incidents) > 0 {
+		incidents[len(incidents)-1].AppliedFix = patch
+		h.incidents[key] = incidents
 	}
 }
 

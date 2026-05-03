@@ -37,6 +37,9 @@ type MetricsProvider interface {
 
 	// GetP99Latency returns the 99th percentile latency for a pod.
 	GetP99Latency(ns, pod string) (float64, error)
+
+	// GetHTTPRequestsPerSecond returns the current RPS for a pod.
+	GetHTTPRequestsPerSecond(ns, pod string) (float64, error)
 }
 
 // BulkMetricsProvider extends MetricsProvider with methods to find problematic pods across the cluster in one query.

@@ -443,11 +443,26 @@ func (c *Controller) scanForLeaks() {
 			pricingProfile := c.getPricingProfile(ctx, &pod)
 			cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 			memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-			currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
-			// Assume AI fix will increase memory by 256MiB for leak prevention if OOM is imminent
-			newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
-			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
-			evidence.FinOpsDetails = fmt.Sprintf("Calculated using %s profile.\nCurrent: $%.2f/mo, Proposed: $%.2f/mo", pricingProfile.Name, currentCost, newCost)
+			
+			replicas := c.getReplicaCount(ctx, &pod)
+			tier := c.getServiceTier(&pod)
+			rps, _ := c.promClient.GetHTTPRequestsPerSecond(pod.Namespace, pod.Name)
+
+			oldRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq}
+			// Assume AI fix will increase memory by 256MiB for leak prevention
+			newRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq + 256*1024*1024}
+			
+			riskMetrics := finops.RiskMetrics{
+				Tier:              tier,
+				Replicas:          replicas,
+				RequestsPerSecond: rps,
+				ErrorRate:         0.0, // Pre-failure warning
+				AvgRevenuePerReq:  c.config.RevenuePerRequest,
+			}
+
+			impact, details := finops.CalculateSmartImpact(oldRes, newRes, pricingProfile, riskMetrics)
+			evidence.FinOpsImpact = impact
+			evidence.FinOpsDetails = details
 
 			// Save Investigation to DB
 			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak")
@@ -908,25 +923,27 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		pricingProfile := c.getPricingProfile(ctx, pod)
 		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 		memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-		currentCost := finops.CalculateMonthlyCost(cpuReq, memReq, pricingProfile)
-		// Assume AI fix will increase memory by 256MiB
-		newCost := finops.CalculateMonthlyCost(cpuReq, memReq+256*1024*1024, pricingProfile)
 		
-		// Calculate CoD if applicable
-		var codStr string
+		replicas := c.getReplicaCount(ctx, pod)
+		tier := c.getServiceTier(pod)
+		rps, _ := c.promClient.GetHTTPRequestsPerSecond(pod.Namespace, pod.Name)
 		errRate, _ := c.promClient.GetHTTPErrorRate(pod.Namespace, pod.Name)
-		p99, _ := c.promClient.GetP99Latency(pod.Namespace, pod.Name)
-		if errRate > 0 || p99 > 0 {
-			codStr = finops.CalculateCoD(errRate, 3600, c.config.RevenuePerRequest, p99*1000, c.config.LatencyThresholdMS, c.config.LatencyPenaltyPerHour)
+
+		oldRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq}
+		// Assume AI fix will increase memory by 256MiB
+		newRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq + 256*1024*1024}
+		
+		riskMetrics := finops.RiskMetrics{
+			Tier:              tier,
+			Replicas:          replicas,
+			RequestsPerSecond: rps,
+			ErrorRate:         errRate,
+			AvgRevenuePerReq:  c.config.RevenuePerRequest,
 		}
 
-		if codStr != "" {
-			evidence.FinOpsImpact = fmt.Sprintf("%s. Infrastructure: %s/mo", codStr, finops.FormatImpact(currentCost, newCost, "$"))
-		} else {
-			evidence.FinOpsImpact = fmt.Sprintf("%s %s compute cost vs. preventing a $5,000 outage", finops.FormatImpact(currentCost, newCost, "$"), pricingProfile.Name)
-		}
-		evidence.FinOpsDetails = fmt.Sprintf("FinOps Breakdown:\n- Provider: %s\n- Current Infra Cost: $%.2f/mo\n- Projected Infra Cost: $%.2f/mo\n- Change: %s\n- CoD Analysis: %s", 
-			pricingProfile.Name, currentCost, newCost, finops.FormatImpact(currentCost, newCost, "$"), codStr)
+		impact, details := finops.CalculateSmartImpact(oldRes, newRes, pricingProfile, riskMetrics)
+		evidence.FinOpsImpact = impact
+		evidence.FinOpsDetails = details
 	}
 
 	if c.config.Mode == config.ClickToFix {
@@ -1461,6 +1478,51 @@ func (c *Controller) allowAutoFixPR() bool {
 	}
 	c.autoFixPRTimes = append(c.autoFixPRTimes, time.Now())
 	return true
+}
+
+// getReplicaCount attempts to find the total replicas for a pod's owner.
+func (c *Controller) getReplicaCount(ctx context.Context, pod *v1.Pod) int {
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "ReplicaSet" {
+			rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err == nil && rs.Spec.Replicas != nil {
+				return int(*rs.Spec.Replicas)
+			}
+		} else if owner.Kind == "StatefulSet" {
+			ss, err := c.clientset.AppsV1().StatefulSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err == nil && ss.Spec.Replicas != nil {
+				return int(*ss.Spec.Replicas)
+			}
+		}
+	}
+	return 1
+}
+
+// getServiceTier determines the business importance of a pod based on annotations or namespace.
+func (c *Controller) getServiceTier(pod *v1.Pod) finops.ServiceTier {
+	if tier := pod.Annotations["fixora.io/service-tier"]; tier != "" {
+		switch strings.ToLower(tier) {
+		case "critical":
+			return finops.TierCritical
+		case "high":
+			return finops.TierHigh
+		case "medium":
+			return finops.TierMedium
+		case "low":
+			return finops.TierLow
+		}
+	}
+
+	// Heuristics based on common namespace patterns
+	ns := strings.ToLower(pod.Namespace)
+	if strings.Contains(ns, "prod") || strings.Contains(ns, "checkout") || strings.Contains(ns, "payment") {
+		return finops.TierCritical
+	}
+	if strings.Contains(ns, "stage") || strings.Contains(ns, "core") {
+		return finops.TierHigh
+	}
+
+	return finops.TierMedium
 }
 
 func truncateForPreview(s string, max int) string {

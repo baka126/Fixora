@@ -134,8 +134,8 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 							},
 						},
 					},
-				},
-			})
+				})
+			}
 		}
 
 		if evidence.StackTrace != "" {

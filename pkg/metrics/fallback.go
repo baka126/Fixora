@@ -174,5 +174,24 @@ func (f *FallbackProvider) GetP99Latency(ns, pod string) (float64, error) {
 	return f.Secondary.GetP99Latency(ns, pod)
 }
 
+// GetHTTPRequestsPerSecond attempts to get RPS from Primary, falling back to Secondary.
+func (f *FallbackProvider) GetHTTPRequestsPerSecond(ns, pod string) (float64, error) {
+	if f.Primary == nil && f.Secondary == nil {
+		return 0, fmt.Errorf("no metrics providers configured")
+	}
+
+	if f.Primary != nil {
+		val, err := f.Primary.GetHTTPRequestsPerSecond(ns, pod)
+		if err == nil {
+			return val, nil
+		}
+		if f.Secondary == nil {
+			return 0, err
+		}
+	}
+
+	return f.Secondary.GetHTTPRequestsPerSecond(ns, pod)
+}
+
 // Ensure FallbackProvider implements MetricsProvider
 var _ MetricsProvider = (*FallbackProvider)(nil)
