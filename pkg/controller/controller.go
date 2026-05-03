@@ -832,6 +832,9 @@ func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
 func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string) {
 	slog.Info("Starting full forensics investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 
+	diagnosis := c.classifyPodIssue(ctx, pod, reason)
+	slog.Info("Deterministic issue classification complete", "ns", pod.Namespace, "pod", pod.Name, "category", diagnosis.Category, "strategy", diagnosis.PatchStrategy, "confidence", diagnosis.Confidence)
+
 	var historyStr string
 	historySummary := "This is the first time we've diagnosed this pod."
 	if prev, exists := c.history.Get(ctx, pod.Namespace, pod.Name); exists {
@@ -849,7 +852,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	evidence := notifications.EvidenceChain{
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
-		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s", pod.Namespace, pod.Name, reason),
+		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s\n%s", pod.Namespace, pod.Name, reason, diagnosis.Summary()),
 		HistoricalPattern: historySummary,
 		ShowEventButton:   true,
 	}
@@ -924,7 +927,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		forensicCtx := ai.ForensicContext{
 			Namespace: pod.Namespace,
 			PodName:   pod.Name,
-			Reason:    reason,
+			Reason:    diagnosis.Symptom,
 			Logs:      logs,
 			Events:    eventsTimeline,
 			Metrics:   evidence.MetricProof,
@@ -942,7 +945,9 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			slog.Info("AI analysis complete", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
 		}
 	} else {
-		evidence.RootCause = "AI Provider not configured"
+		evidence.RootCause = diagnosis.LikelyCause
+		evidence.AIConfidence = diagnosis.Confidence
+		rootCause = diagnosis.LikelyCause
 	}
 
 	// FinOps Impact estimation
@@ -1493,9 +1498,7 @@ func (c *Controller) GetPodEvents(ctx context.Context, namespace, podName string
 }
 
 func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, error) {
-	eventsTimeline, err := c.clientset.CoreV1().Events(pod.Namespace).List(ctx, metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.namespace=%s", pod.Name, pod.Namespace),
-	})
+	eventsTimeline, err := c.listPodEvents(ctx, pod)
 	if err != nil {
 		return "", err
 	}
@@ -1503,14 +1506,24 @@ func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, err
 	var sb strings.Builder
 	limit := 50
 	start := 0
-	if len(eventsTimeline.Items) > limit {
-		start = len(eventsTimeline.Items) - limit
+	if len(eventsTimeline) > limit {
+		start = len(eventsTimeline) - limit
 	}
-	for _, event := range eventsTimeline.Items[start:] {
+	for _, event := range eventsTimeline[start:] {
 		scrubbedMessage := security.ScrubPII(event.Message)
 		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, scrubbedMessage))
 	}
 	return sb.String(), nil
+}
+
+func (c *Controller) listPodEvents(ctx context.Context, pod *v1.Pod) ([]v1.Event, error) {
+	eventsTimeline, err := c.clientset.CoreV1().Events(pod.Namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.namespace=%s", pod.Name, pod.Namespace),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return eventsTimeline.Items, nil
 }
 
 // PerformRolloutRestart executes a manual rollout restart of a Deployment.
