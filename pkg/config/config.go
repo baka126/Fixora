@@ -87,6 +87,10 @@ type Config struct {
 	InfracostAPIKey string
 	TrustedVCSDomains []string
 
+	// Privacy
+	PrivacySendGitToAI     bool
+	PrivacyScrubGitContent bool
+
 	// FinOps Tuning
 	RevenuePerRequest     float64
 	LatencyThresholdMS    float64
@@ -163,6 +167,9 @@ func Load() *Config {
 
 		InfracostAPIKey: os.Getenv("INFRACOST_API_KEY"),
 		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),
+
+		PrivacySendGitToAI:     getEnvBool("PRIVACY_SEND_GIT_TO_AI", true),
+		PrivacyScrubGitContent: getEnvBool("PRIVACY_SCRUB_GIT_CONTENT", true),
 
 		RevenuePerRequest:     getEnvFloat("REVENUE_PER_REQUEST", 0.0),
 		LatencyThresholdMS:    getEnvFloat("LATENCY_THRESHOLD_MS", 500.0),

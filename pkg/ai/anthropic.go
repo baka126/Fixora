@@ -178,7 +178,7 @@ func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, name
 	return aiResp, nil
 }
 
-func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) (AIResponse, error) {
+func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent string, evidence string) (AIResponse, error) {
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -187,7 +187,7 @@ func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf(PromptGeneratePatch, string(currentContent), evidence)),
+						Text: StringPtr(fmt.Sprintf(PromptGeneratePatch, currentContent, evidence)),
 					},
 				},
 			},
@@ -209,7 +209,12 @@ func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent []
 		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
 	}
 
-	aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	for i, p := range aiResp.Patches {
+		aiResp.Patches[i].Content = string(CleanPatch(p.Content))
+	}
+	if aiResp.Patch != "" {
+		aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	}
 	return aiResp, nil
 }
 

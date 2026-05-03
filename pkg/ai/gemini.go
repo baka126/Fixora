@@ -121,9 +121,9 @@ func (g *GeminiProvider) PerformPredictiveForensics(ctx context.Context, namespa
 	return aiResp, nil
 }
 
-func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) (AIResponse, error) {
+func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent string, evidence string) (AIResponse, error) {
 	prompt := fmt.Sprintf(PromptGeneratePatch,
-		string(currentContent), evidence)
+		currentContent, evidence)
 
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
@@ -133,10 +133,18 @@ func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent []byt
 	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
 	var aiResp AIResponse
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		// If unmarshal fails, we might have raw patch content
+		// If unmarshal fails, we might have raw patch content (fallback)
 		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
 	}
 
-	aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	for i, p := range aiResp.Patches {
+		aiResp.Patches[i].Content = string(CleanPatch(p.Content))
+	}
+	
+	// Legacy fallback
+	if aiResp.Patch != "" {
+		aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	}
+
 	return aiResp, nil
 }

@@ -412,10 +412,13 @@ func (h *historyCache) SavePendingFix(ctx context.Context, callbackID string, fi
 			$7, $8, $9, $10, $11, $12, $13, $14, $15
 		)
 	`
+	
+	filesJson, _ := json.Marshal(fix.Options.Files)
+	
 	_, err := h.db.ExecContext(ctx, query,
 		callbackID, fix.CreatedAt, fix.VCSType, fix.VCSToken, fix.PodNamespace, fix.PodName,
 		fix.Options.Title, fix.Options.Body, fix.Options.Head, fix.Options.Base,
-		fix.Options.RepoOwner, fix.Options.RepoName, fix.Options.FilePath, fix.Options.NewContent, fix.Options.CommitMessage,
+		fix.Options.RepoOwner, fix.Options.RepoName, "", filesJson, fix.Options.CommitMessage,
 	)
 	return err
 }
@@ -439,10 +442,11 @@ func (h *historyCache) TakePendingFix(ctx context.Context, callbackID string) (P
 	`
 	var fix PendingFix
 	var newContent []byte
+	var dummyFilePath string
 	err = tx.QueryRowContext(ctx, query, callbackID).Scan(
 		&fix.CreatedAt, &fix.VCSType, &fix.VCSToken, &fix.PodNamespace, &fix.PodName,
 		&fix.Options.Title, &fix.Options.Body, &fix.Options.Head, &fix.Options.Base,
-		&fix.Options.RepoOwner, &fix.Options.RepoName, &fix.Options.FilePath, &newContent, &fix.Options.CommitMessage,
+		&fix.Options.RepoOwner, &fix.Options.RepoName, &dummyFilePath, &newContent, &fix.Options.CommitMessage,
 	)
 	if err == sql.ErrNoRows {
 		return PendingFix{}, false, nil
@@ -450,7 +454,8 @@ func (h *historyCache) TakePendingFix(ctx context.Context, callbackID string) (P
 	if err != nil {
 		return PendingFix{}, false, err
 	}
-	fix.Options.NewContent = newContent
+	
+	_ = json.Unmarshal(newContent, &fix.Options.Files)
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pending_fixes WHERE callback_id = $1`, callbackID); err != nil {
 		return PendingFix{}, false, err

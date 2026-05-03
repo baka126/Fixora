@@ -39,6 +39,15 @@ func (m *mockMetricsProvider) GetPodMemoryRSS(ns, pod string) (float64, error) {
 func (m *mockMetricsProvider) GetPodMemoryCache(ns, pod string) (float64, error) {
 	return m.usage * 0.1, nil
 }
+func (m *mockMetricsProvider) GetHTTPRequestsPerSecond(ns, pod string) (float64, error) {
+	return 10.0, nil
+}
+func (m *mockMetricsProvider) GetP99Latency(ns, pod string) (float64, error) {
+	return 0.1, nil
+}
+func (m *mockMetricsProvider) GetHTTPErrorRate(ns, pod string) (float64, error) {
+	return 0.0, nil
+}
 
 // Ensure mockMetricsProvider implements metrics.MetricsProvider
 var _ metrics.MetricsProvider = (*mockMetricsProvider)(nil)
@@ -90,7 +99,7 @@ func TestScanForLeaksSimulator(t *testing.T) {
 		clientset:  clientset,
 		promClient: mockMetrics,
 		config:     cfg,
-		history:    &historyCache{}, // Nil DB is fine
+		history:    newHistoryCache(cfg),
 	}
 
 	// 4. Run Scan

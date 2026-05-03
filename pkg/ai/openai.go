@@ -149,7 +149,7 @@ func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespa
 	return aiResp, nil
 }
 
-func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byte, evidence string) (AIResponse, error) {
+func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent string, evidence string) (AIResponse, error) {
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
@@ -160,7 +160,7 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byt
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf(PromptGeneratePatch, string(currentContent), evidence),
+					Content: fmt.Sprintf(PromptGeneratePatch, currentContent, evidence),
 				},
 			},
 		},
@@ -176,6 +176,11 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent []byt
 		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
 	}
 
-	aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	for i, p := range aiResp.Patches {
+		aiResp.Patches[i].Content = string(CleanPatch(p.Content))
+	}
+	if aiResp.Patch != "" {
+		aiResp.Patch = string(CleanPatch(aiResp.Patch))
+	}
 	return aiResp, nil
 }
