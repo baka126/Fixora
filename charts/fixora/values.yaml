@@ -24,9 +24,21 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
-podSecurityContext: {}
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
 
-securityContext: {}
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
 
 resources: {}
 
@@ -58,7 +70,7 @@ ai:
   model: ""
   apiKey: ""
 
-mode: "auto-fix" # Options: "auto-fix" (auto-PR), "click-to-fix" (manual approval via Slack/Chat), "dry-run" (report only)
+mode: "dry-run" # Options: "auto-fix" (auto-PR), "click-to-fix" (manual approval via Slack/Chat), "dry-run" (report only)
 modePolicy:
   approvalTTL: "24h"
   autoFixMaxPRPerHour: 20
@@ -74,6 +86,9 @@ webhook:
   token: ""
   user: ""
   password: ""
+
+rbac:
+  allowDeploymentMutations: false
 
 # FinOps Config
 finops:
@@ -130,6 +145,7 @@ features:
     user: "fixora"
     password: ""
     name: "fixora"
+    sslMode: "disable"
     embedded:
       enabled: true
       image:

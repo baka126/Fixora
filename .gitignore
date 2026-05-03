@@ -12,3 +12,4 @@ vendor/
 GEMINI.md
 .gemini
 charts/fixora/test-values.yaml
+pod.yaml

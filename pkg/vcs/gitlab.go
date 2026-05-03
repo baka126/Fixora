@@ -3,6 +3,7 @@ package vcs
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/xanzy/go-gitlab"
 )
@@ -37,13 +38,14 @@ func (g *GitLabProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 		return "", err
 	}
 
-	// 2. Commit file change
-	actions := []*gitlab.CommitActionOptions{
-		{
-			Action:   gitlab.Ptr(gitlab.FileUpdate),
-			FilePath: gitlab.String(opts.FilePath),
-			Content:  gitlab.String(string(opts.NewContent)),
-		},
+	// 2. Commit file changes
+	var actions []*gitlab.CommitActionOptions
+	for _, file := range opts.Files {
+		actions = append(actions, &gitlab.CommitActionOptions{
+			Action:   gitlab.Ptr(gitlab.FileUpdate), // Using FileUpdate. If file doesn't exist, FileCreate should be used, but we assume FileUpdate for remediation.
+			FilePath: gitlab.String(file.FilePath),
+			Content:  gitlab.String(string(file.NewContent)),
+		})
 	}
 
 	_, _, err = g.client.Commits.CreateCommit(projectID, &gitlab.CreateCommitOptions{
@@ -67,6 +69,34 @@ func (g *GitLabProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 	}
 
 	return mr.WebURL, nil
+}
+
+func (g *GitLabProvider) ListFiles(ctx context.Context, repoOwner, repoName, path, ref string) (map[string][]byte, error) {
+	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
+	
+	tree, _, err := g.client.Repositories.ListTree(projectID, &gitlab.ListTreeOptions{
+		Path: gitlab.Ptr(path),
+		Ref:  gitlab.Ptr(ref),
+	})
+	if err != nil {
+		// Try as single file
+		content, fileErr := g.GetFileContent(ctx, repoOwner, repoName, path, ref)
+		if fileErr == nil {
+			return map[string][]byte{path: content}, nil
+		}
+		return nil, err
+	}
+
+	files := make(map[string][]byte)
+	for _, item := range tree {
+		if item.Type == "blob" && (strings.HasSuffix(item.Name, ".yaml") || strings.HasSuffix(item.Name, ".yml")) {
+			content, fileErr := g.GetFileContent(ctx, repoOwner, repoName, item.Path, ref)
+			if fileErr == nil {
+				files[item.Path] = content
+			}
+		}
+	}
+	return files, nil
 }
 
 func (g *GitLabProvider) GetFileContent(ctx context.Context, repoOwner, repoName, path, ref string) ([]byte, error) {

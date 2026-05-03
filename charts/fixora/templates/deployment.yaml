@@ -108,8 +108,13 @@ spec:
               value: {{ .Values.vcs.gitlab.baseUrl | quote }}
             - name: TRUSTED_VCS_DOMAINS
               value: {{ join "," .Values.vcs.trustedDomains | quote }}
+            {{- if .Values.webhook.token }}
             - name: WEBHOOK_TOKEN
-              value: {{ .Values.webhook.token | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: webhook-token
+            {{- end }}
             - name: WEBHOOK_USER
               value: {{ .Values.webhook.user | quote }}
             {{- if .Values.webhook.password }}
@@ -179,9 +184,9 @@ spec:
 
             # Alertmanager Filtering
             - name: ALERTMANAGER_INCLUDE_LABELS
-              value: {{ range $k, $v := .Values.features.alertmanagerScraper.includeLabels }}{{ $k }}={{ $v }},{{ end }}
+              value: "{{- range $k, $v := .Values.features.alertmanagerScraper.includeLabels }}{{ $k }}={{ $v }},{{- end }}"
             - name: ALERTMANAGER_EXCLUDE_LABELS
-              value: {{ range $k, $v := .Values.features.alertmanagerScraper.excludeLabels }}{{ $k }}={{ $v }},{{ end }}
+              value: "{{- range $k, $v := .Values.features.alertmanagerScraper.excludeLabels }}{{ $k }}={{ $v }},{{- end }}"
 
             - name: PREDICTIVE_ENABLED
               value: {{ if and .Values.features.predictive.enabled (include "fixora.databaseEnabled" .) }}"true"{{ else }}"false"{{ end }}
@@ -218,8 +223,17 @@ spec:
             {{- end }}
             - name: DB_NAME
               value: {{ .Values.features.database.name | quote }}
+            - name: DB_SSLMODE
+              value: {{ .Values.features.database.sslMode | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+              readOnly: false
+      volumes:
+        - name: tmp
+          emptyDir: {}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       affinity:

@@ -31,11 +31,43 @@ func (g *GitHubProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 		return "", err
 	}
 
-	// 2. Create a new branch
+	baseCommit, _, err := g.client.Git.GetCommit(ctx, opts.RepoOwner, opts.RepoName, ref.Object.GetSHA())
+	if err != nil {
+		return "", err
+	}
+
+	// 2. Create a new Tree with all file changes
+	var entries []*github.TreeEntry
+	for _, file := range opts.Files {
+		entries = append(entries, &github.TreeEntry{
+			Path:    github.String(file.FilePath),
+			Mode:    github.String("100644"),
+			Type:    github.String("blob"),
+			Content: github.String(string(file.NewContent)),
+		})
+	}
+
+	tree, _, err := g.client.Git.CreateTree(ctx, opts.RepoOwner, opts.RepoName, baseCommit.Tree.GetSHA(), entries)
+	if err != nil {
+		return "", err
+	}
+
+	// 3. Create a new Commit
+	commit := &github.Commit{
+		Message: github.String(opts.CommitMessage),
+		Tree:    tree,
+		Parents: []*github.Commit{baseCommit},
+	}
+	newCommit, _, err := g.client.Git.CreateCommit(ctx, opts.RepoOwner, opts.RepoName, commit)
+	if err != nil {
+		return "", err
+	}
+
+	// 4. Create a new Branch
 	newRef := &github.Reference{
 		Ref: github.String("refs/heads/" + opts.Head),
 		Object: &github.GitObject{
-			SHA: ref.Object.SHA,
+			SHA: newCommit.SHA,
 		},
 	}
 	_, _, err = g.client.Git.CreateRef(ctx, opts.RepoOwner, opts.RepoName, newRef)
@@ -43,25 +75,7 @@ func (g *GitHubProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 		return "", err
 	}
 
-	// 3. Create or Update file
-	fileOpts := &github.RepositoryContentFileOptions{
-		Message: github.String(opts.CommitMessage),
-		Content: opts.NewContent,
-		Branch:  github.String(opts.Head),
-	}
-
-	// Get file SHA if it exists
-	file, _, _, _ := g.client.Repositories.GetContents(ctx, opts.RepoOwner, opts.RepoName, opts.FilePath, &github.RepositoryContentGetOptions{Ref: opts.Head})
-	if file != nil {
-		fileOpts.SHA = file.SHA
-	}
-
-	_, _, err = g.client.Repositories.UpdateFile(ctx, opts.RepoOwner, opts.RepoName, opts.FilePath, fileOpts)
-	if err != nil {
-		return "", err
-	}
-
-	// 4. Create Pull Request
+	// 5. Create Pull Request
 	newPR := &github.NewPullRequest{
 		Title:               github.String(opts.Title),
 		Head:                github.String(opts.Head),
@@ -76,6 +90,32 @@ func (g *GitHubProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 	}
 
 	return pr.GetHTMLURL(), nil
+}
+
+func (g *GitHubProvider) ListFiles(ctx context.Context, repoOwner, repoName, path, ref string) (map[string][]byte, error) {
+	_, dirContent, _, err := g.client.Repositories.GetContents(ctx, repoOwner, repoName, path, &github.RepositoryContentGetOptions{Ref: ref})
+	if err != nil {
+		// Try as single file
+		fileContent, fileErr := g.GetFileContent(ctx, repoOwner, repoName, path, ref)
+		if fileErr == nil {
+			return map[string][]byte{path: fileContent}, nil
+		}
+		return nil, err
+	}
+
+	files := make(map[string][]byte)
+	if dirContent != nil {
+		for _, item := range dirContent {
+			if item.GetType() == "file" && (strings.HasSuffix(item.GetName(), ".yaml") || strings.HasSuffix(item.GetName(), ".yml")) {
+				file, _, _, err := g.client.Repositories.GetContents(ctx, repoOwner, repoName, item.GetPath(), &github.RepositoryContentGetOptions{Ref: ref})
+				if err == nil && file != nil {
+					content, _ := file.GetContent()
+					files[item.GetPath()] = []byte(content)
+				}
+			}
+		}
+	}
+	return files, nil
 }
 
 func (g *GitHubProvider) GetFileContent(ctx context.Context, repoOwner, repoName, path, ref string) ([]byte, error) {

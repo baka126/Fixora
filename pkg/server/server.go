@@ -1,11 +1,17 @@
 package server
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"fixora/pkg/config"
 	"fixora/pkg/controller"
@@ -18,6 +24,8 @@ type Server struct {
 	config     *config.Config
 }
 
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
 func New(ctrl *controller.Controller, cfg *config.Config) *Server {
 	return &Server{
 		controller: ctrl,
@@ -25,31 +33,75 @@ func New(ctrl *controller.Controller, cfg *config.Config) *Server {
 	}
 }
 
-func (s *Server) Start() {
-	http.HandleFunc("/health", s.handleHealth)
-	http.HandleFunc("/webhook/alertmanager", s.handleAlertmanager)
-	http.HandleFunc("/slack/interactions", s.handleSlackInteraction)
-	http.HandleFunc("/googlechat/interactions", s.handleGoogleChatInteraction)
+func (s *Server) Start(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/webhook/alertmanager", s.handleAlertmanager)
+	mux.HandleFunc("/slack/interactions", s.handleSlackInteraction)
+	mux.HandleFunc("/googlechat/interactions", s.handleGoogleChatInteraction)
+
+	srv := &http.Server{
+		Addr:              ":" + s.config.ServerPort,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	slog.Info("Starting Fixora server", "port", s.config.ServerPort)
-	if err := http.ListenAndServe(":"+s.config.ServerPort, nil); err != nil {
-		slog.Error("Server failed to start", "error", err)
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		return err
 	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "OK")
+	if r.Method == http.MethodGet {
+		fmt.Fprint(w, "OK")
+	}
 }
 
 func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.config.AlertmanagerEnabled {
+		http.Error(w, "alertmanager webhook disabled", http.StatusNotFound)
+		return
+	}
+	if !s.authorizeSharedSecret(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var payload struct {
 		Alerts []struct {
 			Labels map[string]string `json:"labels"`
 		} `json:"alerts"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
 		slog.Error("Failed to decode Alertmanager webhook payload", "error", err)
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
@@ -74,14 +126,31 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	err := r.ParseForm()
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := s.readBody(w, r)
+	if err != nil {
+		slog.Error("Failed to read Slack interaction body", "error", err)
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := s.verifySlackSignature(r, body); err != nil {
+		slog.Warn("Rejected Slack interaction with invalid signature", "error", err)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	form, err := url.ParseQuery(string(body))
 	if err != nil {
 		slog.Error("Failed to parse Slack interaction form", "error", err)
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}
 
-	payloadRaw := r.FormValue("payload")
+	payloadRaw := form.Get("payload")
 	var payload slack.InteractionCallback
 	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
 		slog.Error("Failed to unmarshal Slack interaction payload", "error", err)
@@ -104,6 +173,10 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			viewType := parts[1] // logs, trace, finops
 			namespace := parts[2]
 			podName := strings.Join(parts[3:], "-")
+			if !s.controller.IsNamespaceScoped(namespace) {
+				http.Error(w, "namespace out of scope", http.StatusForbidden)
+				return
+			}
 
 			slog.Info("Opening forensic explorer modal", "type", viewType, "ns", namespace, "pod", podName)
 
@@ -116,6 +189,14 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 					content = "Error: " + err.Error()
 				} else {
 					content = logs
+				}
+			} else if viewType == "events" {
+				title = "Event Timeline"
+				events, err := s.controller.GetPodEvents(r.Context(), namespace, podName)
+				if err != nil {
+					content = "Error: " + err.Error()
+				} else {
+					content = events
 				}
 			} else if viewType == "trace" {
 				title = "Stack Trace"
@@ -134,6 +215,9 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			} else if viewType == "finops" {
 				title = "FinOps Analysis"
 				content = "Detailed breakdown is available in the diagnostic report summary."
+			} else {
+				w.WriteHeader(http.StatusOK)
+				return
 			}
 
 			err = notifications.SendLogModal(s.config, payload.TriggerID, namespace, podName, title, content)
@@ -162,10 +246,19 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleGoogleChatInteraction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeSharedSecret(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var payload struct {
-		Type string `json:"type"`
+		Type   string `json:"type"`
 		Action struct {
-			ActionMethodName string            `json:"actionMethodName"`
+			ActionMethodName string `json:"actionMethodName"`
 			Parameters       []struct {
 				Key   string `json:"key"`
 				Value string `json:"value"`
@@ -176,7 +269,8 @@ func (s *Server) handleGoogleChatInteraction(w http.ResponseWriter, r *http.Requ
 		} `json:"common"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
 		slog.Error("Failed to decode Google Chat interaction payload", "error", err)
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
@@ -203,9 +297,26 @@ func (s *Server) handleGoogleChatInteraction(w http.ResponseWriter, r *http.Requ
 	podName := params["podName"]
 	method := payload.Action.ActionMethodName
 
+	if method == "approve_remediation" || method == "approve_action" {
+		callbackID := params["callback_id"]
+		if callbackID == "" {
+			slog.Warn("Google Chat approval missing callback_id")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		slog.Info("User approved remediation via Google Chat", "callback_id", callbackID)
+		go s.controller.SubmitPendingFix(r.Context(), callbackID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if namespace == "" || podName == "" {
 		slog.Warn("Google Chat interaction missing namespace or podName", "params", params)
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if !s.controller.IsNamespaceScoped(namespace) {
+		http.Error(w, "namespace out of scope", http.StatusForbidden)
 		return
 	}
 
@@ -249,7 +360,7 @@ func (s *Server) handleGoogleChatInteraction(w http.ResponseWriter, r *http.Requ
 	// Prepare response card for Google Chat
 	// Interaction responses for simple button clicks can return a new message or update the current one.
 	// We'll return a new message card with the content.
-	
+
 	formattedContent := "Empty."
 	if content != "" {
 		// Google Chat text format is limited; pre-formatted text uses <pre>
@@ -289,4 +400,55 @@ func (s *Server) handleGoogleChatInteraction(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	defer r.Body.Close()
+	return io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
+}
+
+func (s *Server) verifySlackSignature(r *http.Request, body []byte) error {
+	if s.config.SlackSigningSecret == "" {
+		return fmt.Errorf("slack signing secret is not configured")
+	}
+	verifier, err := slack.NewSecretsVerifier(r.Header, s.config.SlackSigningSecret)
+	if err != nil {
+		return err
+	}
+	if _, err := verifier.Write(body); err != nil {
+		return err
+	}
+	return verifier.Ensure()
+}
+
+func (s *Server) authorizeSharedSecret(r *http.Request) bool {
+	if s.config.WebhookUser != "" || s.config.WebhookPassword != "" {
+		user, pass, ok := r.BasicAuth()
+		if !ok {
+			return false
+		}
+		if !constantTimeEqual(user, s.config.WebhookUser) || !constantTimeEqual(pass, s.config.WebhookPassword) {
+			return false
+		}
+	}
+
+	if s.config.WebhookToken == "" {
+		return s.config.WebhookUser != "" || s.config.WebhookPassword != ""
+	}
+	return constantTimeEqual(sharedSecretFromRequest(r), s.config.WebhookToken)
+}
+
+func sharedSecretFromRequest(r *http.Request) string {
+	if token := r.Header.Get("X-Fixora-Token"); token != "" {
+		return token
+	}
+	auth := r.Header.Get("Authorization")
+	if token, ok := strings.CutPrefix(auth, "Bearer "); ok {
+		return strings.TrimSpace(token)
+	}
+	return r.URL.Query().Get("token")
+}
+
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

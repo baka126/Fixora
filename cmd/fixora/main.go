@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -102,17 +105,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithCancel(signalCtx)
+	defer cancel()
+
 	stopCh := make(chan struct{})
-	defer close(stopCh)
+	go func() {
+		<-ctx.Done()
+		close(stopCh)
+	}()
 
 	ctrl := controller.NewController(clientset, dynamicClient, metricsClient, cfg)
 	srv := server.New(ctrl, cfg)
-	
+
 	slog.Info("Initialization complete, starting services")
-	go srv.Start()
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- srv.Start(ctx)
+	}()
 
 	go ctrl.Run(stopCh)
 
-	<-stopCh
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			slog.Error("Server failed", "error", err)
+			cancel()
+			os.Exit(1)
+		}
+		cancel()
+	case <-ctx.Done():
+		cancel()
+		if err := <-serverErr; err != nil {
+			slog.Error("Server shutdown failed", "error", err)
+		}
+	}
+
 	slog.Info("Shutting down Fixora")
 }

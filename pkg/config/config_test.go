@@ -11,8 +11,8 @@ func TestNormalizeMode(t *testing.T) {
 		{name: "auto fix", in: "auto-fix", want: AutoFix},
 		{name: "click to fix", in: "click-to-fix", want: ClickToFix},
 		{name: "dry run", in: "dry-run", want: DryRun},
-		{name: "empty defaults to auto", in: "", want: AutoFix},
-		{name: "invalid defaults to auto", in: "experimental", want: AutoFix},
+		{name: "empty defaults to dry run", in: "", want: DryRun},
+		{name: "invalid defaults to dry run", in: "experimental", want: DryRun},
 		{name: "trimmed dry run", in: " dry-run ", want: DryRun},
 	}
 
