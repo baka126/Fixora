@@ -1110,6 +1110,9 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 		for path, content := range files {
 			contentStr := string(content)
+			if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
+				contentStr = ai.CompressYAML(contentStr)
+			}
 			if c.config.PrivacyScrubGitContent {
 				contentStr = security.ScrubPII(contentStr)
 			}
@@ -1394,7 +1397,8 @@ func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) 
 		}
 	}
 
-	return strings.Join(relevantLines, "\n"), nil
+	joinedLogs := strings.Join(relevantLines, "\n")
+	return ai.CompressLogs(joinedLogs), nil
 }
 
 // GetPodEvents fetches and scrubs events for a specific pod. Public for use by server.
