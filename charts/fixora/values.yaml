@@ -40,6 +40,7 @@ slack:
   token: ""
   signingSecret: ""
   channel: ""
+  appMode: false # Set to true to enable interactive buttons and modals (requires Slack App configuration)
 
 googleChat:
   webhookUrl: ""

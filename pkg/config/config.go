@@ -20,6 +20,7 @@ type Config struct {
 	SlackToken           string
 	SlackSigningSecret   string
 	SlackChannel         string
+	SlackAppMode         bool
 	GoogleChatWebhookURL string
 	GoogleChatAppMode    bool
 	ServerPort           string
@@ -99,7 +100,9 @@ func Load() *Config {
 		SlackToken:           os.Getenv("SLACK_TOKEN"),
 		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
 		SlackChannel:         os.Getenv("SLACK_CHANNEL"),
+		SlackAppMode:         getEnvBool("SLACK_APP_MODE", false),
 		GoogleChatWebhookURL: os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
+		GoogleChatAppMode:    getEnvBool("GOOGLE_CHAT_APP_MODE", false),
 		ServerPort:           getEnv("SERVER_PORT", "8080"),
 		Mode:                 mode,
 		ModeApprovalTTL:      getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),

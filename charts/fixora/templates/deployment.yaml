@@ -54,6 +54,8 @@ spec:
             {{- end }}
             - name: SLACK_CHANNEL
               value: {{ .Values.slack.channel | quote }}
+            - name: SLACK_APP_MODE
+              value: {{ .Values.slack.appMode | default false | quote }}
             - name: GOOGLE_CHAT_WEBHOOK_URL
               value: {{ .Values.googleChat.webhookUrl | quote }}
             - name: GOOGLE_CHAT_APP_MODE
