@@ -18,7 +18,14 @@ rules:
   verbs: ["get", "list", "watch"]
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
-  verbs: ["get", "list", "watch", "update", "patch"]
+  verbs:
+    - get
+    - list
+    - watch
+    {{- if .Values.rbac.allowDeploymentMutations }}
+    - update
+    - patch
+    {{- end }}
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "list", "watch", "create", "update", "patch"]

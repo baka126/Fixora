@@ -17,35 +17,35 @@ const (
 )
 
 type Config struct {
-	SlackToken           string
-	SlackSigningSecret   string
-	SlackChannel         string
-	SlackAppMode         bool
-	GoogleChatWebhookURL string
-	GoogleChatAppMode    bool
-	ServerPort           string
-	Mode                 OperatingMode
-	ModeApprovalTTL      time.Duration
+	SlackToken              string
+	SlackSigningSecret      string
+	SlackChannel            string
+	SlackAppMode            bool
+	GoogleChatWebhookURL    string
+	GoogleChatAppMode       bool
+	ServerPort              string
+	Mode                    OperatingMode
+	ModeApprovalTTL         time.Duration
 	ModeAutoFixMaxPRPerHour int
 	ModeDryRunIncludePatch  bool
-	HAEnabled             bool
-	HALeaseName           string
-	HALeaseNamespace      string
-	HALeaseDuration       time.Duration
-	HARenewDeadline       time.Duration
-	HARetryPeriod         time.Duration
-	PrometheusURL        string
-	AlertmanagerURL      string
-	AlertmanagerEnabled  bool
-	AIProvider           string // "gemini", "openai", "anthropic"
-	AIModel              string
-	AIAPIKey             string
-	GitHubToken          string
-	GitLabToken          string
-	GitLabBaseURL        string
-	WebhookToken         string
-	WebhookUser          string
-	WebhookPassword      string
+	HAEnabled               bool
+	HALeaseName             string
+	HALeaseNamespace        string
+	HALeaseDuration         time.Duration
+	HARenewDeadline         time.Duration
+	HARetryPeriod           time.Duration
+	PrometheusURL           string
+	AlertmanagerURL         string
+	AlertmanagerEnabled     bool
+	AIProvider              string // "gemini", "openai", "anthropic"
+	AIModel                 string
+	AIAPIKey                string
+	GitHubToken             string
+	GitLabToken             string
+	GitLabBaseURL           string
+	WebhookToken            string
+	WebhookUser             string
+	WebhookPassword         string
 
 	// ArgoCD Config
 	ArgoCDEnabled   bool
@@ -59,10 +59,11 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+	DBSSLMode  string
 
 	// Modular Feature Toggles
 	K8sWatcherEnabled          bool
-	PerformanceScannerEnabled   bool
+	PerformanceScannerEnabled  bool
 	LeakScannerEnabled         bool
 	AlertmanagerScraperEnabled bool
 
@@ -84,7 +85,7 @@ type Config struct {
 	PredictiveScanInterval    time.Duration
 	PredictiveMinDataPoints   int
 
-	InfracostAPIKey string
+	InfracostAPIKey   string
 	TrustedVCSDomains []string
 
 	// Privacy
@@ -101,35 +102,35 @@ func Load() *Config {
 	mode := normalizeMode(os.Getenv("FIXORA_MODE"))
 
 	cfg := &Config{
-		SlackToken:           os.Getenv("SLACK_TOKEN"),
-		SlackSigningSecret:   os.Getenv("SLACK_SIGNING_SECRET"),
-		SlackChannel:         os.Getenv("SLACK_CHANNEL"),
-		SlackAppMode:         getEnvBool("SLACK_APP_MODE", false),
-		GoogleChatWebhookURL: os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
-		GoogleChatAppMode:    getEnvBool("GOOGLE_CHAT_APP_MODE", false),
-		ServerPort:           getEnv("SERVER_PORT", "8080"),
-		Mode:                 mode,
-		ModeApprovalTTL:      getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),
+		SlackToken:              os.Getenv("SLACK_TOKEN"),
+		SlackSigningSecret:      os.Getenv("SLACK_SIGNING_SECRET"),
+		SlackChannel:            os.Getenv("SLACK_CHANNEL"),
+		SlackAppMode:            getEnvBool("SLACK_APP_MODE", false),
+		GoogleChatWebhookURL:    os.Getenv("GOOGLE_CHAT_WEBHOOK_URL"),
+		GoogleChatAppMode:       getEnvBool("GOOGLE_CHAT_APP_MODE", false),
+		ServerPort:              getEnv("SERVER_PORT", "8080"),
+		Mode:                    mode,
+		ModeApprovalTTL:         getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),
 		ModeAutoFixMaxPRPerHour: getEnvInt("MODE_AUTOFIX_MAX_PR_PER_HOUR", 20),
 		ModeDryRunIncludePatch:  getEnvBool("MODE_DRY_RUN_INCLUDE_PATCH", true),
-		HAEnabled:            getEnvBool("HA_ENABLED", true),
-		HALeaseName:          getEnv("HA_LEASE_NAME", "fixora-leader-election"),
-		HALeaseNamespace:     getEnv("HA_LEASE_NAMESPACE", getEnv("POD_NAMESPACE", "default")),
-		HALeaseDuration:      getEnvDuration("HA_LEASE_DURATION", 15*time.Second),
-		HARenewDeadline:      getEnvDuration("HA_RENEW_DEADLINE", 10*time.Second),
-		HARetryPeriod:        getEnvDuration("HA_RETRY_PERIOD", 2*time.Second),
-		PrometheusURL:        os.Getenv("PROMETHEUS_URL"),
-		AlertmanagerURL:      os.Getenv("ALERTMANAGER_URL"),
-		AlertmanagerEnabled:  getEnvBool("ALERTMANAGER_ENABLED", true),
-		AIProvider:           os.Getenv("AI_PROVIDER"),
-		AIModel:              os.Getenv("AI_MODEL"),
-		AIAPIKey:             os.Getenv("AI_API_KEY"),
-		GitHubToken:          os.Getenv("GITHUB_TOKEN"),
-		GitLabToken:          os.Getenv("GITLAB_TOKEN"),
-		GitLabBaseURL:        os.Getenv("GITLAB_BASE_URL"),
-		WebhookToken:         os.Getenv("WEBHOOK_TOKEN"),
-		WebhookUser:          os.Getenv("WEBHOOK_USER"),
-		WebhookPassword:      os.Getenv("WEBHOOK_PASSWORD"),
+		HAEnabled:               getEnvBool("HA_ENABLED", true),
+		HALeaseName:             getEnv("HA_LEASE_NAME", "fixora-leader-election"),
+		HALeaseNamespace:        getEnv("HA_LEASE_NAMESPACE", getEnv("POD_NAMESPACE", "default")),
+		HALeaseDuration:         getEnvDuration("HA_LEASE_DURATION", 15*time.Second),
+		HARenewDeadline:         getEnvDuration("HA_RENEW_DEADLINE", 10*time.Second),
+		HARetryPeriod:           getEnvDuration("HA_RETRY_PERIOD", 2*time.Second),
+		PrometheusURL:           os.Getenv("PROMETHEUS_URL"),
+		AlertmanagerURL:         os.Getenv("ALERTMANAGER_URL"),
+		AlertmanagerEnabled:     getEnvBool("ALERTMANAGER_ENABLED", true),
+		AIProvider:              os.Getenv("AI_PROVIDER"),
+		AIModel:                 os.Getenv("AI_MODEL"),
+		AIAPIKey:                os.Getenv("AI_API_KEY"),
+		GitHubToken:             os.Getenv("GITHUB_TOKEN"),
+		GitLabToken:             os.Getenv("GITLAB_TOKEN"),
+		GitLabBaseURL:           os.Getenv("GITLAB_BASE_URL"),
+		WebhookToken:            os.Getenv("WEBHOOK_TOKEN"),
+		WebhookUser:             os.Getenv("WEBHOOK_USER"),
+		WebhookPassword:         os.Getenv("WEBHOOK_PASSWORD"),
 
 		ArgoCDEnabled:   getEnvBool("ARGOCD_ENABLED", false),
 		ArgoCDNamespace: getEnv("ARGOCD_NAMESPACE", "argocd"),
@@ -141,10 +142,11 @@ func Load() *Config {
 		DBUser:     os.Getenv("DB_USER"),
 		DBPassword: os.Getenv("DB_PASSWORD"),
 		DBName:     getEnv("DB_NAME", "fixora"),
+		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
 
 		// Modular Feature Toggles (Defaulting to safe defaults for scale)
 		K8sWatcherEnabled:          getEnvBool("K8S_WATCHER_ENABLED", true),
-		PerformanceScannerEnabled:   getEnvBool("PERFORMANCE_SCANNER_ENABLED", false),
+		PerformanceScannerEnabled:  getEnvBool("PERFORMANCE_SCANNER_ENABLED", false),
 		LeakScannerEnabled:         getEnvBool("LEAK_SCANNER_ENABLED", false),
 		AlertmanagerScraperEnabled: getEnvBool("ALERTMANAGER_SCRAPER_ENABLED", false),
 
@@ -165,7 +167,7 @@ func Load() *Config {
 		PredictiveScanInterval:    getEnvDuration("PREDICTIVE_SCAN_INTERVAL", 5*time.Minute),
 		PredictiveMinDataPoints:   getEnvInt("PREDICTIVE_MIN_DATA_POINTS", 10),
 
-		InfracostAPIKey: os.Getenv("INFRACOST_API_KEY"),
+		InfracostAPIKey:   os.Getenv("INFRACOST_API_KEY"),
 		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),
 
 		PrivacySendGitToAI:     getEnvBool("PRIVACY_SEND_GIT_TO_AI", true),
@@ -199,7 +201,7 @@ func normalizeMode(mode string) OperatingMode {
 	case AutoFix:
 		return AutoFix
 	default:
-		return AutoFix
+		return DryRun
 	}
 }
 

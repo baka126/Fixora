@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,14 +42,14 @@ import (
 // podWorkItem represents a unit of diagnostic work for a specific pod.
 
 var failureToFieldsMap = map[string][]string{
-	"OOMKilled":                 {"resources"},
-	"CPUThrottling":            {"resources"},
-	"ImagePullBackOff":          {"image", "imagePullPolicy"},
-	"ErrImagePull":              {"image", "imagePullPolicy"},
+	"OOMKilled":                  {"resources"},
+	"CPUThrottling":              {"resources"},
+	"ImagePullBackOff":           {"image", "imagePullPolicy"},
+	"ErrImagePull":               {"image", "imagePullPolicy"},
 	"CreateContainerConfigError": {"env", "envFrom", "volumeMounts", "command", "args"},
 	"CreateContainerError":       {"env", "envFrom", "volumeMounts", "command", "args"},
 	"Pending (Unschedulable)":    {"nodeSelector", "tolerations", "affinity", "resources"},
-	"NodeNotReady":              {"nodeSelector", "tolerations", "affinity"},
+	"NodeNotReady":               {"nodeSelector", "tolerations", "affinity"},
 }
 
 type podWorkItem struct {
@@ -63,10 +64,17 @@ type podWorkItem struct {
 type PendingFix struct {
 	Options      vcs.PullRequestOptions
 	VCSType      string
-	VCSToken     string // Token to use if namespace-specific
+	VCSToken     string // Deprecated: do not persist or use; kept for old in-memory values.
 	PodNamespace string
 	PodName      string
 	CreatedAt    time.Time
+}
+
+type discoveredRepo struct {
+	Owner        string
+	Name         string
+	BaseBranch   string
+	AllowedFiles map[string]bool
 }
 
 type Controller struct {
@@ -130,7 +138,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	pricingProvider := finops.NewMultiPricingProvider(providers...)
 
 	var amClient *alertmanager.Client
-	if cfg.AlertmanagerURL != "" {
+	if cfg.AlertmanagerEnabled && cfg.AlertmanagerURL != "" {
 		amClient = alertmanager.New(cfg.AlertmanagerURL)
 	}
 
@@ -455,7 +463,7 @@ func (c *Controller) scanForLeaks() {
 			pricingProfile := c.getPricingProfile(ctx, &pod)
 			cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 			memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-			
+
 			replicas := c.getReplicaCount(ctx, &pod)
 			tier := c.getServiceTier(&pod)
 			rps, _ := c.promClient.GetHTTPRequestsPerSecond(pod.Namespace, pod.Name)
@@ -463,7 +471,7 @@ func (c *Controller) scanForLeaks() {
 			oldRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq}
 			// Assume AI fix will increase memory by 256MiB for leak prevention
 			newRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq + 256*1024*1024}
-			
+
 			riskMetrics := finops.RiskMetrics{
 				Tier:              tier,
 				Replicas:          replicas,
@@ -478,7 +486,7 @@ func (c *Controller) scanForLeaks() {
 
 			// Save Investigation to DB
 			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak")
-			
+
 			slog.Info("Sending evidence chain to notification channels", "ns", pod.Namespace, "pod", pod.Name)
 			notifications.SendEvidenceChain(c.config, evidence)
 
@@ -509,7 +517,7 @@ func (c *Controller) scanForAppFailures() {
 			if !c.isNamespaceScoped(p.Namespace) {
 				continue
 			}
-			
+
 			// Deduplication check
 			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
 				slog.Debug("Skipping high error investigation: already in progress", "ns", p.Namespace, "pod", p.PodName)
@@ -576,6 +584,10 @@ func (c *Controller) isNamespaceScoped(ns string) bool {
 	}
 	slog.Debug("Namespace allowed by default scoping", "ns", ns)
 	return true
+}
+
+func (c *Controller) IsNamespaceScoped(ns string) bool {
+	return c.isNamespaceScoped(ns)
 }
 
 func (c *Controller) matchesAlertFilters(alert alertmanager.Alert) bool {
@@ -650,7 +662,7 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 
 		foundCount++
 		slog.Info("Actionable alert found, triggering diagnostic", "ns", ns, "pod", pod, "alert", reason)
-		
+
 		// Save Alert to DB
 		c.history.SaveAlert(ctx, alert, "PullScraper")
 
@@ -805,6 +817,10 @@ func (c *Controller) processDiagnostic(work podWorkItem) error {
 
 // DiagnosePodByName allows manual or Alertmanager-driven diagnostic triggers.
 func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
+	if !c.isNamespaceScoped(namespace) {
+		slog.Warn("Ignoring diagnostic trigger for out-of-scope namespace", "ns", namespace, "pod", podName)
+		return
+	}
 	c.queue.Add(podWorkItem{
 		namespace: namespace,
 		name:      podName,
@@ -935,7 +951,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		pricingProfile := c.getPricingProfile(ctx, pod)
 		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
 		memReq, _, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-		
+
 		replicas := c.getReplicaCount(ctx, pod)
 		tier := c.getServiceTier(pod)
 		rps, _ := c.promClient.GetHTTPRequestsPerSecond(pod.Namespace, pod.Name)
@@ -944,7 +960,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		oldRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq}
 		// Assume AI fix will increase memory by 256MiB
 		newRes := struct{ CPU, Mem float64 }{CPU: cpuReq, Mem: memReq + 256*1024*1024}
-		
+
 		riskMetrics := finops.RiskMetrics{
 			Tier:              tier,
 			Replicas:          replicas,
@@ -1085,15 +1101,15 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
-	provider, token := c.getVCSProvider(ctx, pod.Namespace, vcsType)
+	provider, _ := c.getVCSProvider(ctx, pod.Namespace, vcsType)
 	if provider == nil {
 		slog.Warn("No VCS provider found for remediation", "ns", pod.Namespace, "pod", pod.Name, "type", vcsType)
 		return
 	}
 
 	var aggregatedContext strings.Builder
-	repoMap := make(map[string]struct{ Owner, Name, BaseBranch string })
-	
+	repoMap := make(map[string]discoveredRepo)
+
 	tokenizer := security.NewTokenizer()
 
 	for repoURL, info := range deps {
@@ -1113,7 +1129,14 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		if info.TargetRevision != "" && !strings.Contains(info.TargetRevision, "HEAD") {
 			baseBranch = info.TargetRevision
 		}
-		repoMap[repoURL] = struct{ Owner, Name, BaseBranch string }{Owner: repoOwner, Name: repoName, BaseBranch: baseBranch}
+		key := repoKey(repoOwner, repoName)
+		repoInfo := repoMap[key]
+		repoInfo.Owner = repoOwner
+		repoInfo.Name = repoName
+		repoInfo.BaseBranch = baseBranch
+		if repoInfo.AllowedFiles == nil {
+			repoInfo.AllowedFiles = make(map[string]bool)
+		}
 
 		// Fetch all yaml files in the directory
 		files, err := provider.ListFiles(ctx, repoOwner, repoName, info.Path, baseBranch)
@@ -1122,9 +1145,15 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			continue
 		}
 
-		for path, content := range files {
+		for filePath, content := range files {
+			cleanPath, ok := cleanPatchPath(filePath)
+			if !ok || !isRemediableManifest(cleanPath) {
+				slog.Warn("Skipping non-remediable file from repository listing", "repo", repoURL, "file", filePath)
+				continue
+			}
+			repoInfo.AllowedFiles[cleanPath] = true
 			contentStr := string(content)
-			
+
 			// TARGETED REMEDIATION: Surgically extract relevant fields based on failure reason
 			var targetFields []string
 			for reason, fields := range failureToFieldsMap {
@@ -1134,25 +1163,26 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				}
 			}
 
-			if len(targetFields) > 0 && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
+			if len(targetFields) > 0 && isRemediableManifest(cleanPath) {
 				containerName := pod.Name
 				if len(pod.Spec.Containers) > 0 {
 					containerName = pod.Spec.Containers[0].Name
 				}
 				snippet, err := ai.ExtractSnippet(contentStr, containerName, targetFields)
 				if err == nil {
-					slog.Info("Extracted targeted failure context", "file", path, "fields", targetFields)
+					slog.Info("Extracted targeted failure context", "file", cleanPath, "fields", targetFields)
 					contentStr = snippet
 				}
-			} else if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
+			} else if isRemediableManifest(cleanPath) {
 				contentStr = ai.CompressYAML(contentStr)
 			}
 
 			if c.config.PrivacyScrubGitContent {
 				contentStr = tokenizer.Tokenize(contentStr)
 			}
-			aggregatedContext.WriteString(fmt.Sprintf("[REPO: %s/%s, FILE: %s]\n%s\n\n", repoOwner, repoName, path, contentStr))
+			aggregatedContext.WriteString(fmt.Sprintf("[REPO: %s/%s, FILE: %s]\n%s\n\n", repoOwner, repoName, cleanPath, contentStr))
 		}
+		repoMap[key] = repoInfo
 	}
 
 	if aggregatedContext.Len() == 0 {
@@ -1176,38 +1206,47 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	// Group patches by repository
 	patchesByRepo := make(map[string][]vcs.FileChange)
 	for _, p := range aiResp.Patches {
-		key := fmt.Sprintf("%s/%s", p.RepoOwner, p.RepoName)
+		key := repoKey(p.RepoOwner, p.RepoName)
+		repoInfo, ok := repoMap[key]
+		if !ok {
+			slog.Error("AI patch targeted an undiscovered repository; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key)
+			notifications.SendNotification(c.config, fmt.Sprintf("❌ AI patch targeted an undiscovered repository (%s). Fixora will not open PRs.", key))
+			return
+		}
+		filePath, ok := cleanPatchPath(p.FilePath)
+		if !ok || !repoInfo.AllowedFiles[filePath] {
+			slog.Error("AI patch targeted a file outside the remediation allowlist; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", p.FilePath)
+			notifications.SendNotification(c.config, fmt.Sprintf("❌ AI patch targeted a file outside the remediation allowlist (%s:%s). Fixora will not open PRs.", key, p.FilePath))
+			return
+		}
+
 		content := p.Content
 		if c.config.PrivacyScrubGitContent {
 			content = tokenizer.Detokenize(content)
 		}
 
 		// TARGETED MERGE: If AI returned only a resource block, merge it back to original file
-		for repoURL := range deps {
-			u, _ := giturls.Parse(repoURL)
-			if strings.Contains(u.Path, p.RepoName) {
-				// Get original full content for this file
-				origBytes, err := provider.GetFileContent(ctx, p.RepoOwner, p.RepoName, p.FilePath, "main")
-				if err == nil {
-					// Check if this looks like a resources snippet
-					if strings.Contains(content, "limits:") || strings.Contains(content, "requests:") {
-						containerName := pod.Name
-						if len(pod.Spec.Containers) > 0 {
-							containerName = pod.Spec.Containers[0].Name
-						}
-						merged, err := ai.SurgicalUpdate(string(origBytes), containerName, content)
-						if err == nil {
-							slog.Info("Surgically applied targeted resource update", "file", p.FilePath)
-							content = merged
-						}
-					}
+		origBytes, err := provider.GetFileContent(ctx, repoInfo.Owner, repoInfo.Name, filePath, repoInfo.BaseBranch)
+		if err == nil {
+			// Check if this looks like a resources snippet
+			if strings.Contains(content, "limits:") || strings.Contains(content, "requests:") {
+				containerName := pod.Name
+				if len(pod.Spec.Containers) > 0 {
+					containerName = pod.Spec.Containers[0].Name
 				}
-				break
+				merged, err := ai.SurgicalUpdate(string(origBytes), containerName, content)
+				if err == nil {
+					slog.Info("Surgically applied targeted resource update", "file", filePath)
+					content = merged
+				}
 			}
+		} else {
+			slog.Error("Failed to re-read allowlisted file before patching; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
+			return
 		}
 
 		patchesByRepo[key] = append(patchesByRepo[key], vcs.FileChange{
-			FilePath:   p.FilePath,
+			FilePath:   filePath,
 			NewContent: []byte(content),
 		})
 	}
@@ -1240,23 +1279,20 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	branchName := fmt.Sprintf("fixora/patch-%s-%d", pod.Name, time.Now().Unix())
-	
+
 	// Create PR options per repo
 	var prOptsList []vcs.PullRequestOptions
-	for repoKey, changes := range patchesByRepo {
-		parts := strings.Split(repoKey, "/")
+	for patchedRepoKey, changes := range patchesByRepo {
+		parts := strings.Split(patchedRepoKey, "/")
 		if len(parts) != 2 {
 			continue
 		}
 		repoOwner, repoName := parts[0], parts[1]
-		
+
 		// Find base branch for this repo
 		baseBranch := "main"
-		for _, rm := range repoMap {
-			if rm.Owner == repoOwner && rm.Name == repoName {
-				baseBranch = rm.BaseBranch
-				break
-			}
+		if rm, ok := repoMap[repoKey(repoOwner, repoName)]; ok {
+			baseBranch = rm.BaseBranch
 		}
 
 		prOptsList = append(prOptsList, vcs.PullRequestOptions{
@@ -1279,7 +1315,6 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			fix := PendingFix{
 				Options:      prOptsList[0],
 				VCSType:      vcsType,
-				VCSToken:     token,
 				PodNamespace: pod.Namespace,
 				PodName:      pod.Name,
 				CreatedAt:    time.Now(),
@@ -1372,24 +1407,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 		return
 	}
 
-	var provider vcs.Provider
-	if fix.VCSToken != "" {
-		if fix.VCSType == "github" {
-			provider = vcs.NewGitHubProvider(fix.VCSToken)
-		} else if fix.VCSType == "gitlab" {
-			provider, err = vcs.NewGitLabProvider(fix.VCSToken, c.config.GitLabBaseURL)
-			if err != nil {
-				slog.Error("Failed to create GitLab provider for pending fix", "error", err)
-			}
-		}
-	} else {
-		if fix.VCSType == "github" {
-			provider = c.ghProvider
-		} else if fix.VCSType == "gitlab" {
-			provider = c.glProvider
-		}
-	}
-
+	provider, _ := c.getVCSProvider(ctx, fix.PodNamespace, fix.VCSType)
 	if provider == nil {
 		slog.Error("No VCS provider configured to submit pending fix")
 		notifications.SendNotification(c.config, "❌ Remediation failed: No VCS provider configured.")
@@ -1678,4 +1696,23 @@ func truncateForPreview(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n... [truncated]"
+}
+
+func repoKey(owner, name string) string {
+	return fmt.Sprintf("%s/%s", owner, name)
+}
+
+func cleanPatchPath(filePath string) (string, bool) {
+	cleaned := path.Clean(strings.TrimSpace(filePath))
+	if cleaned == "." || cleaned == "" || strings.HasPrefix(cleaned, "/") || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", false
+	}
+	if strings.HasPrefix(cleaned, ".github/") || strings.HasPrefix(cleaned, ".gitlab/") {
+		return "", false
+	}
+	return cleaned, true
+}
+
+func isRemediableManifest(filePath string) bool {
+	return strings.HasSuffix(filePath, ".yaml") || strings.HasSuffix(filePath, ".yml")
 }
