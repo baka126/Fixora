@@ -114,3 +114,140 @@ func cleanYAML(m map[string]interface{}) {
 		}
 	}
 }
+
+// ExtractSnippet finds specific fields for a container in a K8s YAML and returns them as a combined YAML snippet.
+func ExtractSnippet(yamlStr, containerName string, fields []string) (string, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlStr), &root); err != nil {
+		return "", err
+	}
+
+	containerNode := findContainerNode(&root, containerName)
+	if containerNode == nil {
+		// Fallback to top-level fields (e.g. for Replica count in Deployment)
+		snippet := make(map[string]interface{})
+		var fullMap map[string]interface{}
+		yaml.Unmarshal([]byte(yamlStr), &fullMap)
+		for _, f := range fields {
+			if val, ok := fullMap[f]; ok {
+				snippet[f] = val
+			}
+		}
+		if len(snippet) > 0 {
+			bytes, _ := yaml.Marshal(snippet)
+			return string(bytes), nil
+		}
+		return "", fmt.Errorf("container or fields not found")
+	}
+
+	snippetMap := make(map[string]interface{})
+	for _, field := range fields {
+		if node := findKey(containerNode, field); node != nil {
+			var val interface{}
+			node.Decode(&val)
+			snippetMap[field] = val
+		}
+	}
+
+	if len(snippetMap) == 0 {
+		return "", fmt.Errorf("no target fields found in container %s", containerName)
+	}
+
+	bytes, err := yaml.Marshal(snippetMap)
+	return string(bytes), err
+}
+
+func findContainerNode(node *yaml.Node, containerName string) *yaml.Node {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i].Value
+			if key == "containers" && node.Content[i+1].Kind == yaml.SequenceNode {
+				for _, container := range node.Content[i+1].Content {
+					if nameNode := findKey(container, "name"); nameNode != nil && nameNode.Value == containerName {
+						return container
+					}
+				}
+			}
+			if found := findContainerNode(node.Content[i+1], containerName); found != nil {
+				return found
+			}
+		}
+	}
+	if node.Kind == yaml.DocumentNode || node.Kind == yaml.SequenceNode {
+		for _, child := range node.Content {
+			if found := findContainerNode(child, containerName); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+// SurgicalUpdate replaces specific fields in the original YAML with new values from a snippet.
+func SurgicalUpdate(originalYaml, containerName, snippetYaml string) (string, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(originalYaml), &root); err != nil {
+		return "", err
+	}
+
+	var snippetNode yaml.Node
+	if err := yaml.Unmarshal([]byte(snippetYaml), &snippetNode); err != nil {
+		return "", err
+	}
+	
+	// Snippet is usually a map of fields
+	targetSnippet := &snippetNode
+	if snippetNode.Kind == yaml.DocumentNode && len(snippetNode.Content) > 0 {
+		targetSnippet = snippetNode.Content[0]
+	}
+
+	if targetSnippet.Kind != yaml.MappingNode {
+		return "", fmt.Errorf("invalid snippet format: expected mapping")
+	}
+
+	containerNode := findContainerNode(&root, containerName)
+	if containerNode == nil {
+		// Try top-level update (e.g. replicas)
+		if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+			applyMapping(root.Content[0], targetSnippet)
+		} else {
+			applyMapping(&root, targetSnippet)
+		}
+	} else {
+		applyMapping(containerNode, targetSnippet)
+	}
+
+	bytes, err := yaml.Marshal(&root)
+	return string(bytes), err
+}
+
+func applyMapping(dest, src *yaml.Node) {
+	for i := 0; i < len(src.Content); i += 2 {
+		key := src.Content[i].Value
+		val := src.Content[i+1]
+		
+		found := false
+		for j := 0; j < len(dest.Content); j += 2 {
+			if dest.Content[j].Value == key {
+				dest.Content[j+1] = val
+				found = true
+				break
+			}
+		}
+		if !found {
+			dest.Content = append(dest.Content, src.Content[i], val)
+		}
+	}
+}
+
+func findKey(node *yaml.Node, targetKey string) *yaml.Node {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Value == targetKey {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}

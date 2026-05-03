@@ -39,6 +39,18 @@ import (
 )
 
 // podWorkItem represents a unit of diagnostic work for a specific pod.
+
+var failureToFieldsMap = map[string][]string{
+	"OOMKilled":                 {"resources"},
+	"CPUThrottling":            {"resources"},
+	"ImagePullBackOff":          {"image", "imagePullPolicy"},
+	"ErrImagePull":              {"image", "imagePullPolicy"},
+	"CreateContainerConfigError": {"env", "envFrom", "volumeMounts", "command", "args"},
+	"CreateContainerError":       {"env", "envFrom", "volumeMounts", "command", "args"},
+	"Pending (Unschedulable)":    {"nodeSelector", "tolerations", "affinity", "resources"},
+	"NodeNotReady":              {"nodeSelector", "tolerations", "affinity"},
+}
+
 type podWorkItem struct {
 	namespace string
 	name      string
@@ -1112,9 +1124,30 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 		for path, content := range files {
 			contentStr := string(content)
-			if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
+			
+			// TARGETED REMEDIATION: Surgically extract relevant fields based on failure reason
+			var targetFields []string
+			for reason, fields := range failureToFieldsMap {
+				if strings.Contains(evidence.ClusterContext, reason) {
+					targetFields = fields
+					break
+				}
+			}
+
+			if len(targetFields) > 0 && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
+				containerName := pod.Name
+				if len(pod.Spec.Containers) > 0 {
+					containerName = pod.Spec.Containers[0].Name
+				}
+				snippet, err := ai.ExtractSnippet(contentStr, containerName, targetFields)
+				if err == nil {
+					slog.Info("Extracted targeted failure context", "file", path, "fields", targetFields)
+					contentStr = snippet
+				}
+			} else if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
 				contentStr = ai.CompressYAML(contentStr)
 			}
+
 			if c.config.PrivacyScrubGitContent {
 				contentStr = tokenizer.Tokenize(contentStr)
 			}
@@ -1148,6 +1181,31 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		if c.config.PrivacyScrubGitContent {
 			content = tokenizer.Detokenize(content)
 		}
+
+		// TARGETED MERGE: If AI returned only a resource block, merge it back to original file
+		for repoURL := range deps {
+			u, _ := giturls.Parse(repoURL)
+			if strings.Contains(u.Path, p.RepoName) {
+				// Get original full content for this file
+				origBytes, err := provider.GetFileContent(ctx, p.RepoOwner, p.RepoName, p.FilePath, "main")
+				if err == nil {
+					// Check if this looks like a resources snippet
+					if strings.Contains(content, "limits:") || strings.Contains(content, "requests:") {
+						containerName := pod.Name
+						if len(pod.Spec.Containers) > 0 {
+							containerName = pod.Spec.Containers[0].Name
+						}
+						merged, err := ai.SurgicalUpdate(string(origBytes), containerName, content)
+						if err == nil {
+							slog.Info("Surgically applied targeted resource update", "file", p.FilePath)
+							content = merged
+						}
+					}
+				}
+				break
+			}
+		}
+
 		patchesByRepo[key] = append(patchesByRepo[key], vcs.FileChange{
 			FilePath:   p.FilePath,
 			NewContent: []byte(content),
