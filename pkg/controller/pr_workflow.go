@@ -1,0 +1,200 @@
+package controller
+
+import (
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"fixora/pkg/gitops"
+	"fixora/pkg/notifications"
+	"fixora/pkg/vcs"
+	v1 "k8s.io/api/core/v1"
+)
+
+var branchUnsafeChars = regexp.MustCompile(`[^a-z0-9._/-]+`)
+
+func buildTargetedPROptions(
+	pod *v1.Pod,
+	evidence notifications.EvidenceChain,
+	diagnosis Diagnosis,
+	aiConfidence int,
+	repoOwner string,
+	repoName string,
+	baseBranch string,
+	changes []vcs.FileChange,
+	timestamp int64,
+) []vcs.PullRequestOptions {
+	groups := splitChangesByFile(changes)
+	opts := make([]vcs.PullRequestOptions, 0, len(groups))
+	for _, group := range groups {
+		scope := prScopeFromChangeGroup(diagnosis, group)
+		branch := fmt.Sprintf("fixora/%s-%s-%s-%d", slugify(string(diagnosis.PatchStrategy)), slugify(pod.Name), slugify(scope.BranchPart), timestamp)
+		opts = append(opts, vcs.PullRequestOptions{
+			Title:         fmt.Sprintf("Fixora: %s for %s/%s", scope.TitleAction, pod.Namespace, pod.Name),
+			Body:          targetedPRBody(evidence, diagnosis, aiConfidence, group),
+			Head:          branch,
+			Base:          baseBranch,
+			RepoOwner:     repoOwner,
+			RepoName:      repoName,
+			Files:         group,
+			CommitMessage: fmt.Sprintf("fix: %s for %s/%s", scope.CommitAction, pod.Namespace, pod.Name),
+		})
+	}
+	return opts
+}
+
+func buildManifestAwarePROptions(
+	pod *v1.Pod,
+	evidence notifications.EvidenceChain,
+	diagnosis Diagnosis,
+	aiConfidence int,
+	repoOwner string,
+	repoName string,
+	baseBranch string,
+	source gitops.WorkloadSource,
+	changes []vcs.FileChange,
+	timestamp int64,
+) []vcs.PullRequestOptions {
+	if source.ManifestType != gitops.ManifestKustomize {
+		return buildTargetedPROptions(pod, evidence, diagnosis, aiConfidence, repoOwner, repoName, baseBranch, changes, timestamp)
+	}
+
+	sorted := append([]vcs.FileChange(nil), changes...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].FilePath < sorted[j].FilePath
+	})
+	scope := prScopeFromChangeGroup(diagnosis, sorted)
+	branch := fmt.Sprintf("fixora/%s-%s-kustomize-%s-%d", slugify(string(diagnosis.PatchStrategy)), slugify(pod.Name), slugify(scope.BranchPart), timestamp)
+	return []vcs.PullRequestOptions{{
+		Title:         fmt.Sprintf("Fixora: update Kustomize overlay for %s/%s", pod.Namespace, pod.Name),
+		Body:          targetedPRBody(evidence, diagnosis, aiConfidence, sorted),
+		Head:          branch,
+		Base:          baseBranch,
+		RepoOwner:     repoOwner,
+		RepoName:      repoName,
+		Files:         sorted,
+		CommitMessage: fmt.Sprintf("fix: update Kustomize overlay for %s/%s", pod.Namespace, pod.Name),
+	}}
+}
+
+func splitChangesByFile(changes []vcs.FileChange) [][]vcs.FileChange {
+	sorted := append([]vcs.FileChange(nil), changes...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].FilePath < sorted[j].FilePath
+	})
+
+	groups := make([][]vcs.FileChange, 0, len(sorted))
+	for _, change := range sorted {
+		groups = append(groups, []vcs.FileChange{change})
+	}
+	return groups
+}
+
+type prScope struct {
+	TitleAction  string
+	CommitAction string
+	BranchPart   string
+}
+
+func prScopeFromChangeGroup(diagnosis Diagnosis, changes []vcs.FileChange) prScope {
+	action := patchStrategyAction(diagnosis.PatchStrategy)
+	filePart := "manifest"
+	if len(changes) > 0 {
+		filePart = filepath.Base(changes[0].FilePath)
+		filePart = strings.TrimSuffix(strings.TrimSuffix(filePart, ".yaml"), ".yml")
+	}
+	return prScope{
+		TitleAction:  action.title,
+		CommitAction: action.commit,
+		BranchPart:   filePart,
+	}
+}
+
+type strategyAction struct {
+	title  string
+	commit string
+}
+
+func patchStrategyAction(strategy PatchStrategy) strategyAction {
+	switch strategy {
+	case PatchResources:
+		return strategyAction{title: "adjust resources", commit: "adjust Kubernetes resources"}
+	case PatchImage:
+		return strategyAction{title: "correct image reference", commit: "correct image reference"}
+	case PatchEnvOrVolumeRef:
+		return strategyAction{title: "fix config references", commit: "fix config references"}
+	case PatchSchedulingPolicy:
+		return strategyAction{title: "fix scheduling policy", commit: "fix scheduling policy"}
+	case PatchProbe:
+		return strategyAction{title: "fix health probe", commit: "fix health probe"}
+	case PatchServiceSelector:
+		return strategyAction{title: "fix service routing", commit: "fix service routing"}
+	case PatchPVC:
+		return strategyAction{title: "fix volume dependency", commit: "fix volume dependency"}
+	default:
+		return strategyAction{title: "apply targeted remediation", commit: "apply targeted remediation"}
+	}
+}
+
+func targetedPRBody(evidence notifications.EvidenceChain, diagnosis Diagnosis, aiConfidence int, changes []vcs.FileChange) string {
+	return fmt.Sprintf(`### Targeted Fix
+
+* **Symptom:** %s
+* **Category:** %s
+* **Patch Strategy:** %s
+* **Deterministic Confidence:** %d%%
+* **AI Confidence:** %d%%
+
+### Evidence Chain
+
+* **Root Cause:** %s
+* **Metric Proof:** %s
+
+### Files Changed
+
+%s
+
+Generated by Fixora.`,
+		diagnosis.Symptom,
+		diagnosis.Category,
+		diagnosis.PatchStrategy,
+		diagnosis.Confidence,
+		aiConfidence,
+		firstNonEmpty(evidence.RootCause, diagnosis.LikelyCause),
+		firstNonEmpty(evidence.MetricProof, "No metric proof available."),
+		formatChangedFiles(changes),
+	)
+}
+
+func targetedPRPreview(opts vcs.PullRequestOptions, diagnosis Diagnosis) string {
+	return fmt.Sprintf("Targeted %s patch\nTitle: %s\nFiles:\n%s", diagnosis.PatchStrategy, opts.Title, formatChangedFiles(opts.Files))
+}
+
+func formatChangedFiles(changes []vcs.FileChange) string {
+	if len(changes) == 0 {
+		return "- No files"
+	}
+	lines := make([]string, 0, len(changes))
+	for _, change := range changes {
+		lines = append(lines, "- "+change.FilePath)
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
+}
+
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, ":", "-")
+	value = strings.ReplaceAll(value, " ", "-")
+	value = branchUnsafeChars.ReplaceAllString(value, "-")
+	value = strings.Trim(value, "-._/")
+	if value == "" {
+		return "patch"
+	}
+	if len(value) > 48 {
+		return value[:48]
+	}
+	return value
+}

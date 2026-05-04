@@ -92,6 +92,13 @@ type Config struct {
 	PrivacySendGitToAI     bool
 	PrivacyScrubGitContent bool
 
+	// Validation and Policy Guardrails
+	ValidationSandboxEnabled bool
+	ValidationRequireRender  bool
+	ValidationToolTimeout    time.Duration
+	PolicyGuardrailsEnabled  bool
+	AllowedImageRegistries   []string
+
 	// FinOps Tuning
 	RevenuePerRequest     float64
 	LatencyThresholdMS    float64
@@ -172,6 +179,12 @@ func Load() *Config {
 
 		PrivacySendGitToAI:     getEnvBool("PRIVACY_SEND_GIT_TO_AI", true),
 		PrivacyScrubGitContent: getEnvBool("PRIVACY_SCRUB_GIT_CONTENT", true),
+
+		ValidationSandboxEnabled: getEnvBool("VALIDATION_SANDBOX_ENABLED", true),
+		ValidationRequireRender:  getEnvBool("VALIDATION_REQUIRE_RENDER", false),
+		ValidationToolTimeout:    getEnvDuration("VALIDATION_TOOL_TIMEOUT", 15*time.Second),
+		PolicyGuardrailsEnabled:  getEnvBool("POLICY_GUARDRAILS_ENABLED", true),
+		AllowedImageRegistries:   getEnvSlice("ALLOWED_IMAGE_REGISTRIES", []string{}),
 
 		RevenuePerRequest:     getEnvFloat("REVENUE_PER_REQUEST", 0.0),
 		LatencyThresholdMS:    getEnvFloat("LATENCY_THRESHOLD_MS", 500.0),

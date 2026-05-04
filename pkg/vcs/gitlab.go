@@ -41,11 +41,20 @@ func (g *GitLabProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 	// 2. Commit file changes
 	var actions []*gitlab.CommitActionOptions
 	for _, file := range opts.Files {
-		actions = append(actions, &gitlab.CommitActionOptions{
-			Action:   gitlab.Ptr(gitlab.FileUpdate), // Using FileUpdate. If file doesn't exist, FileCreate should be used, but we assume FileUpdate for remediation.
+		action := gitlab.FileUpdate
+		if file.Delete {
+			action = gitlab.FileDelete
+		} else if file.Create {
+			action = gitlab.FileCreate
+		}
+		commitAction := &gitlab.CommitActionOptions{
+			Action:   gitlab.Ptr(action),
 			FilePath: gitlab.String(file.FilePath),
-			Content:  gitlab.String(string(file.NewContent)),
-		})
+		}
+		if !file.Delete {
+			commitAction.Content = gitlab.String(string(file.NewContent))
+		}
+		actions = append(actions, commitAction)
 	}
 
 	_, _, err = g.client.Commits.CreateCommit(projectID, &gitlab.CreateCommitOptions{
@@ -73,7 +82,7 @@ func (g *GitLabProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 
 func (g *GitLabProvider) ListFiles(ctx context.Context, repoOwner, repoName, path, ref string) (map[string][]byte, error) {
 	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
-	
+
 	tree, _, err := g.client.Repositories.ListTree(projectID, &gitlab.ListTreeOptions{
 		Path: gitlab.Ptr(path),
 		Ref:  gitlab.Ptr(ref),
@@ -124,4 +133,28 @@ func (g *GitLabProvider) PullRequestExists(ctx context.Context, repoOwner, repoN
 	}
 
 	return false, "", nil
+}
+
+func (g *GitLabProvider) GetPullRequestStatus(ctx context.Context, repoOwner, repoName, headBranch string) (PullRequestStatus, error) {
+	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
+	opts := &gitlab.ListProjectMergeRequestsOptions{
+		State:        gitlab.Ptr("all"),
+		SourceBranch: gitlab.Ptr(headBranch),
+	}
+	mrs, _, err := g.client.MergeRequests.ListProjectMergeRequests(projectID, opts)
+	if err != nil {
+		return PullRequestStatus{}, err
+	}
+	if len(mrs) == 0 {
+		return PullRequestStatus{State: "not_found"}, nil
+	}
+
+	mr := mrs[0]
+	status := PullRequestStatus{
+		URL:            mr.WebURL,
+		State:          mr.State,
+		Merged:         mr.State == "merged",
+		MergeCommitSHA: mr.MergeCommitSHA,
+	}
+	return status, nil
 }
