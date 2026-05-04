@@ -13,3 +13,4 @@ GEMINI.md
 .gemini
 charts/fixora/test-values.yaml
 pod.yaml
+doc/repo-context.md

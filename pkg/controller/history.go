@@ -134,6 +134,7 @@ func (h *historyCache) initDB() {
 		`CREATE TABLE IF NOT EXISTS pending_fixes (
 			callback_id VARCHAR(255) PRIMARY KEY,
 			created_at TIMESTAMP NOT NULL,
+			remediation_id INTEGER,
 			vcs_type TEXT NOT NULL,
 			vcs_token TEXT,
 			pod_namespace TEXT NOT NULL,
@@ -148,7 +149,52 @@ func (h *historyCache) initDB() {
 			new_content BYTEA NOT NULL,
 			commit_message TEXT NOT NULL
 		);`,
+		`ALTER TABLE pending_fixes ADD COLUMN IF NOT EXISTS remediation_id INTEGER;`,
 		`CREATE INDEX IF NOT EXISTS idx_pending_fixes_created_at ON pending_fixes (created_at);`,
+		`CREATE TABLE IF NOT EXISTS remediation_outcomes (
+			id SERIAL PRIMARY KEY,
+			investigation_id INTEGER REFERENCES investigations(id),
+			namespace TEXT NOT NULL,
+			pod_name TEXT NOT NULL,
+			diagnosis_category TEXT,
+			patch_strategy TEXT,
+			status TEXT NOT NULL,
+			vcs_type TEXT,
+			repo_owner TEXT NOT NULL,
+			repo_name TEXT NOT NULL,
+			base_branch TEXT NOT NULL,
+			head_branch TEXT NOT NULL,
+			pr_url TEXT,
+			pr_title TEXT,
+			gitops_controller TEXT,
+			gitops_app TEXT,
+			gitops_namespace TEXT,
+			gitops_repo_url TEXT,
+			gitops_revision TEXT,
+			gitops_path TEXT,
+			manifest_type TEXT,
+			overlay_role TEXT,
+			environment TEXT,
+			region TEXT,
+			changed_files JSONB,
+			failure_reason TEXT,
+			revert_pr_url TEXT,
+			revert_head_branch TEXT,
+			workload_kind TEXT,
+			workload_name TEXT,
+			workload_selector TEXT,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS revert_pr_url TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS revert_head_branch TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_kind TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_name TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_selector TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS gitops_namespace TEXT;`,
+		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_pod ON remediation_outcomes (namespace, pod_name);`,
+		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_status ON remediation_outcomes (status);`,
+		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_strategy ON remediation_outcomes (diagnosis_category, patch_strategy);`,
 		`CREATE TABLE IF NOT EXISTS autofix_events (
 			id SERIAL PRIMARY KEY,
 			created_at TIMESTAMP NOT NULL
@@ -405,18 +451,18 @@ func (h *historyCache) SavePendingFix(ctx context.Context, callbackID string, fi
 	}
 	query := `
 		INSERT INTO pending_fixes (
-			callback_id, created_at, vcs_type, vcs_token, pod_namespace, pod_name,
+			callback_id, created_at, remediation_id, vcs_type, vcs_token, pod_namespace, pod_name,
 			title, body, head, base, repo_owner, repo_name, file_path, new_content, commit_message
 		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11, $12, $13, $14, $15
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12, $13, $14, $15, $16
 		)
 	`
 
 	filesJson, _ := json.Marshal(fix.Options.Files)
 
 	_, err := h.db.ExecContext(ctx, query,
-		callbackID, fix.CreatedAt, fix.VCSType, "", fix.PodNamespace, fix.PodName,
+		callbackID, fix.CreatedAt, nullableInt64(fix.RemediationID), fix.VCSType, "", fix.PodNamespace, fix.PodName,
 		fix.Options.Title, fix.Options.Body, fix.Options.Head, fix.Options.Base,
 		fix.Options.RepoOwner, fix.Options.RepoName, "", filesJson, fix.Options.CommitMessage,
 	)
@@ -434,7 +480,7 @@ func (h *historyCache) TakePendingFix(ctx context.Context, callbackID string) (P
 	defer tx.Rollback()
 
 	query := `
-		SELECT created_at, vcs_type, COALESCE(vcs_token, ''), pod_namespace, pod_name,
+		SELECT created_at, COALESCE(remediation_id, 0), vcs_type, COALESCE(vcs_token, ''), pod_namespace, pod_name,
 		       title, body, head, base, repo_owner, repo_name, file_path, new_content, commit_message
 		FROM pending_fixes
 		WHERE callback_id = $1
@@ -445,7 +491,7 @@ func (h *historyCache) TakePendingFix(ctx context.Context, callbackID string) (P
 	var dummyFilePath string
 	var ignoredVCSToken string
 	err = tx.QueryRowContext(ctx, query, callbackID).Scan(
-		&fix.CreatedAt, &fix.VCSType, &ignoredVCSToken, &fix.PodNamespace, &fix.PodName,
+		&fix.CreatedAt, &fix.RemediationID, &fix.VCSType, &ignoredVCSToken, &fix.PodNamespace, &fix.PodName,
 		&fix.Options.Title, &fix.Options.Body, &fix.Options.Head, &fix.Options.Base,
 		&fix.Options.RepoOwner, &fix.Options.RepoName, &dummyFilePath, &newContent, &fix.Options.CommitMessage,
 	)

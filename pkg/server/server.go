@@ -16,6 +16,7 @@ import (
 	"fixora/pkg/config"
 	"fixora/pkg/controller"
 	"fixora/pkg/notifications"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/slack-go/slack"
 )
 
@@ -36,6 +37,7 @@ func New(ctrl *controller.Controller, cfg *config.Config) *Server {
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("/slack/interactions", s.handleSlackInteraction)
 	mux.HandleFunc("/googlechat/interactions", s.handleGoogleChatInteraction)

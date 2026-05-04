@@ -19,10 +19,12 @@ import (
 	"fixora/pkg/config"
 	"fixora/pkg/events"
 	"fixora/pkg/finops"
+	"fixora/pkg/gitops"
 	"fixora/pkg/metrics"
 	"fixora/pkg/notifications"
 	"fixora/pkg/prometheus"
 	"fixora/pkg/security"
+	"fixora/pkg/telemetry"
 	"fixora/pkg/validation"
 	"fixora/pkg/vcs"
 	giturls "github.com/chainguard-dev/git-urls"
@@ -62,23 +64,33 @@ type podWorkItem struct {
 // gathers forensic evidence from metrics/logs, and triggers AI analysis.
 
 type PendingFix struct {
-	Options      vcs.PullRequestOptions
-	VCSType      string
-	VCSToken     string // Deprecated: do not persist or use; kept for old in-memory values.
-	PodNamespace string
-	PodName      string
-	CreatedAt    time.Time
+	Options       vcs.PullRequestOptions
+	VCSType       string
+	VCSToken      string // Deprecated: do not persist or use; kept for old in-memory values.
+	PodNamespace  string
+	PodName       string
+	CreatedAt     time.Time
+	RemediationID int64
 }
 
 type discoveredRepo struct {
-	Owner        string
-	Name         string
-	BaseBranch   string
-	AllowedFiles map[string]bool
+	Owner           string
+	Name            string
+	BaseBranch      string
+	AllowedFiles    map[string]bool
+	AllowedNewFiles map[string]bool
+	Source          gitops.WorkloadSource
+	SourceFiles     map[string][]byte
+}
+
+type remediationPROption struct {
+	Options vcs.PullRequestOptions
+	Source  gitops.WorkloadSource
 }
 
 type Controller struct {
 	clientset       kubernetes.Interface
+	dynamicClient   dynamic.Interface
 	factory         informers.SharedInformerFactory
 	config          *config.Config
 	promClient      metrics.MetricsProvider
@@ -178,6 +190,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 
 	return &Controller{
 		clientset:       clientset,
+		dynamicClient:   dynamicClient,
 		factory:         factory,
 		config:          cfg,
 		promClient:      promClient,
@@ -262,6 +275,7 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	}
 
 	go wait.Until(c.cleanupExpiredPendingFixes, time.Minute, stopCh)
+	go wait.Until(c.monitorRemediationOutcomes, 2*time.Minute, stopCh)
 
 	<-stopCh
 }
@@ -494,7 +508,15 @@ func (c *Controller) scanForLeaks() {
 			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate)
 
 			// Attempt automated remediation for predicted leaks
-			c.handleRemediation(ctx, &pod, evidence, invID)
+			diagnosis := Diagnosis{
+				Symptom:       "Potential memory leak trajectory",
+				Category:      CategoryRuntime,
+				LikelyCause:   firstNonEmpty(evidence.RootCause, "Memory usage is growing quickly enough to risk a future OOM kill."),
+				Confidence:    evidence.AIConfidence,
+				PatchStrategy: PatchResources,
+				Evidence:      []string{evidence.MetricProof},
+			}
+			c.handleRemediation(ctx, &pod, evidence, diagnosis, invID)
 		}
 	}
 	slog.Debug("Memory leak scan finished")
@@ -833,6 +855,9 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	slog.Info("Starting full forensics investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 
 	diagnosis := c.classifyPodIssue(ctx, pod, reason)
+	correlation := c.correlatePodResources(ctx, pod)
+	diagnosis.Related = uniqueSorted(append(diagnosis.Related, correlation.Related...))
+	telemetry.IncInvestigation("started", string(diagnosis.Category))
 	slog.Info("Deterministic issue classification complete", "ns", pod.Namespace, "pod", pod.Name, "category", diagnosis.Category, "strategy", diagnosis.PatchStrategy, "confidence", diagnosis.Confidence)
 
 	var historyStr string
@@ -852,7 +877,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	evidence := notifications.EvidenceChain{
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
-		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s\n%s", pod.Namespace, pod.Name, reason, diagnosis.Summary()),
+		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s\n%s\n%s", pod.Namespace, pod.Name, reason, diagnosis.Summary(), correlation.Summary()),
 		HistoricalPattern: historySummary,
 		ShowEventButton:   true,
 	}
@@ -929,7 +954,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			PodName:   pod.Name,
 			Reason:    diagnosis.Symptom,
 			Logs:      logs,
-			Events:    eventsTimeline,
+			Events:    eventsTimeline + "\n\n" + correlation.Summary(),
 			Metrics:   evidence.MetricProof,
 			History:   historyStr,
 		}
@@ -988,12 +1013,13 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause, invID)
 
 	c.history.RecordActionCheckpoint(ctx, c.leaderIdentity, "CompletedDiagnostic", fmt.Sprintf("Pod %s/%s, Reason: %s", pod.Namespace, pod.Name, reason))
+	telemetry.IncInvestigation("completed", string(diagnosis.Category))
 
 	slog.Info("Dispatching diagnostic report to notifications", "ns", pod.Namespace, "pod", pod.Name)
 	notifications.SendEvidenceChain(c.config, evidence)
 
 	// Attempts automated remediation
-	c.handleRemediation(ctx, pod, evidence, invID)
+	c.handleRemediation(ctx, pod, evidence, diagnosis, invID)
 }
 
 // getGranularMetrics attempts to fetch RSS and Cache metrics from the provider.
@@ -1069,7 +1095,7 @@ func (c *Controller) gatherDependencyContext(ctx context.Context, pod *v1.Pod) m
 }
 
 // handleRemediation attempts to open Pull Requests with fixes by discovering the pod's source repositories and dependencies.
-func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain, investigationID int64) {
+func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain, diagnosis Diagnosis, investigationID int64) {
 	if !c.config.PrivacySendGitToAI {
 		slog.Info("Skipping GitOps remediation: privacy settings prohibit sending Git context to AI", "ns", pod.Namespace, "pod", pod.Name)
 		return
@@ -1080,28 +1106,8 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		vcsType = "github"
 	}
 
-	deps := c.gatherDependencyContext(ctx, pod)
-
-	// Fallback to manual annotations if ArgoCD finds nothing
-	if len(deps) == 0 {
-		repoURL := pod.Annotations["fixora.io/repo-url"]
-		filePath := pod.Annotations["fixora.io/repo-path"]
-		if repoURL != "" && filePath != "" {
-			// Extract path to directory if it's a file
-			pathParts := strings.Split(filePath, "/")
-			dirPath := filePath
-			if len(pathParts) > 1 && strings.Contains(pathParts[len(pathParts)-1], ".") {
-				dirPath = strings.Join(pathParts[:len(pathParts)-1], "/")
-			}
-			deps[repoURL] = &argocd.AppInfo{
-				RepoURL:        repoURL,
-				Path:           dirPath,
-				TargetRevision: pod.Annotations["fixora.io/target-revision"],
-			}
-		}
-	}
-
-	if len(deps) == 0 {
+	sources := c.resolveGitOpsSources(ctx, pod)
+	if len(sources) == 0 {
 		slog.Debug("Skipping remediation: no repository metadata found", "ns", pod.Namespace, "pod", pod.Name)
 		return
 	}
@@ -1117,8 +1123,8 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	tokenizer := security.NewTokenizer()
 
-	for repoURL, info := range deps {
-		u, err := giturls.Parse(repoURL)
+	for _, source := range sources {
+		u, err := giturls.Parse(source.RepoURL)
 		if err != nil || !c.isVCSDomainTrusted(u.Host) {
 			continue
 		}
@@ -1131,32 +1137,47 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		repoName := pathParts[len(pathParts)-1]
 
 		baseBranch := "main"
-		if info.TargetRevision != "" && !strings.Contains(info.TargetRevision, "HEAD") {
-			baseBranch = info.TargetRevision
+		if source.TargetRevision != "" && !strings.Contains(source.TargetRevision, "HEAD") {
+			baseBranch = source.TargetRevision
 		}
 		key := repoKey(repoOwner, repoName)
 		repoInfo := repoMap[key]
 		repoInfo.Owner = repoOwner
 		repoInfo.Name = repoName
 		repoInfo.BaseBranch = baseBranch
+		repoInfo.Source = source
 		if repoInfo.AllowedFiles == nil {
 			repoInfo.AllowedFiles = make(map[string]bool)
 		}
+		if repoInfo.AllowedNewFiles == nil {
+			repoInfo.AllowedNewFiles = make(map[string]bool)
+		}
+		if repoInfo.SourceFiles == nil {
+			repoInfo.SourceFiles = make(map[string][]byte)
+		}
 
-		// Fetch all yaml files in the directory
-		files, err := provider.ListFiles(ctx, repoOwner, repoName, info.Path, baseBranch)
+		// Fetch candidate source-of-truth files from the resolved GitOps path.
+		files, err := provider.ListFiles(ctx, repoOwner, repoName, source.Path, baseBranch)
 		if err != nil {
-			slog.Error("Failed to list files for repo", "repo", repoURL, "error", err)
+			slog.Error("Failed to list files for GitOps source", "source", source.Summary(), "error", err)
 			continue
+		}
+		source.ManifestType = gitops.DetectManifestTypeFromFiles(source.ManifestType, source.Path, files)
+		repoInfo.Source = source
+		for _, newPath := range allowedNewPatchFiles(pod, source, diagnosis) {
+			repoInfo.AllowedNewFiles[newPath] = true
 		}
 
 		for filePath, content := range files {
 			cleanPath, ok := cleanPatchPath(filePath)
-			if !ok || !isRemediableManifest(cleanPath) {
-				slog.Warn("Skipping non-remediable file from repository listing", "repo", repoURL, "file", filePath)
+			if !ok || !isGitOpsContextFile(source, cleanPath) {
+				slog.Warn("Skipping non-remediable GitOps source file", "source", source.Summary(), "file", filePath)
 				continue
 			}
-			repoInfo.AllowedFiles[cleanPath] = true
+			if isGitOpsEditableFile(source, cleanPath) {
+				repoInfo.AllowedFiles[cleanPath] = true
+			}
+			repoInfo.SourceFiles[cleanPath] = append([]byte(nil), content...)
 			contentStr := string(content)
 
 			// TARGETED REMEDIATION: Surgically extract relevant fields based on failure reason
@@ -1185,7 +1206,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			if c.config.PrivacyScrubGitContent {
 				contentStr = tokenizer.Tokenize(contentStr)
 			}
-			aggregatedContext.WriteString(fmt.Sprintf("[REPO: %s/%s, FILE: %s]\n%s\n\n", repoOwner, repoName, cleanPath, contentStr))
+			aggregatedContext.WriteString(fmt.Sprintf("[GITOPS SOURCE: %s]\n[REPO: %s/%s, FILE: %s]\n%s\n\n", gitOpsPatchInstructions(source, pod, diagnosis), repoOwner, repoName, cleanPath, contentStr))
 		}
 		repoMap[key] = repoInfo
 	}
@@ -1199,8 +1220,15 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
-	slog.Info("Requesting AI to generate multi-resource patches", "ns", pod.Namespace, "pod", pod.Name)
-	aiResp, err := c.aiProvider.GeneratePatch(ctx, aggregatedContext.String(), evidence.RootCause+"\n"+evidence.MetricProof)
+	patchEvidence := evidence.RootCause + "\n" + evidence.MetricProof + "\n" + diagnosis.Summary()
+	if c.history != nil {
+		if feedback := c.history.RemediationFeedback(ctx, pod.Namespace, pod.Name, diagnosis); feedback != "" {
+			patchEvidence += "\n\n[CLOSED LOOP FEEDBACK]\n" + feedback
+		}
+	}
+
+	slog.Info("Requesting AI to generate targeted remediation patches", "ns", pod.Namespace, "pod", pod.Name, "strategy", diagnosis.PatchStrategy)
+	aiResp, err := c.aiProvider.GeneratePatch(ctx, aggregatedContext.String(), patchEvidence)
 	if err != nil || len(aiResp.Patches) == 0 {
 		slog.Error("Failed to generate AI remediation patches", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 		return
@@ -1219,7 +1247,9 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			return
 		}
 		filePath, ok := cleanPatchPath(p.FilePath)
-		if !ok || !repoInfo.AllowedFiles[filePath] {
+		isExistingFile := ok && repoInfo.AllowedFiles[filePath]
+		isNewFile := ok && repoInfo.AllowedNewFiles[filePath]
+		if !ok || (!isExistingFile && !isNewFile) {
 			slog.Error("AI patch targeted a file outside the remediation allowlist; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", p.FilePath)
 			notifications.SendNotification(c.config, fmt.Sprintf("❌ AI patch targeted a file outside the remediation allowlist (%s:%s). Fixora will not open PRs.", key, p.FilePath))
 			return
@@ -1230,9 +1260,15 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			content = tokenizer.Detokenize(content)
 		}
 
-		// TARGETED MERGE: If AI returned only a resource block, merge it back to original file
-		origBytes, err := provider.GetFileContent(ctx, repoInfo.Owner, repoInfo.Name, filePath, repoInfo.BaseBranch)
-		if err == nil {
+		var previousContent []byte
+		if isExistingFile {
+			// TARGETED MERGE: If AI returned only a resource block, merge it back to original file.
+			origBytes, err := provider.GetFileContent(ctx, repoInfo.Owner, repoInfo.Name, filePath, repoInfo.BaseBranch)
+			if err != nil {
+				slog.Error("Failed to re-read allowlisted file before patching; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
+				return
+			}
+			previousContent = append([]byte(nil), origBytes...)
 			// Check if this looks like a resources snippet
 			if strings.Contains(content, "limits:") || strings.Contains(content, "requests:") {
 				containerName := pod.Name
@@ -1245,19 +1281,52 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 					content = merged
 				}
 			}
-		} else {
-			slog.Error("Failed to re-read allowlisted file before patching; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
-			return
 		}
 
 		patchesByRepo[key] = append(patchesByRepo[key], vcs.FileChange{
-			FilePath:   filePath,
-			NewContent: []byte(content),
+			FilePath:        filePath,
+			NewContent:      []byte(content),
+			PreviousContent: previousContent,
+			Create:          isNewFile,
 		})
 	}
 
 	// Validate patches
 	for repoKey, changes := range patchesByRepo {
+		if repoInfo, ok := repoMap[repoKey]; ok {
+			if err := validateManifestAwarePatchSet(repoInfo.Source, changes); err != nil {
+				telemetry.IncValidation("manifest-aware", "failed")
+				slog.Error("Manifest-aware patch validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
+				notifications.SendNotification(c.config, fmt.Sprintf("❌ Manifest-aware patch validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
+				return
+			}
+			telemetry.IncValidation("manifest-aware", "passed")
+			if c.config.PolicyGuardrailsEnabled {
+				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries); err != nil {
+					telemetry.IncPolicyRejection(policyRejectionReason(err))
+					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
+					notifications.SendNotification(c.config, fmt.Sprintf("❌ Policy guardrail rejected remediation for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
+					return
+				}
+			}
+			renderResult := validation.ValidateRenderSandbox(repoInfo.Source, repoInfo.SourceFiles, changes, validation.SandboxOptions{
+				Enabled:       c.config.ValidationSandboxEnabled,
+				RequireRender: c.config.ValidationRequireRender,
+				Timeout:       c.config.ValidationToolTimeout,
+			})
+			if !renderResult.Valid {
+				telemetry.IncValidation("render-sandbox", "failed")
+				slog.Error("Render sandbox validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", renderResult.Output)
+				notifications.SendNotification(c.config, fmt.Sprintf("❌ Render sandbox validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, validationMessage(renderResult)))
+				return
+			}
+			if renderResult.Skipped {
+				telemetry.IncValidation("render-sandbox", "skipped")
+				slog.Info("Render sandbox validation skipped", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "reason", renderResult.Output)
+			} else {
+				telemetry.IncValidation("render-sandbox", "passed")
+			}
+		}
 		for _, change := range changes {
 			var vResult validation.ValidationResult
 			if strings.Contains(change.FilePath, "values.yaml") {
@@ -1267,15 +1336,17 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 
 			if !vResult.Valid {
+				telemetry.IncValidation("file", "failed")
 				slog.Error("Pre-flight validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "file", change.FilePath, "error", vResult.Output)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Pre-flight validation failed for %s in %s. Fixora will not open PRs.\nError: %s", change.FilePath, repoKey, vResult.Output))
 				return
 			}
+			telemetry.IncValidation("file", "passed")
 		}
 	}
 
 	slog.Info("Pre-flight validation successful for all patches", "ns", pod.Namespace, "pod", pod.Name)
-	c.history.UpdatePatch(ctx, pod.Namespace, pod.Name, "Multi-resource patch generated")
+	c.history.UpdatePatch(ctx, pod.Namespace, pod.Name, fmt.Sprintf("Targeted %s patch generated", diagnosis.PatchStrategy))
 
 	effectiveMode := c.config.Mode
 	if aiResp.Confidence < 85 && effectiveMode == config.AutoFix {
@@ -1283,10 +1354,10 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		effectiveMode = config.DryRun
 	}
 
-	branchName := fmt.Sprintf("fixora/patch-%s-%d", pod.Name, time.Now().Unix())
-
-	// Create PR options per repo
-	var prOptsList []vcs.PullRequestOptions
+	// Create small, targeted PR options. Each repo/file group gets its own
+	// branch so unrelated manifest changes do not land in one broad PR.
+	timestamp := time.Now().Unix()
+	var prPlans []remediationPROption
 	for patchedRepoKey, changes := range patchesByRepo {
 		parts := strings.Split(patchedRepoKey, "/")
 		if len(parts) != 2 {
@@ -1296,37 +1367,46 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 		// Find base branch for this repo
 		baseBranch := "main"
+		var source gitops.WorkloadSource
 		if rm, ok := repoMap[repoKey(repoOwner, repoName)]; ok {
 			baseBranch = rm.BaseBranch
+			source = rm.Source
 		}
 
-		prOptsList = append(prOptsList, vcs.PullRequestOptions{
-			Title:         fmt.Sprintf("Fixora: Automated Fix for %s/%s", pod.Namespace, pod.Name),
-			Body:          fmt.Sprintf("### Evidence Chain\n\n* **Root Cause:** %s\n* **Metric Proof:** %s\n* **AI Confidence:** %d%%\n\nGenerated by Fixora.", evidence.RootCause, evidence.MetricProof, aiResp.Confidence),
-			Head:          branchName,
-			Base:          baseBranch,
-			RepoOwner:     repoOwner,
-			RepoName:      repoName,
-			Files:         changes,
-			CommitMessage: "fix: automated multi-resource adjustment by Fixora",
-		})
+		for _, opts := range buildManifestAwarePROptions(pod, evidence, diagnosis, aiResp.Confidence, repoOwner, repoName, baseBranch, source, changes, timestamp) {
+			prPlans = append(prPlans, remediationPROption{Options: opts, Source: source})
+		}
+	}
+
+	if effectiveMode == config.AutoFix {
+		for _, plan := range prPlans {
+			risk := scorePRRisk(plan.Options, plan.Source, diagnosis, aiResp.Confidence)
+			if risk.RequiresApproval {
+				slog.Warn("High-risk remediation requires approval; downgrading auto-fix to click-to-fix", "ns", pod.Namespace, "pod", pod.Name, "repo", plan.Options.RepoName, "score", risk.Score, "reasons", strings.Join(risk.Reasons, "; "))
+				notifications.SendNotification(c.config, fmt.Sprintf("⚠️ High-risk remediation for %s/%s requires approval (score %d): %s", pod.Namespace, pod.Name, risk.Score, strings.Join(risk.Reasons, "; ")))
+				effectiveMode = config.ClickToFix
+				break
+			}
+		}
 	}
 
 	switch effectiveMode {
 	case config.ClickToFix:
-		callbackID := fmt.Sprintf("fix-%d", time.Now().UnixNano())
-		// Save pending fix for the FIRST PR for now (UI limitation)
-		if len(prOptsList) > 0 {
+		for i, plan := range prPlans {
+			callbackID := fmt.Sprintf("fix-%d-%d", time.Now().UnixNano(), i)
+			remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationPendingApproval, "")
 			fix := PendingFix{
-				Options:      prOptsList[0],
-				VCSType:      vcsType,
-				PodNamespace: pod.Namespace,
-				PodName:      pod.Name,
-				CreatedAt:    time.Now(),
+				Options:       plan.Options,
+				VCSType:       vcsType,
+				PodNamespace:  pod.Namespace,
+				PodName:       pod.Name,
+				CreatedAt:     time.Now(),
+				RemediationID: remediationID,
 			}
 			if c.history != nil && c.history.HasDB() {
 				if err := c.history.SavePendingFix(ctx, callbackID, fix); err != nil {
 					slog.Error("Failed to persist pending fix", "ns", pod.Namespace, "pod", pod.Name, "callback_id", callbackID, "error", err)
+					c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", "failed to persist pending approval: "+err.Error())
 					return
 				}
 			} else {
@@ -1335,12 +1415,17 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				c.pendingMu.Unlock()
 			}
 			slog.Info("Remediation pending user approval", "ns", pod.Namespace, "pod", pod.Name, "callback_id", callbackID)
-			notifications.SendRemediationApproval(c.config, pod.Namespace, pod.Name, "Multi-resource patch (preview limited)", callbackID)
+			telemetry.IncRemediation(string(RemediationPendingApproval), string(diagnosis.PatchStrategy))
+			notifications.SendRemediationApproval(c.config, pod.Namespace, pod.Name, targetedPRPreview(plan.Options, diagnosis), callbackID)
 		}
 		return
 	case config.DryRun:
+		for _, plan := range prPlans {
+			c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "dry-run generated; no PR created")
+			telemetry.IncRemediation("dry-run", string(diagnosis.PatchStrategy))
+		}
 		slog.Info("Dry-run mode: remediation generated but no PR created", "ns", pod.Namespace, "pod", pod.Name)
-		msg := fmt.Sprintf("🧪 Dry-run: generated remediation for %s/%s (no PR created).", pod.Namespace, pod.Name)
+		msg := fmt.Sprintf("🧪 Dry-run: generated %d targeted remediation PR plan(s) for %s/%s (no PR created).", len(prPlans), pod.Namespace, pod.Name)
 		if aiResp.Confidence < 85 {
 			msg = fmt.Sprintf("⚠️ Low AI Confidence (%d%%): %s", aiResp.Confidence, msg)
 		}
@@ -1348,21 +1433,27 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
-	if !c.allowAutoFixPR() {
-		slog.Warn("Auto-fix PR rate limit reached, skipping PR creation", "ns", pod.Namespace, "pod", pod.Name)
-		notifications.SendNotification(c.config, fmt.Sprintf("⏳ Auto-fix rate limit reached; skipped PR creation for %s/%s.", pod.Namespace, pod.Name))
-		return
-	}
-
 	// Open multiple PRs
 	var createdUrls []string
-	for _, opts := range prOptsList {
+	for _, plan := range prPlans {
+		opts := plan.Options
+		remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "")
+		if !c.allowAutoFixPR() {
+			slog.Warn("Auto-fix PR rate limit reached, skipping targeted PR creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head)
+			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", "auto-fix PR rate limit reached")
+			notifications.SendNotification(c.config, fmt.Sprintf("⏳ Auto-fix rate limit reached; skipped targeted PR creation for %s/%s.", pod.Namespace, pod.Name))
+			break
+		}
 		slog.Info("Opening remediation Pull Request", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName)
 		prURL, err := provider.CreatePullRequest(ctx, opts)
 		if err != nil {
 			slog.Error("Failed to create remediation PR", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "error", err)
+			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", err.Error())
+			telemetry.IncRemediation(string(RemediationPRFailed), string(diagnosis.PatchStrategy))
 		} else if prURL != "" {
 			slog.Info("Successfully created remediation PR", "ns", pod.Namespace, "pod", pod.Name, "url", prURL)
+			c.markRemediationStatus(ctx, remediationID, RemediationPROpened, prURL, "")
+			telemetry.IncRemediation(string(RemediationPROpened), string(diagnosis.PatchStrategy))
 			createdUrls = append(createdUrls, prURL)
 		}
 	}
@@ -1408,6 +1499,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 
 	if c.config.ModeApprovalTTL > 0 && time.Since(fix.CreatedAt) > c.config.ModeApprovalTTL {
 		slog.Warn("Pending fix approval expired", "ns", fix.PodNamespace, "pod", fix.PodName, "callback_id", callbackID)
+		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPRFailed, "", "pending approval expired")
 		notifications.SendNotification(c.config, fmt.Sprintf("⌛ Pending remediation approval expired for %s/%s.", fix.PodNamespace, fix.PodName))
 		return
 	}
@@ -1415,6 +1507,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	provider, _ := c.getVCSProvider(ctx, fix.PodNamespace, fix.VCSType)
 	if provider == nil {
 		slog.Error("No VCS provider configured to submit pending fix")
+		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPRFailed, "", "no VCS provider configured")
 		notifications.SendNotification(c.config, "❌ Remediation failed: No VCS provider configured.")
 		return
 	}
@@ -1422,9 +1515,11 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	prURL, err := provider.CreatePullRequest(ctx, fix.Options)
 	if err != nil {
 		slog.Error("Failed to create pending PR", "ns", fix.PodNamespace, "pod", fix.PodName, "error", err)
+		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPRFailed, "", err.Error())
 		notifications.SendNotification(c.config, fmt.Sprintf("❌ Remediation PR creation failed for %s/%s: %v", fix.PodNamespace, fix.PodName, err))
 	} else if prURL != "" {
 		slog.Info("Successfully created approved remediation PR", "ns", fix.PodNamespace, "pod", fix.PodName, "url", prURL)
+		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPROpened, prURL, "")
 		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", fix.PodNamespace, fix.PodName, prURL))
 	}
 }

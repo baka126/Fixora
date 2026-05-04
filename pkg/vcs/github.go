@@ -39,6 +39,13 @@ func (g *GitHubProvider) CreatePullRequest(ctx context.Context, opts PullRequest
 	// 2. Create a new Tree with all file changes
 	var entries []*github.TreeEntry
 	for _, file := range opts.Files {
+		if file.Delete {
+			entries = append(entries, &github.TreeEntry{
+				Path: github.String(file.FilePath),
+				SHA:  github.String(""),
+			})
+			continue
+		}
 		entries = append(entries, &github.TreeEntry{
 			Path:    github.String(file.FilePath),
 			Mode:    github.String("100644"),
@@ -151,4 +158,48 @@ func (g *GitHubProvider) PullRequestExists(ctx context.Context, repoOwner, repoN
 	}
 
 	return false, "", nil
+}
+
+func (g *GitHubProvider) GetPullRequestStatus(ctx context.Context, repoOwner, repoName, headBranch string) (PullRequestStatus, error) {
+	opts := &github.PullRequestListOptions{
+		State: "all",
+		Head:  fmt.Sprintf("%s:%s", repoOwner, headBranch),
+	}
+	prs, _, err := g.client.PullRequests.List(ctx, repoOwner, repoName, opts)
+	if err != nil {
+		return PullRequestStatus{}, err
+	}
+
+	for _, pr := range prs {
+		if !githubPRHeadMatches(pr, headBranch) {
+			continue
+		}
+		status := PullRequestStatus{
+			URL:   pr.GetHTMLURL(),
+			State: pr.GetState(),
+		}
+		if pr.GetState() == "closed" {
+			full, _, err := g.client.PullRequests.Get(ctx, repoOwner, repoName, pr.GetNumber())
+			if err != nil {
+				return status, err
+			}
+			status.URL = full.GetHTMLURL()
+			status.State = full.GetState()
+			status.Merged = full.GetMerged()
+			status.MergeCommitSHA = full.GetMergeCommitSHA()
+		}
+		return status, nil
+	}
+
+	return PullRequestStatus{State: "not_found"}, nil
+}
+
+func githubPRHeadMatches(pr *github.PullRequest, headBranch string) bool {
+	if pr == nil || pr.Head == nil {
+		return false
+	}
+	return pr.Head.GetLabel() == headBranch ||
+		pr.Head.GetRef() == headBranch ||
+		strings.HasPrefix(pr.Head.GetLabel(), headBranch) ||
+		strings.HasPrefix(pr.Head.GetRef(), headBranch)
 }
