@@ -69,6 +69,7 @@ ai:
   provider: "gemini" # "gemini", "openai", "anthropic"
   model: ""
   apiKey: ""
+  baseUrl: "" # Custom Base URL for OpenAI-compatible APIs (e.g., self-hosted Ollama, vLLM)
 
 mode: "dry-run" # Options: "auto-fix" (auto-PR), "click-to-fix" (manual approval via Slack/Chat), "dry-run" (report only)
 modePolicy:
@@ -87,8 +88,28 @@ webhook:
   user: ""
   password: ""
 
+auditWebhook:
+  url: ""
+  token: ""
+
 rbac:
   allowDeploymentMutations: false
+
+# Privacy Config
+privacy:
+  sendGitToAI: true      # Set to false to prevent sending Git diffs to AI (disables remediation)
+  scrubGitContent: true   # Set to true to tokenize sensitive information in Git diffs before sending to AI
+  customLogScrubbingPatterns: [] # List of custom regex patterns to scrub from logs and events before sending to AI (e.g., `["(?i)ssn[:\s]+[0-9\-]+"]`)
+
+# Validation & Policy Guardrails
+validation:
+  sandboxEnabled: true    # Run patches through a local sandbox (helm template/kustomize build)
+  requireRender: false     # Fail remediation if render tool (helm/kustomize) is missing in sandbox
+  toolTimeout: 15s        # Max time for sandbox validation commands
+
+policyGuardrails:
+  enabled: true           # Enable hard policy checks (RBAC protection, registry allowlisting)
+  allowedImageRegistries: [] # List of trusted registries (e.g., ["ghcr.io", "docker.io"]). Empty means all are allowed.
 
 # FinOps Config
 finops:

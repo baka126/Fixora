@@ -23,7 +23,8 @@ var (
 )
 
 // ScrubPII removes sensitive information from logs before sending them to external APIs.
-func ScrubPII(input string) string {
+// It applies a series of standard regex replacements, followed by any custom patterns provided.
+func ScrubPII(input string, customPatterns ...*regexp.Regexp) string {
 	scrubbed := input
 	scrubbed = emailRegex.ReplaceAllString(scrubbed, "[EMAIL]")
 	scrubbed = ipv4Regex.ReplaceAllString(scrubbed, "[IP]")
@@ -39,6 +40,13 @@ func ScrubPII(input string) string {
 	
 	// Redact the value part of the token match, ensuring a space before [REDACTED] to match test expectations
 	scrubbed = tokenRegex.ReplaceAllString(scrubbed, "$1 [REDACTED]")
+	
+	// Apply custom enterprise scrubbing patterns
+	for _, pattern := range customPatterns {
+		if pattern != nil {
+			scrubbed = pattern.ReplaceAllString(scrubbed, "[CUSTOM_REDACTED]")
+		}
+	}
 	
 	return scrubbed
 }

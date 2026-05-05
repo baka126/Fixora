@@ -44,14 +44,53 @@ Fixora requires permissions to watch the K8s Event stream and inspect resources.
 | Helm Value | Environment Variable | Type | Description |
 | :--- | :--- | :--- | :--- |
 | `mode` | `FIXORA_MODE` | `string` | `auto-fix`, `click-to-fix`, or `dry-run`. |
-| `ai.confidenceThreshold`| `AI_CONFIDENCE_THRESHOLD` | `float` | Confidence score required for Auto-PR (Default: `0.85`). |
+| `ai.baseUrl`| `AI_BASE_URL` | `string` | (Optional) Custom Base URL for self-hosted AI models (e.g., Ollama). |
+| `privacy.customLogScrubbingPatterns`| `CUSTOM_LOG_SCRUBBING_PATTERNS` | `list` | Custom regex patterns to scrub from logs before AI transmission. |
 | `features.database.host`| `DB_HOST` | `string` | Postgres Database Host (Mandatory for stateful analysis). |
-| `finops.costOfDowntimePerHour`| `FINOPS_COD_PER_HOUR` | `float` | Estimated revenue loss per hour of application downtime. |
 | `finops.infracostAPIKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
 
 ---
 
-## 4. Installation via Helm
+## 4. Enterprise Security Configuration
+
+For enterprise environments, Fixora offers robust data privacy and isolation controls natively within the Helm chart:
+
+### A. Multi-Pass Log Scrubbing (PII Protection)
+Fixora automatically scrubs common PII (Emails, IP addresses, JWTs, Cloud Keys). You can configure additional, custom regex patterns to sanitize proprietary identifiers from your application logs before they are transmitted to an AI provider:
+
+```yaml
+privacy:
+  customLogScrubbingPatterns:
+    # Example: Scrub custom employee IDs (e.g., EMP-1234-AB)
+    - "EMP-[0-9]{4}-[A-Z]{2}"
+    # Example: Scrub Social Security Numbers
+    - "(?i)SSN[:\s]+[0-9\-]+"
+```
+
+### B. Universal AI Adapter (Self-Hosted Models)
+If your organization mandates that no data can leave the VPC, you can point Fixora to an internal, self-hosted LLM (like Llama-3 or Mistral running on **Ollama** or **vLLM**) that uses the OpenAI-compatible API format:
+
+```yaml
+ai:
+  provider: "openai"
+  model: "llama3"
+  apiKey: "dummy-key" # Not verified by local instances, but required by the library
+  baseUrl: "http://ollama.monitoring.svc.cluster.local:11434/v1"
+```
+
+### C. Structured Audit Webhooks (SIEM Integration)
+To maintain a strict, centralized audit trail of all AI decisions, Fixora can push a structured JSON payload to your SIEM (Datadog, Splunk, Elastic) every time an investigation completes or a remediation is attempted. This payload contains the full, scrubbed Evidence Chain.
+
+```yaml
+auditWebhook:
+  url: "https://http-intake.logs.datadoghq.com/api/v2/logs"
+  # Optional: For systems requiring a Bearer token
+  token: "your-datadog-api-key"
+```
+
+---
+
+## 5. Installation via Helm
 
 Deploying via the official Helm chart is the recommended standard for production environments.
 

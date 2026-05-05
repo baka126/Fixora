@@ -16,7 +16,7 @@ kind: ClusterRole
 metadata:
   name: broad
 `),
-	}}, nil)
+	}}, nil, nil)
 	if err == nil {
 		t.Fatal("expected RBAC manifest to be rejected")
 	}
@@ -31,7 +31,7 @@ kind: Secret
 metadata:
   name: app-secret
 `),
-	}}, nil)
+	}}, nil, nil)
 	if err == nil {
 		t.Fatal("expected Secret manifest to be rejected")
 	}
@@ -50,7 +50,7 @@ spec:
       - name: app
         image: untrusted.example.com/app:1
 `),
-	}}, []string{"ghcr.io"})
+	}}, []string{"ghcr.io"}, nil)
 	if err == nil {
 		t.Fatal("expected unapproved image registry to be rejected")
 	}
@@ -69,8 +69,24 @@ spec:
       - name: app
         image: ghcr.io/acme/app:1
 `),
-	}}, []string{"ghcr.io"})
+	}}, []string{"ghcr.io"}, nil)
 	if err != nil {
 		t.Fatalf("expected approved image registry to pass, got %v", err)
+	}
+}
+
+func TestEnforcePatchGuardrailsRejectsCrossNamespace(t *testing.T) {
+	err := enforcePatchGuardrails(gitops.WorkloadSource{}, []vcs.FileChange{{
+		FilePath: "deploy/app.yaml",
+		NewContent: []byte(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: kube-system
+`),
+	}}, nil, []string{"kube-system"})
+	if err == nil {
+		t.Fatal("expected cross-namespace modification to be rejected")
 	}
 }
