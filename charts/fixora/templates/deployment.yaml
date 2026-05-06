@@ -37,11 +37,11 @@ spec:
           command: ["/app/fixora"]
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
           env:
             - name: SERVER_PORT
-              value: "8080"
+              value: {{ .Values.service.targetPort | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
             {{- if .Values.slack.token }}
@@ -206,7 +206,7 @@ spec:
               value: {{ .Values.features.leakScanner.enabled | quote }}
             - name: ALERTMANAGER_SCRAPER_ENABLED
               value: {{ .Values.features.alertmanagerScraper.enabled | quote }}
-            
+
             # Thresholds
             - name: PROMETHEUS_HIGH_ERROR_RATE_THRESHOLD
               value: {{ .Values.features.performanceScanner.thresholds.errorRate | quote }}

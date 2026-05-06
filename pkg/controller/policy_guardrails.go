@@ -19,7 +19,7 @@ var deniedRBACKinds = map[string]bool{
 	"ClusterRoleBinding": true,
 }
 
-func enforcePatchGuardrails(_ gitops.WorkloadSource, changes []vcs.FileChange, allowedImageRegistries []string, excludedNamespaces []string) error {
+func enforcePatchGuardrails(_ gitops.WorkloadSource, changes []vcs.FileChange, allowedImageRegistries []string, incidentNamespace string, excludedNamespaces []string) error {
 	for _, change := range changes {
 		lowerPath := strings.ToLower(change.FilePath)
 		base := path.Base(lowerPath)
@@ -35,14 +35,14 @@ func enforcePatchGuardrails(_ gitops.WorkloadSource, changes []vcs.FileChange, a
 		if change.Delete {
 			continue
 		}
-		if err := enforceManifestGuardrails(change.FilePath, change.NewContent, allowedImageRegistries, excludedNamespaces); err != nil {
+		if err := enforceManifestGuardrails(change.FilePath, change.NewContent, allowedImageRegistries, incidentNamespace, excludedNamespaces); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegistries []string, excludedNamespaces []string) error {
+func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegistries []string, incidentNamespace string, excludedNamespaces []string) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	for {
 		var doc map[string]interface{}
@@ -56,10 +56,13 @@ func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegi
 		if len(doc) == 0 {
 			continue
 		}
-		
+
 		// Cross-Namespace guardrail
 		if metadata, ok := doc["metadata"].(map[string]interface{}); ok {
 			if ns, ok := metadata["namespace"].(string); ok && ns != "" {
+				if incidentNamespace != "" && !strings.EqualFold(ns, strings.TrimSpace(incidentNamespace)) {
+					return fmt.Errorf("cross-namespace modification from %s to %s is not allowed in %s", incidentNamespace, ns, filePath)
+				}
 				for _, excluded := range excludedNamespaces {
 					if strings.EqualFold(ns, strings.TrimSpace(excluded)) {
 						return fmt.Errorf("modifying resources in protected namespace %s is not allowed in %s", ns, filePath)

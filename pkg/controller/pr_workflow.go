@@ -151,19 +151,19 @@ func targetedPRBody(evidence notifications.EvidenceChain, diagnosis Diagnosis, a
 <details>
 <summary>Click to view the mathematical and diagnostic evidence used to generate this fix</summary>
 
-**Root Cause:** 
+**Root Cause:**
 %s
 
-**Metric Proof:** 
+**Metric Proof:**
 %s
 
-**Event Timeline:** 
+**Event Timeline:**
 %s
 
-**Historical Pattern:** 
+**Historical Pattern:**
 %s
 
-**Cluster Context:** 
+**Cluster Context:**
 %s
 </details>
 
