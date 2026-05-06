@@ -40,12 +40,15 @@ type Config struct {
 	AIProvider              string // "gemini", "openai", "anthropic"
 	AIModel                 string
 	AIAPIKey                string
+	AIBaseURL               string
 	GitHubToken             string
 	GitLabToken             string
 	GitLabBaseURL           string
 	WebhookToken            string
 	WebhookUser             string
 	WebhookPassword         string
+	AuditWebhookURL         string
+	AuditWebhookToken       string
 
 	// ArgoCD Config
 	ArgoCDEnabled   bool
@@ -89,8 +92,9 @@ type Config struct {
 	TrustedVCSDomains []string
 
 	// Privacy
-	PrivacySendGitToAI     bool
-	PrivacyScrubGitContent bool
+	PrivacySendGitToAI         bool
+	PrivacyScrubGitContent     bool
+	CustomLogScrubbingPatterns []string
 
 	// Validation and Policy Guardrails
 	ValidationSandboxEnabled bool
@@ -132,12 +136,15 @@ func Load() *Config {
 		AIProvider:              os.Getenv("AI_PROVIDER"),
 		AIModel:                 os.Getenv("AI_MODEL"),
 		AIAPIKey:                os.Getenv("AI_API_KEY"),
+		AIBaseURL:               os.Getenv("AI_BASE_URL"),
 		GitHubToken:             os.Getenv("GITHUB_TOKEN"),
 		GitLabToken:             os.Getenv("GITLAB_TOKEN"),
 		GitLabBaseURL:           os.Getenv("GITLAB_BASE_URL"),
 		WebhookToken:            os.Getenv("WEBHOOK_TOKEN"),
 		WebhookUser:             os.Getenv("WEBHOOK_USER"),
 		WebhookPassword:         os.Getenv("WEBHOOK_PASSWORD"),
+		AuditWebhookURL:         os.Getenv("AUDIT_WEBHOOK_URL"),
+		AuditWebhookToken:       os.Getenv("AUDIT_WEBHOOK_TOKEN"),
 
 		ArgoCDEnabled:   getEnvBool("ARGOCD_ENABLED", false),
 		ArgoCDNamespace: getEnv("ARGOCD_NAMESPACE", "argocd"),
@@ -177,8 +184,9 @@ func Load() *Config {
 		InfracostAPIKey:   os.Getenv("INFRACOST_API_KEY"),
 		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),
 
-		PrivacySendGitToAI:     getEnvBool("PRIVACY_SEND_GIT_TO_AI", true),
-		PrivacyScrubGitContent: getEnvBool("PRIVACY_SCRUB_GIT_CONTENT", true),
+		PrivacySendGitToAI:         getEnvBool("PRIVACY_SEND_GIT_TO_AI", true),
+		PrivacyScrubGitContent:     getEnvBool("PRIVACY_SCRUB_GIT_CONTENT", true),
+		CustomLogScrubbingPatterns: getEnvSlice("CUSTOM_LOG_SCRUBBING_PATTERNS", []string{}),
 
 		ValidationSandboxEnabled: getEnvBool("VALIDATION_SANDBOX_ENABLED", true),
 		ValidationRequireRender:  getEnvBool("VALIDATION_REQUIRE_RENDER", false),

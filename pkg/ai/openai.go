@@ -13,8 +13,16 @@ type OpenAIProvider struct {
 	model  string
 }
 
-func NewOpenAIProvider(apiKey, modelName string) (*OpenAIProvider, error) {
-	client := openai.NewClient(apiKey)
+func NewOpenAIProvider(apiKey, modelName, baseURL string) (*OpenAIProvider, error) {
+	var client *openai.Client
+	if baseURL != "" {
+		config := openai.DefaultConfig(apiKey)
+		config.BaseURL = baseURL
+		client = openai.NewClientWithConfig(config)
+	} else {
+		client = openai.NewClient(apiKey)
+	}
+
 	if modelName == "" {
 		modelName = openai.GPT4oMini
 	}

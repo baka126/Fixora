@@ -35,7 +35,13 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/fixora"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
           env:
+            - name: SERVER_PORT
+              value: {{ .Values.service.targetPort | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
             {{- if .Values.slack.token }}
@@ -70,6 +76,8 @@ spec:
               value: {{ .Values.ai.provider | quote }}
             - name: AI_MODEL
               value: {{ .Values.ai.model | quote }}
+            - name: AI_BASE_URL
+              value: {{ .Values.ai.baseUrl | quote }}
             {{- if .Values.ai.apiKey }}
             - name: AI_API_KEY
               valueFrom:
@@ -124,6 +132,15 @@ spec:
                   name: {{ include "fixora.fullname" . }}
                   key: webhook-password
             {{- end }}
+            - name: AUDIT_WEBHOOK_URL
+              value: {{ .Values.auditWebhook.url | quote }}
+            {{- if .Values.auditWebhook.token }}
+            - name: AUDIT_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: audit-webhook-token
+            {{- end }}
             - name: FIXORA_MODE
               value: {{ .Values.mode | quote }}
             - name: POD_NAMESPACE
@@ -160,6 +177,26 @@ spec:
                   key: argocd-token
             {{- end }}
 
+            # Privacy
+            - name: PRIVACY_SEND_GIT_TO_AI
+              value: {{ .Values.privacy.sendGitToAI | quote }}
+            - name: PRIVACY_SCRUB_GIT_CONTENT
+              value: {{ .Values.privacy.scrubGitContent | quote }}
+            - name: CUSTOM_LOG_SCRUBBING_PATTERNS
+              value: {{ join "," .Values.privacy.customLogScrubbingPatterns | quote }}
+
+            # Validation & Policy Guardrails
+            - name: VALIDATION_SANDBOX_ENABLED
+              value: {{ .Values.validation.sandboxEnabled | quote }}
+            - name: VALIDATION_REQUIRE_RENDER
+              value: {{ .Values.validation.requireRender | quote }}
+            - name: VALIDATION_TOOL_TIMEOUT
+              value: {{ .Values.validation.toolTimeout | quote }}
+            - name: POLICY_GUARDRAILS_ENABLED
+              value: {{ .Values.policyGuardrails.enabled | quote }}
+            - name: ALLOWED_IMAGE_REGISTRIES
+              value: {{ join "," .Values.policyGuardrails.allowedImageRegistries | quote }}
+
             # Modular Feature Toggles
             - name: K8S_WATCHER_ENABLED
               value: {{ .Values.features.k8sWatcher.enabled | quote }}
@@ -169,7 +206,7 @@ spec:
               value: {{ .Values.features.leakScanner.enabled | quote }}
             - name: ALERTMANAGER_SCRAPER_ENABLED
               value: {{ .Values.features.alertmanagerScraper.enabled | quote }}
-            
+
             # Thresholds
             - name: PROMETHEUS_HIGH_ERROR_RATE_THRESHOLD
               value: {{ .Values.features.performanceScanner.thresholds.errorRate | quote }}

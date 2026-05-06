@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -109,6 +110,7 @@ type Controller struct {
 	autoFixMu       sync.Mutex
 	isLeader        atomic.Bool
 	leaderIdentity  string
+	customScrubbers []*regexp.Regexp
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
@@ -162,7 +164,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	var aiProvider ai.Provider
 	if cfg.AIProvider != "" && cfg.AIAPIKey != "" {
 		var err error
-		aiProvider, err = ai.NewProvider(cfg.AIProvider, cfg.AIAPIKey, cfg.AIModel)
+		aiProvider, err = ai.NewProvider(cfg.AIProvider, cfg.AIAPIKey, cfg.AIModel, cfg.AIBaseURL)
 		if err != nil {
 			slog.Error("Failed to create AI provider", "provider", cfg.AIProvider, "error", err)
 		}
@@ -188,6 +190,16 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		evtStreamer = events.NewEventStreamer(clientset, history.DB())
 	}
 
+	var customScrubbers []*regexp.Regexp
+	for _, pattern := range cfg.CustomLogScrubbingPatterns {
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			slog.Warn("Failed to compile custom log scrubbing pattern, skipping", "pattern", pattern, "error", err)
+			continue
+		}
+		customScrubbers = append(customScrubbers, compiled)
+	}
+
 	return &Controller{
 		clientset:       clientset,
 		dynamicClient:   dynamicClient,
@@ -205,6 +217,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		eventStreamer:   evtStreamer,
 		pendingFixes:    make(map[string]PendingFix),
 		leaderIdentity:  fmt.Sprintf("%s-%d", getHostname(), time.Now().UnixNano()),
+		customScrubbers: customScrubbers,
 	}
 }
 
@@ -503,6 +516,7 @@ func (c *Controller) scanForLeaks() {
 
 			slog.Info("Sending evidence chain to notification channels", "ns", pod.Namespace, "pod", pod.Name)
 			notifications.SendEvidenceChain(c.config, evidence)
+			notifications.SendAuditLog(c.config, evidence, "Diagnostic", "Completed", "Predictive Leak Analysis")
 
 			// Update prediction state to handle cooldowns
 			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate)
@@ -1017,6 +1031,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	slog.Info("Dispatching diagnostic report to notifications", "ns", pod.Namespace, "pod", pod.Name)
 	notifications.SendEvidenceChain(c.config, evidence)
+	notifications.SendAuditLog(c.config, evidence, "Diagnostic", "Completed", "Root Cause Analysis")
 
 	// Attempts automated remediation
 	c.handleRemediation(ctx, pod, evidence, diagnosis, invID)
@@ -1302,7 +1317,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 			telemetry.IncValidation("manifest-aware", "passed")
 			if c.config.PolicyGuardrailsEnabled {
-				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries); err != nil {
+				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, pod.Namespace, c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, fmt.Sprintf("❌ Policy guardrail rejected remediation for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
@@ -1562,7 +1577,7 @@ func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) 
 
 		if isRelevant {
 			// Scrub PII before adding to relevant set
-			relevantLines = append(relevantLines, security.ScrubPII(line))
+			relevantLines = append(relevantLines, security.ScrubPII(line, c.customScrubbers...))
 		}
 	}
 
@@ -1574,7 +1589,7 @@ func (c *Controller) getPodLogs(ctx context.Context, namespace, podName string) 
 		}
 		for i := start; i < len(lines); i++ {
 			if strings.TrimSpace(lines[i]) != "" {
-				relevantLines = append(relevantLines, security.ScrubPII(lines[i]))
+				relevantLines = append(relevantLines, security.ScrubPII(lines[i], c.customScrubbers...))
 			}
 		}
 	}
@@ -1605,7 +1620,7 @@ func (c *Controller) getPodEvents(ctx context.Context, pod *v1.Pod) (string, err
 		start = len(eventsTimeline) - limit
 	}
 	for _, event := range eventsTimeline[start:] {
-		scrubbedMessage := security.ScrubPII(event.Message)
+		scrubbedMessage := security.ScrubPII(event.Message, c.customScrubbers...)
 		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", event.LastTimestamp.Format(time.RFC3339), event.Reason, scrubbedMessage))
 	}
 	return sb.String(), nil

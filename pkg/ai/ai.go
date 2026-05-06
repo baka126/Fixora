@@ -48,12 +48,16 @@ type Provider interface {
 	GeneratePatch(ctx context.Context, currentContent string, evidence string) (AIResponse, error)
 }
 
-func NewProvider(providerName, apiKey, modelName string) (Provider, error) {
+func NewProvider(providerName, apiKey, modelName string, baseURLs ...string) (Provider, error) {
+	baseURL := ""
+	if len(baseURLs) > 0 {
+		baseURL = baseURLs[0]
+	}
 	switch providerName {
 	case "gemini":
 		return NewGeminiProvider(apiKey, modelName)
 	case "openai":
-		return NewOpenAIProvider(apiKey, modelName)
+		return NewOpenAIProvider(apiKey, modelName, baseURL)
 	case "anthropic":
 		return NewAnthropicProvider(apiKey, modelName)
 	default:
