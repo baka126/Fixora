@@ -1115,6 +1115,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		slog.Info("Skipping GitOps remediation: privacy settings prohibit sending Git context to AI", "ns", pod.Namespace, "pod", pod.Name)
 		return
 	}
+	diagnosis = refineDiagnosisFromEvidence(diagnosis, evidence)
 
 	vcsType := pod.Annotations["fixora.io/vcs-type"]
 	if vcsType == "" {
@@ -1284,8 +1285,17 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				return
 			}
 			previousContent = append([]byte(nil), origBytes...)
+			normalized, changed, err := normalizeRawPodPatchIdentity(pod, repoInfo.Source, content)
+			if err != nil {
+				slog.Error("Failed to normalize raw pod patch identity; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
+				return
+			}
+			if changed {
+				slog.Info("Normalized raw pod patch identity to incident pod", "file", filePath, "pod", pod.Name)
+				content = normalized
+			}
 			// Check if this looks like a resources snippet
-			if strings.Contains(content, "limits:") || strings.Contains(content, "requests:") {
+			if isSurgicalContainerSnippet(content) {
 				containerName := pod.Name
 				if len(pod.Spec.Containers) > 0 {
 					containerName = pod.Spec.Containers[0].Name
@@ -1320,7 +1330,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
-					notifications.SendNotification(c.config, fmt.Sprintf("❌ Policy guardrail rejected remediation for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
+					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
 					return
 				}
 			}

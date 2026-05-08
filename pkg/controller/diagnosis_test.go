@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"fixora/pkg/notifications"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -37,6 +38,26 @@ func TestClassifyPodIssueImagePull(t *testing.T) {
 	}
 	if got.Confidence < 80 {
 		t.Fatalf("confidence too low: %d", got.Confidence)
+	}
+}
+
+func TestRefineDiagnosisFromEvidenceDetectsExecFormatImageFix(t *testing.T) {
+	diagnosis := Diagnosis{
+		Symptom:       "Container is repeatedly crashing",
+		Category:      CategoryRuntime,
+		LikelyCause:   "process exits unsuccessfully",
+		Confidence:    70,
+		PatchStrategy: PatchNone,
+	}
+	refined := refineDiagnosisFromEvidence(diagnosis, notifications.EvidenceChain{
+		RootCause: "The container fails with exec format error due to CPU architecture mismatch.",
+	})
+
+	if refined.PatchStrategy != PatchImage {
+		t.Fatalf("got strategy=%s, want %s", refined.PatchStrategy, PatchImage)
+	}
+	if refined.Confidence < 85 {
+		t.Fatalf("expected confidence to be raised, got %d", refined.Confidence)
 	}
 }
 

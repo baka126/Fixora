@@ -27,45 +27,36 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 }
 
 func buildSlackEvidenceBlocks(cfg *config.Config, evidence EvidenceChain) []slack.Block {
-	headerTitle := "*Fixora: Forensic Diagnostic Report*"
-
-	if evidence.PredictiveWarning {
-		headerTitle = "*Fixora: Predictive Leak Warning*"
+	view := buildEvidenceMessageView(evidence)
+	headerTitle := fmt.Sprintf("*%s*", view.Title)
+	if view.Subtitle != "" {
+		headerTitle += "\n" + view.Subtitle
 	}
 
 	headerText := slack.NewTextBlockObject("mrkdwn", headerTitle, false, false)
 	headerSection := slack.NewSectionBlock(headerText, nil, nil)
 
-	metricSection := createSlackSection("📊 *Metric Proof*", evidence.MetricProof)
-	contextSection := createSlackSection("🔍 *Cluster Context*", evidence.ClusterContext)
-	patternSection := createSlackSection("📈 *Historical Pattern*", evidence.HistoricalPattern)
-	rootCauseSection := createSlackSection("🧠 *Root Cause*", evidence.RootCause)
-	finOpsSection := createSlackSection("💰 *FinOps Impact*", evidence.FinOpsImpact)
+	summarySection := createSlackSection("*Summary*", view.Summary)
+	rootCauseSection := createSlackSection("*Root Cause*", view.RootCause)
+	remediationSection := createSlackSection("*Remediation*", view.Remediation)
+	signalsSection := createSlackSection("*Signals*", "```\n"+view.Signals+"\n```")
+	historySection := createSlackSection("*History*", view.History)
+	finOpsSection := createSlackSection("*Cost Impact*", view.FinOps)
 
 	divider := slack.NewDividerBlock()
 
 	blocks := []slack.Block{
 		headerSection,
 		divider,
-		metricSection,
-	}
-
-	if evidence.PredictiveWarning && evidence.EstimatedHoursToOOM > 0 {
-		oomText := fmt.Sprintf("⏳ *Estimated Hours until OOM:* %.1f hours", evidence.EstimatedHoursToOOM)
-		oomSection := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", oomText, false, false), nil, nil)
-		blocks = append(blocks, oomSection)
-	}
-
-	blocks = append(blocks,
-		contextSection,
-		patternSection,
-	)
-
-	blocks = append(blocks,
-		divider,
+		summarySection,
 		rootCauseSection,
-		finOpsSection,
-	)
+		remediationSection,
+	}
+
+	if view.Signals != "" {
+		blocks = append(blocks, signalsSection)
+	}
+	blocks = append(blocks, historySection, finOpsSection)
 
 	// Interactive Buttons (Only if App Mode is enabled)
 	var actionElements []slack.BlockElement
@@ -73,30 +64,30 @@ func buildSlackEvidenceBlocks(cfg *config.Config, evidence EvidenceChain) []slac
 	if cfg.SlackAppMode {
 		if evidence.Namespace != "" && evidence.PodName != "" {
 			logActionID := fmt.Sprintf("view-logs-%s-%s", evidence.Namespace, evidence.PodName)
-			logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "🔍 View Logs", false, false))
+			logBtn := slack.NewButtonBlockElement("view_logs", logActionID, slack.NewTextBlockObject("plain_text", "View logs", false, false))
 			actionElements = append(actionElements, logBtn)
 
 			if evidence.ShowEventButton {
 				eventActionID := fmt.Sprintf("view-events-%s-%s", evidence.Namespace, evidence.PodName)
-				eventBtn := slack.NewButtonBlockElement("view_events", eventActionID, slack.NewTextBlockObject("plain_text", "🕒 View Event Timeline", false, false))
+				eventBtn := slack.NewButtonBlockElement("view_events", eventActionID, slack.NewTextBlockObject("plain_text", "View events", false, false))
 				actionElements = append(actionElements, eventBtn)
 			}
 		}
 
 		if evidence.StackTrace != "" {
 			traceActionID := fmt.Sprintf("view-trace-%s-%s", evidence.Namespace, evidence.PodName)
-			traceBtn := slack.NewButtonBlockElement("view_trace", traceActionID, slack.NewTextBlockObject("plain_text", "📜 Show Stack Trace", false, false))
+			traceBtn := slack.NewButtonBlockElement("view_trace", traceActionID, slack.NewTextBlockObject("plain_text", "View stack trace", false, false))
 			actionElements = append(actionElements, traceBtn)
 		}
 
 		if evidence.FinOpsDetails != "" {
 			finOpsActionID := fmt.Sprintf("view-finops-%s-%s", evidence.Namespace, evidence.PodName)
-			finOpsBtn := slack.NewButtonBlockElement("view_finops", finOpsActionID, slack.NewTextBlockObject("plain_text", "💰 View FinOps Impact", false, false))
+			finOpsBtn := slack.NewButtonBlockElement("view_finops", finOpsActionID, slack.NewTextBlockObject("plain_text", "View cost impact", false, false))
 			actionElements = append(actionElements, finOpsBtn)
 		}
 
 		if evidence.ShowFixButton {
-			fixBtn := slack.NewButtonBlockElement("execute_fix", "execute_fix", slack.NewTextBlockObject("plain_text", "⚡ Execute Fix", false, false))
+			fixBtn := slack.NewButtonBlockElement("execute_fix", "execute_fix", slack.NewTextBlockObject("plain_text", "Execute fix", false, false))
 			fixBtn.Style = slack.StylePrimary
 			actionElements = append(actionElements, fixBtn)
 		}

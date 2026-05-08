@@ -33,7 +33,7 @@ func gitOpsPatchInstructions(source gitops.WorkloadSource, pod *v1.Pod, diagnosi
 	case gitops.ManifestFluxHelmRelease:
 		return fmt.Sprintf("%s. Flux HelmRelease detected: prefer HelmRelease values or referenced values files, not rendered workload YAML. Patch strategy: %s", source.Summary(), diagnosis.PatchStrategy)
 	default:
-		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for the affected workload. Patch strategy: %s", source.Summary(), diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for affected workload %s/%s. Return a valid full manifest with top-level apiVersion/kind/metadata/spec and update existing fields in place; do not nest a complete manifest under containers. Patch strategy: %s", source.Summary(), pod.Namespace, pod.Name, diagnosis.PatchStrategy)
 	}
 }
 

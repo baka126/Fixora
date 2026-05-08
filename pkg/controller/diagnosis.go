@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"fixora/pkg/notifications"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -63,6 +64,26 @@ func (d Diagnosis) Summary() string {
 		}
 	}
 	return sb.String()
+}
+
+func refineDiagnosisFromEvidence(d Diagnosis, evidence notifications.EvidenceChain) Diagnosis {
+	haystack := strings.ToLower(strings.Join([]string{
+		evidence.RootCause,
+		evidence.ClusterContext,
+		evidence.StackTrace,
+		strings.Join(d.Evidence, " "),
+		d.LikelyCause,
+	}, "\n"))
+	if containsAny(haystack, "exec format error", "architecture mismatch", "cpu architecture", "wrong architecture") {
+		d.Category = CategoryRuntime
+		d.PatchStrategy = PatchImage
+		d.Confidence = max(d.Confidence, 85)
+		d.LikelyCause = "The container image is incompatible with the node CPU architecture; use a multi-architecture image or rebuild the image for the target platform."
+		if d.Symptom == "" || d.Symptom == "Container is repeatedly crashing" {
+			d.Symptom = "Container image cannot run on the node architecture"
+		}
+	}
+	return d
 }
 
 func (c *Controller) classifyPodIssue(ctx context.Context, pod *v1.Pod, triggerReason string) Diagnosis {

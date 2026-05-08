@@ -14,6 +14,7 @@ func TestSlackEvidenceMessageOmitsInlineEventTimeline(t *testing.T) {
 
 	body := marshalForTest(t, blocks)
 	assertNoInlineTimeline(t, body)
+	assertProfessionalEvidenceMessage(t, body)
 }
 
 func TestSlackEvidenceMessageKeepsEventActionWithoutTimelineBody(t *testing.T) {
@@ -34,6 +35,7 @@ func TestGoogleChatEvidenceMessageOmitsInlineEventTimeline(t *testing.T) {
 
 	body := marshalForTest(t, payload)
 	assertNoInlineTimeline(t, body)
+	assertProfessionalEvidenceMessage(t, body)
 }
 
 func TestGoogleChatEvidenceMessageKeepsEventActionWithoutTimelineBody(t *testing.T) {
@@ -53,11 +55,31 @@ func noisyTimelineEvidence() EvidenceChain {
 		Namespace:         "default",
 		PodName:           "api",
 		MetricProof:       "memory usage is high",
-		ClusterContext:    "pod is restarting",
+		ClusterContext:    "Namespace: default, Pod: api, Reason: CrashLoopBackOff\nDiagnosis: pod is restarting\nCategory: runtime\nConfidence: 82%\nRecommended Patch Strategy: image\nEvidence:\n- noisy low-level diagnostic",
 		HistoricalPattern: "first occurrence",
 		EventTimeline:     "NOISY_EVENT_TIMELINE_BODY should stay out of channel alerts",
 		RootCause:         "container crashed",
 		FinOpsImpact:      "low",
+	}
+}
+
+func assertProfessionalEvidenceMessage(t *testing.T, body string) {
+	t.Helper()
+	for _, unwanted := range []string{
+		"Cluster Context",
+		"Metric Proof",
+		"Historical Pattern",
+		"FinOps Impact",
+		"noisy low-level diagnostic",
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("expected professional compact message to omit %q: %s", unwanted, body)
+		}
+	}
+	for _, wanted := range []string{"Fixora Incident Report", "Summary", "Root", "Remediation", "Signals"} {
+		if !strings.Contains(body, wanted) {
+			t.Fatalf("expected professional message to include %q: %s", wanted, body)
+		}
 	}
 }
 
