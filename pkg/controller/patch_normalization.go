@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 
 	"fixora/pkg/ai"
@@ -44,6 +46,9 @@ func applyRawManifestPatch(original, generated string, source gitops.WorkloadSou
 	if scalarValue(originalDoc, "kind") != "Pod" {
 		return generated, false, nil
 	}
+	if err := validateRawPodManifestIdentity(originalDoc, pod); err != nil {
+		return "", false, err
+	}
 
 	containerName := ""
 	if len(pod.Spec.Containers) > 0 {
@@ -55,9 +60,18 @@ func applyRawManifestPatch(original, generated string, source gitops.WorkloadSou
 		return generated, false, nil
 	}
 
+	originalImage := scalarValue(originalContainer, "image")
+	generatedImage := scalarValue(generatedContainer, "image")
 	changed := copyContainerPatchFields(originalContainer, generatedContainer, diagnosis.PatchStrategy)
 	if !changed {
 		return original, false, nil
+	}
+
+	if diagnosis.PatchStrategy == PatchImage {
+		patched, ok := patchYAMLScalar(original, originalImage, generatedImage)
+		if ok {
+			return patched, true, nil
+		}
 	}
 
 	bytes, err := yaml.Marshal(&originalRoot)
@@ -65,6 +79,19 @@ func applyRawManifestPatch(original, generated string, source gitops.WorkloadSou
 		return "", false, err
 	}
 	return string(bytes), true, nil
+}
+
+func validateRawPodManifestIdentity(doc *yaml.Node, pod *v1.Pod) error {
+	metadata := mappingValue(doc, "metadata")
+	manifestName := scalarValue(metadata, "name")
+	manifestNamespace := scalarValue(metadata, "namespace")
+	if pod.Name != "" && manifestName != "" && manifestName != pod.Name {
+		return fmt.Errorf("raw Pod manifest identity mismatch: source declares Pod/%s but incident is Pod/%s", manifestName, pod.Name)
+	}
+	if pod.Namespace != "" && manifestNamespace != "" && manifestNamespace != pod.Namespace {
+		return fmt.Errorf("raw Pod manifest namespace mismatch: source declares namespace %s but incident is namespace %s", manifestNamespace, pod.Namespace)
+	}
+	return nil
 }
 
 func copyContainerPatchFields(dest, src *yaml.Node, strategy PatchStrategy) bool {
@@ -97,6 +124,18 @@ func containerPatchFields(strategy PatchStrategy) []string {
 	default:
 		return []string{"image", "imagePullPolicy", "resources", "env", "envFrom", "volumeMounts", "command", "args", "livenessProbe", "readinessProbe", "startupProbe"}
 	}
+}
+
+func patchYAMLScalar(content, oldValue, newValue string) (string, bool) {
+	if strings.TrimSpace(oldValue) == "" || strings.TrimSpace(newValue) == "" || oldValue == newValue {
+		return content, false
+	}
+	pattern := regexp.MustCompile(`(?m)^(\s*image:\s*)(["']?)` + regexp.QuoteMeta(oldValue) + `(["']?)\s*$`)
+	matches := pattern.FindAllStringSubmatchIndex(content, -1)
+	if len(matches) != 1 {
+		return content, false
+	}
+	return pattern.ReplaceAllString(content, "${1}${2}"+newValue+"${3}"), true
 }
 
 func podContainerMapping(doc *yaml.Node, containerName string) *yaml.Node {

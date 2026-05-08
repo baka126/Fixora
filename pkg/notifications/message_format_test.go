@@ -83,3 +83,17 @@ func TestRemediationPROpenedMessageIsProfessional(t *testing.T) {
 		t.Fatalf("expected no emoji in professional message:\n%s", message)
 	}
 }
+
+func TestRemediationBlockedMessageExplainsIdentityMismatch(t *testing.T) {
+	message := RemediationBlockedMessage("baka126/fixora-demo", "raw Pod manifest identity mismatch: source declares Pod/oom-test-4 but incident is Pod/oom-test-5")
+
+	for _, want := range []string{
+		"Remediation paused for baka126/fixora-demo",
+		"raw Pod manifest identity mismatch",
+		"Verify the repo-path annotation",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected %q in message:\n%s", want, message)
+		}
+	}
+}

@@ -28,7 +28,7 @@ spec:
 }
 
 func TestApplyRawManifestPatchPreservesMetadataAndOrder(t *testing.T) {
-	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "oom-test-2", Namespace: "default"}}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "oom-test", Namespace: "default"}}
 	pod.Spec.Containers = []v1.Container{{Name: "stress"}}
 	original := `
 apiVersion: v1
@@ -73,6 +73,27 @@ spec:
 	if !changed {
 		t.Fatal("expected image patch to be applied")
 	}
+	want := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-test
+  annotations:
+    fixora.io/repo-url: "https://github.com/baka126/fixora-demo.git"
+    fixora.io/repo-path: "pod.yaml"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: stress
+    image: alexeiled/stress-ng
+    resources:
+      limits:
+        memory: "100Mi"
+    args: ["stress", "--vm", "1", "--vm-bytes", "500M", "--vm-hang", "1"]
+`
+	if got != want {
+		t.Fatalf("expected scalar-only image patch preserving formatting.\nwant:\n%s\ngot:\n%s", want, got)
+	}
 	if !strings.Contains(got, "name: oom-test\n") {
 		t.Fatalf("expected original pod name to be preserved, got:\n%s", got)
 	}
@@ -89,6 +110,39 @@ spec:
 	containersIndex := strings.Index(got, "containers:")
 	if restartPolicyIndex < 0 || containersIndex < 0 || restartPolicyIndex > containersIndex {
 		t.Fatalf("expected restartPolicy to remain before containers, got:\n%s", got)
+	}
+}
+
+func TestApplyRawManifestPatchRejectsIdentityMismatch(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "oom-test-5", Namespace: "default"}}
+	pod.Spec.Containers = []v1.Container{{Name: "stress"}}
+	original := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-test-4
+spec:
+  containers:
+  - name: stress
+    image: polinux/stress
+`
+	generated := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-test-4
+spec:
+  containers:
+  - name: stress
+    image: alexeiled/stress-ng
+`
+
+	_, _, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod)
+	if err == nil {
+		t.Fatal("expected raw Pod manifest identity mismatch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

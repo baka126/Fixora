@@ -25,7 +25,7 @@ type manifestIdentity struct {
 	Name      string
 }
 
-func enforcePatchGuardrails(source gitops.WorkloadSource, changes []vcs.FileChange, allowedImageRegistries []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
+func enforcePatchGuardrails(source gitops.WorkloadSource, changes []vcs.FileChange, allowedImageRegistries, allowedReplacementImages []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
 	for _, change := range changes {
 		lowerPath := strings.ToLower(change.FilePath)
 		base := path.Base(lowerPath)
@@ -41,15 +41,16 @@ func enforcePatchGuardrails(source gitops.WorkloadSource, changes []vcs.FileChan
 		if change.Delete {
 			continue
 		}
-		if err := enforceManifestGuardrails(source, change.FilePath, change.NewContent, allowedImageRegistries, incidentNamespace, expectedTargets, excludedNamespaces); err != nil {
+		if err := enforceManifestGuardrails(source, change.FilePath, change.NewContent, change.PreviousContent, allowedImageRegistries, allowedReplacementImages, incidentNamespace, expectedTargets, excludedNamespaces); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, content []byte, allowedImageRegistries []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
+func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, content, previousContent []byte, allowedImageRegistries, allowedReplacementImages []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	previousImages := manifestImageSet(previousContent)
 	matchedExpectedTarget := len(expectedTargets) == 0 || source.Controller == gitops.ControllerAnnotation || source.ManifestType == gitops.ManifestHelm || source.ManifestType == gitops.ManifestFluxHelmRelease
 	checkedWorkloadDoc := false
 	for {
@@ -105,6 +106,16 @@ func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, co
 				registry := imageRegistry(image)
 				if !registryAllowed(registry, allowedImageRegistries) {
 					return fmt.Errorf("image registry %s is not allowlisted for image %s in %s", registry, image, filePath)
+				}
+			}
+		}
+		if len(allowedReplacementImages) > 0 {
+			for _, image := range manifestImages(doc) {
+				if previousImages[image] {
+					continue
+				}
+				if !imageAllowed(image, allowedReplacementImages) {
+					return fmt.Errorf("replacement image %s is not allowlisted in %s", image, filePath)
 				}
 			}
 		}
@@ -215,6 +226,44 @@ func registryAllowed(registry string, allowed []string) bool {
 	return false
 }
 
+func imageAllowed(image string, allowed []string) bool {
+	image = strings.TrimSpace(image)
+	for _, item := range allowed {
+		item = strings.TrimSpace(item)
+		if item == "*" || item == image {
+			return true
+		}
+		if strings.HasSuffix(item, ":*") && strings.HasPrefix(image, strings.TrimSuffix(item, "*")) {
+			return true
+		}
+		if strings.HasSuffix(item, "/*") && strings.HasPrefix(image, strings.TrimSuffix(item, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
+func manifestImageSet(content []byte) map[string]bool {
+	images := map[string]bool{}
+	if len(content) == 0 {
+		return images
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	for {
+		var doc map[string]interface{}
+		err := decoder.Decode(&doc)
+		if err == io.EOF {
+			return images
+		}
+		if err != nil {
+			return images
+		}
+		for _, image := range manifestImages(doc) {
+			images[image] = true
+		}
+	}
+}
+
 func policyRejectionReason(err error) string {
 	if err == nil {
 		return "unknown"
@@ -229,6 +278,8 @@ func policyRejectionReason(err error) string {
 		return "secret"
 	case strings.Contains(msg, "image registry"):
 		return "image-registry"
+	case strings.Contains(msg, "replacement image"):
+		return "replacement-image"
 	default:
 		return "policy"
 	}

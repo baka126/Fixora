@@ -110,6 +110,12 @@ func professionalPolicyReason(reason string) string {
 		return "Generated manifest structure is invalid."
 	case strings.Contains(reason, "does not target the incident workload"):
 		return "Generated manifest does not target the workload that triggered the incident."
+	case strings.Contains(reason, "identity mismatch"):
+		return reason + ". Verify the repo-path annotation or point Fixora at the manifest for the workload that triggered the incident."
+	case strings.Contains(reason, "namespace mismatch"):
+		return reason + ". Verify the repo-path annotation or GitOps source mapping before retrying."
+	case strings.Contains(reason, "replacement image"):
+		return reason + ". Configure ALLOWED_REPLACEMENT_IMAGES with a pinned, verified image before retrying."
 	default:
 		return reason
 	}

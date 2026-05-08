@@ -1288,6 +1288,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			normalized, changed, err := applyRawManifestPatch(string(origBytes), content, repoInfo.Source, diagnosis, pod)
 			if err != nil {
 				slog.Error("Failed to normalize raw manifest patch; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
+				notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(key, err.Error()))
 				return
 			}
 			if changed {
@@ -1327,7 +1328,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 			telemetry.IncValidation("manifest-aware", "passed")
 			if c.config.PolicyGuardrailsEnabled {
-				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
+				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, c.config.AllowedReplacementImages, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
