@@ -19,7 +19,13 @@ var deniedRBACKinds = map[string]bool{
 	"ClusterRoleBinding": true,
 }
 
-func enforcePatchGuardrails(_ gitops.WorkloadSource, changes []vcs.FileChange, allowedImageRegistries []string, incidentNamespace string, excludedNamespaces []string) error {
+type manifestIdentity struct {
+	Namespace string
+	Kind      string
+	Name      string
+}
+
+func enforcePatchGuardrails(source gitops.WorkloadSource, changes []vcs.FileChange, allowedImageRegistries []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
 	for _, change := range changes {
 		lowerPath := strings.ToLower(change.FilePath)
 		base := path.Base(lowerPath)
@@ -35,19 +41,24 @@ func enforcePatchGuardrails(_ gitops.WorkloadSource, changes []vcs.FileChange, a
 		if change.Delete {
 			continue
 		}
-		if err := enforceManifestGuardrails(change.FilePath, change.NewContent, allowedImageRegistries, incidentNamespace, excludedNamespaces); err != nil {
+		if err := enforceManifestGuardrails(source, change.FilePath, change.NewContent, allowedImageRegistries, incidentNamespace, expectedTargets, excludedNamespaces); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegistries []string, incidentNamespace string, excludedNamespaces []string) error {
+func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, content []byte, allowedImageRegistries []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	matchedExpectedTarget := len(expectedTargets) == 0 || source.ManifestType == gitops.ManifestHelm || source.ManifestType == gitops.ManifestFluxHelmRelease
+	checkedWorkloadDoc := false
 	for {
 		var doc map[string]interface{}
 		err := decoder.Decode(&doc)
 		if err == io.EOF {
+			if checkedWorkloadDoc && !matchedExpectedTarget {
+				return fmt.Errorf("manifest %s does not target the incident workload", filePath)
+			}
 			return nil
 		}
 		if err != nil {
@@ -56,9 +67,14 @@ func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegi
 		if len(doc) == 0 {
 			continue
 		}
+		if nestedPath := nestedKubernetesObjectPath(doc); nestedPath != "" {
+			return fmt.Errorf("nested Kubernetes object is not allowed in %s at %s", filePath, nestedPath)
+		}
 
 		// Cross-Namespace guardrail
+		name := ""
 		if metadata, ok := doc["metadata"].(map[string]interface{}); ok {
+			name, _ = metadata["name"].(string)
 			if ns, ok := metadata["namespace"].(string); ok && ns != "" {
 				if incidentNamespace != "" && !strings.EqualFold(ns, strings.TrimSpace(incidentNamespace)) {
 					return fmt.Errorf("cross-namespace modification from %s to %s is not allowed in %s", incidentNamespace, ns, filePath)
@@ -78,6 +94,12 @@ func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegi
 		if kind == "Secret" {
 			return fmt.Errorf("Secret manifests are not allowed in %s", filePath)
 		}
+		if isWorkloadKind(kind) && source.ManifestType != gitops.ManifestHelm && source.ManifestType != gitops.ManifestFluxHelmRelease {
+			checkedWorkloadDoc = true
+			if manifestMatchesExpectedTarget(kind, name, incidentNamespace, expectedTargets) {
+				matchedExpectedTarget = true
+			}
+		}
 		if len(allowedImageRegistries) > 0 {
 			for _, image := range manifestImages(doc) {
 				registry := imageRegistry(image)
@@ -87,6 +109,60 @@ func enforceManifestGuardrails(filePath string, content []byte, allowedImageRegi
 			}
 		}
 	}
+}
+
+func nestedKubernetesObjectPath(root map[string]interface{}) string {
+	return nestedKubernetesObjectPathAt(root, "$", true)
+}
+
+func nestedKubernetesObjectPathAt(node interface{}, currentPath string, root bool) string {
+	switch typed := node.(type) {
+	case map[string]interface{}:
+		if !root {
+			_, hasAPIVersion := typed["apiVersion"]
+			_, hasKind := typed["kind"]
+			if hasAPIVersion && hasKind {
+				return currentPath
+			}
+		}
+		for key, value := range typed {
+			if path := nestedKubernetesObjectPathAt(value, currentPath+"."+key, false); path != "" {
+				return path
+			}
+		}
+	case []interface{}:
+		for i, item := range typed {
+			if path := nestedKubernetesObjectPathAt(item, fmt.Sprintf("%s[%d]", currentPath, i), false); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func isWorkloadKind(kind string) bool {
+	switch kind {
+	case "Pod", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob":
+		return true
+	default:
+		return false
+	}
+}
+
+func manifestMatchesExpectedTarget(kind, name, namespace string, expected []manifestIdentity) bool {
+	for _, target := range expected {
+		if target.Kind != "" && !strings.EqualFold(kind, strings.TrimSpace(target.Kind)) {
+			continue
+		}
+		if target.Name != "" && !strings.EqualFold(name, strings.TrimSpace(target.Name)) {
+			continue
+		}
+		if target.Namespace != "" && namespace != "" && !strings.EqualFold(namespace, strings.TrimSpace(target.Namespace)) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func manifestImages(doc map[string]interface{}) []string {

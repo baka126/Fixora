@@ -72,6 +72,10 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		return nil
 	}
 
+	return sendGoogleChat(cfg, buildGoogleChatEvidencePayload(cfg, evidence))
+}
+
+func buildGoogleChatEvidencePayload(cfg *config.Config, evidence EvidenceChain) GoogleChatPayload {
 	headerTitle := "Fixora: Forensic Diagnostic Report"
 	headerSubtitle := "Automated root cause analysis"
 
@@ -93,17 +97,6 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
 		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
 	)
-
-	// If not in App Mode, embed the timeline directly as buttons won't work in simple webhooks
-	if !cfg.GoogleChatAppMode && evidence.EventTimeline != "" {
-		timelineText := evidence.EventTimeline
-		if len(timelineText) > 1000 {
-			timelineText = "... [truncated] ...\n" + timelineText[len(timelineText)-1000:]
-		}
-		mainWidgets = append(mainWidgets, GoogleChatWidget{
-			TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br><pre>" + timelineText + "</pre>"},
-		})
-	}
 
 	// Interactive Buttons (Only if App Mode is enabled)
 	var buttons []GoogleChatButton
@@ -202,7 +195,7 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		},
 	}
 
-	return sendGoogleChat(cfg, payload)
+	return payload
 }
 
 func sendGoogleChatNotification(cfg *config.Config, message string) error {

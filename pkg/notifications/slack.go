@@ -12,11 +12,24 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		return nil
 	}
 
+	blocks := buildSlackEvidenceBlocks(cfg, evidence)
 	color := "#E01E5A" // Default Red-ish
+	if evidence.PredictiveWarning {
+		color = "#ECB22E" // Slack Orange
+	}
+
+	attachment := slack.Attachment{
+		Color:  color,
+		Blocks: slack.Blocks{BlockSet: blocks},
+	}
+
+	return sendSlack(cfg, slack.MsgOptionAttachments(attachment))
+}
+
+func buildSlackEvidenceBlocks(cfg *config.Config, evidence EvidenceChain) []slack.Block {
 	headerTitle := "*Fixora: Forensic Diagnostic Report*"
 
 	if evidence.PredictiveWarning {
-		color = "#ECB22E" // Slack Orange
 		headerTitle = "*Fixora: Predictive Leak Warning*"
 	}
 
@@ -47,16 +60,6 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		contextSection,
 		patternSection,
 	)
-
-	// If not in App Mode, embed the timeline directly as buttons won't work in simple webhooks
-	if !cfg.SlackAppMode && evidence.EventTimeline != "" {
-		timelineText := evidence.EventTimeline
-		if len(timelineText) > 2000 {
-			timelineText = "... [truncated] ...\n" + timelineText[len(timelineText)-2000:]
-		}
-		timelineSection := createSlackSection("🕒 *Event Timeline*", "```\n"+timelineText+"\n```")
-		blocks = append(blocks, timelineSection)
-	}
 
 	blocks = append(blocks,
 		divider,
@@ -104,12 +107,7 @@ func sendSlackEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		blocks = append(blocks, actionBlock)
 	}
 
-	attachment := slack.Attachment{
-		Color:  color,
-		Blocks: slack.Blocks{BlockSet: blocks},
-	}
-
-	return sendSlack(cfg, slack.MsgOptionAttachments(attachment))
+	return blocks
 }
 
 func createSlackSection(title, content string) *slack.SectionBlock {

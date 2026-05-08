@@ -7,7 +7,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "0.3.5"
+  tag: "0.3.6"
 
 logLevel: "INFO" # DEBUG, INFO, WARN, ERROR
 

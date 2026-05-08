@@ -1317,7 +1317,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 			telemetry.IncValidation("manifest-aware", "passed")
 			if c.config.PolicyGuardrailsEnabled {
-				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, pod.Namespace, c.config.ExcludedNamespaces); err != nil {
+				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, fmt.Sprintf("❌ Policy guardrail rejected remediation for %s. Fixora will not open PRs.\nError: %s", repoKey, err))

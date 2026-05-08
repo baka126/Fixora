@@ -70,6 +70,23 @@ func allowedNewPatchFiles(pod *v1.Pod, source gitops.WorkloadSource, diagnosis D
 	return []string{path.Join(source.Path, "fixora-patches", name)}
 }
 
+func (c *Controller) manifestGuardrailTargets(ctx context.Context, pod *v1.Pod) []manifestIdentity {
+	identity := c.workloadIdentityForPod(ctx, pod)
+	targets := []manifestIdentity{{
+		Namespace: pod.Namespace,
+		Kind:      identity.Kind,
+		Name:      identity.Name,
+	}}
+	if identity.Kind != "Pod" || identity.Name != pod.Name {
+		targets = append(targets, manifestIdentity{
+			Namespace: pod.Namespace,
+			Kind:      "Pod",
+			Name:      pod.Name,
+		})
+	}
+	return targets
+}
+
 func isKustomizeControlFile(filePath string) bool {
 	base := strings.ToLower(path.Base(filePath))
 	return base == "kustomization.yaml" || base == "kustomization.yml"
