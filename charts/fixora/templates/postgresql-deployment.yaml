@@ -39,6 +39,7 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+              subPath: data
           {{- end }}
           resources:
             {{- toYaml .Values.features.database.embedded.resources | nindent 12 }}

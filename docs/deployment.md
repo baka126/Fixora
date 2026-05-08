@@ -128,7 +128,7 @@ helm upgrade --install fixora ./charts/fixora \
 
 ---
 
-## 5. Next-Gen ChatOps Interactivity
+## 6. Next-Gen ChatOps Interactivity
 
 Fixora alerts now feature **Interactive Triage Trees**. In Slack or Google Chat, you will see dynamic buttons:
 
@@ -141,7 +141,7 @@ Fixora alerts now feature **Interactive Triage Trees**. In Slack or Google Chat,
 
 ---
 
-## 6. Omni-Aware Trigger Mechanisms
+## 7. Omni-Aware Trigger Mechanisms
 
 Fixora identifies failures across multiple domains:
 - **K8s Event Watcher**: Real-time detection of `SchedulingFailed`, `NodeNotReady`, or `ImagePullBackOff`.
@@ -150,7 +150,7 @@ Fixora identifies failures across multiple domains:
 
 ---
 
-## 7. FinOps & Cost of Downtime (CoD)
+## 8. FinOps & Cost of Downtime (CoD)
 
 Fixora helps align engineering with business value by calculating the **Cost of Downtime**. Configure this by setting `finops.costOfDowntimePerHour` in your `values.yaml`. 
 
@@ -158,7 +158,7 @@ Example: If your app generates $5,000/hour, Fixora will highlight the potential 
 
 ---
 
-## 8. Connecting Alertmanager
+## 9. Connecting Alertmanager
 
 Fixora acts as an Alertmanager **receiver**. You must configure your Alertmanager to send firing alerts to Fixora's `/alerts` endpoint.
 
@@ -186,7 +186,7 @@ route:
 
 ---
 
-## 9. Enabling GitOps Remediation
+## 10. Enabling GitOps Remediation
 
 Fixora can discover which Git repository manages a Pod in two ways:
 
@@ -207,7 +207,26 @@ metadata:
 
 ---
 
-## 10. Verification
+## 11. VCS Permissions & Authentication
+
+To enable automated remediation (PR/MR creation), Fixora requires specific permissions from your Version Control System.
+
+### A. GitHub Permissions
+If you are using a **GitHub App** (Recommended for fine-grained control):
+* **Repository Contents**: `Read & Write` (To read configuration files and commit fixes).
+* **Pull Requests**: `Read & Write` (To create and monitor remediation PRs).
+* **Metadata**: `Read-only` (Mandatory for all GitHub Apps).
+
+If you are using a **Personal Access Token (PAT)**:
+* **Scopes**: `repo` (Full control of private repositories).
+
+### B. GitLab Permissions
+If you are using a **Personal Access Token (PAT)**:
+* **Scopes**: `api`, `read_repository`, `write_repository`.
+
+---
+
+## 12. Verification
 
 Once deployed, you can verify Fixora is running by checking the logs:
 
@@ -229,7 +248,7 @@ Depending on your `mode`:
 
 ---
 
-## 11. Advanced Configuration
+## 13. Advanced Configuration
 
 ### A. Multi-Tenant VCS Support
 By default, Fixora uses the global `GITHUB_TOKEN` or `GITLAB_TOKEN`. For multi-tenant clusters, you can provide namespace-specific credentials by creating a Secret named `fixora-vcs` in the target namespace:
@@ -261,7 +280,7 @@ Fixora is designed with privacy in mind. Before sending any logs to AI providers
 
 ---
 
-## 12. Google Chat App Interactivity (Optional)
+## 14. Google Chat App Interactivity (Optional)
 
 To enable interactive features in Google Chat (like the **"Approve"** button or the **"View Logs"** explorer), you must configure Fixora as a **Google Chat App** instead of using a simple incoming webhook.
 
