@@ -25,6 +25,7 @@ func TestBuildEvidenceMessageViewCompactsClusterContext(t *testing.T) {
 		HistoricalPattern: "This is the first time we've diagnosed this pod.",
 		RootCause:         "The root cause is a binary architecture mismatch.",
 		FinOpsImpact:      "Medium AWS cost impact.",
+		AIConfidence:      85,
 	})
 
 	if view.Title != "Fixora Incident Report" {
@@ -36,8 +37,14 @@ func TestBuildEvidenceMessageViewCompactsClusterContext(t *testing.T) {
 	if strings.Contains(view.Summary, "Evidence:") || strings.Contains(view.Summary, "Owner chain") {
 		t.Fatalf("expected raw context dump to be omitted, got: %s", view.Summary)
 	}
-	if strings.Contains(view.Remediation, "Recommended patch strategy: none") {
-		t.Fatalf("expected PatchStrategy none to be translated, got: %s", view.Remediation)
+	if strings.Contains(view.Remediation, "No automated pull request was opened") {
+		t.Fatalf("expected initial report not to claim PR outcome, got: %s", view.Remediation)
+	}
+	if !strings.Contains(view.Remediation, "Evaluation in progress") {
+		t.Fatalf("expected initial report to describe remediation evaluation, got: %s", view.Remediation)
+	}
+	if !strings.Contains(view.Summary, "Confidence: 85%") {
+		t.Fatalf("expected AI confidence to be used in summary, got: %s", view.Summary)
 	}
 }
 
@@ -55,6 +62,24 @@ func TestRemediationBlockedMessageIsProfessional(t *testing.T) {
 		}
 	}
 	if strings.Contains(message, "❌") {
+		t.Fatalf("expected no emoji in professional message:\n%s", message)
+	}
+}
+
+func TestRemediationPROpenedMessageIsProfessional(t *testing.T) {
+	message := RemediationPROpenedMessage("default", "oom-test-4", []string{"https://github.com/baka126/fixora-demo/pull/7"})
+
+	for _, want := range []string{
+		"Remediation PR opened for default/oom-test-4",
+		"Fixora created a targeted GitOps pull request for review.",
+		"- https://github.com/baka126/fixora-demo/pull/7",
+		"Next step: review the proposed manifest change before merging.",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected %q in message:\n%s", want, message)
+		}
+	}
+	if strings.Contains(message, "🚀") {
 		t.Fatalf("expected no emoji in professional message:\n%s", message)
 	}
 }

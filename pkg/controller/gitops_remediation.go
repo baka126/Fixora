@@ -33,7 +33,7 @@ func gitOpsPatchInstructions(source gitops.WorkloadSource, pod *v1.Pod, diagnosi
 	case gitops.ManifestFluxHelmRelease:
 		return fmt.Sprintf("%s. Flux HelmRelease detected: prefer HelmRelease values or referenced values files, not rendered workload YAML. Patch strategy: %s", source.Summary(), diagnosis.PatchStrategy)
 	default:
-		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for affected workload %s/%s. Return a valid full manifest with top-level apiVersion/kind/metadata/spec and update existing fields in place; do not nest a complete manifest under containers. Patch strategy: %s", source.Summary(), pod.Namespace, pod.Name, diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for affected workload %s/%s. Return a valid full manifest with top-level apiVersion/kind/metadata/spec and update existing fields in place. Preserve metadata.name, annotations, namespace, restartPolicy placement, and unrelated field ordering unless directly required by the fix. If this is a Pod image fix, change only image or imagePullPolicy because live Pods reject args, command, resources, and most spec updates; do not nest a complete manifest under containers. Patch strategy: %s", source.Summary(), pod.Namespace, pod.Name, diagnosis.PatchStrategy)
 	}
 }
 

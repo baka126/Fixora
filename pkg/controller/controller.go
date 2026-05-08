@@ -1285,13 +1285,13 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				return
 			}
 			previousContent = append([]byte(nil), origBytes...)
-			normalized, changed, err := normalizeRawPodPatchIdentity(pod, repoInfo.Source, content)
+			normalized, changed, err := applyRawManifestPatch(string(origBytes), content, repoInfo.Source, diagnosis, pod)
 			if err != nil {
-				slog.Error("Failed to normalize raw pod patch identity; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
+				slog.Error("Failed to normalize raw manifest patch; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
 				return
 			}
 			if changed {
-				slog.Info("Normalized raw pod patch identity to incident pod", "file", filePath, "pod", pod.Name)
+				slog.Info("Applied raw manifest patch to original file structure", "file", filePath, "pod", pod.Name, "strategy", diagnosis.PatchStrategy)
 				content = normalized
 			}
 			// Check if this looks like a resources snippet
@@ -1484,11 +1484,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	if len(createdUrls) > 0 {
-		msg := fmt.Sprintf("🚀 Created remediation PRs for %s/%s:\n", pod.Namespace, pod.Name)
-		for _, u := range createdUrls {
-			msg += fmt.Sprintf("- %s\n", u)
-		}
-		notifications.SendNotification(c.config, msg)
+		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(pod.Namespace, pod.Name, createdUrls))
 	}
 }
 
@@ -1545,7 +1541,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	} else if prURL != "" {
 		slog.Info("Successfully created approved remediation PR", "ns", fix.PodNamespace, "pod", fix.PodName, "url", prURL)
 		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPROpened, prURL, "")
-		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", fix.PodNamespace, fix.PodName, prURL))
+		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(fix.PodNamespace, fix.PodName, []string{prURL}))
 	}
 }
 

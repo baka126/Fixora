@@ -27,6 +27,9 @@ func buildEvidenceMessageView(evidence EvidenceChain) evidenceMessageView {
 	reason := contextValue(evidence.ClusterContext, "Reason")
 	diagnosis := contextValue(evidence.ClusterContext, "Diagnosis")
 	confidence := contextValue(evidence.ClusterContext, "Confidence")
+	if evidence.AIConfidence > 0 {
+		confidence = fmt.Sprintf("%d%%", evidence.AIConfidence)
+	}
 	patchStrategy := contextValue(evidence.ClusterContext, "Recommended Patch Strategy")
 
 	title := "Fixora Incident Report"
@@ -70,6 +73,24 @@ func RemediationBlockedMessage(repoKey, reason string) string {
 	return fmt.Sprintf("Remediation paused for %s\nFixora blocked the generated patch during validation.\nReason: %s\nAction: No PR was opened. Fixora will retry after the patch generator produces a valid manifest.", repoKey, professionalPolicyReason(reason))
 }
 
+func RemediationPROpenedMessage(namespace, podName string, urls []string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Remediation PR opened for %s/%s\n", namespace, podName))
+	sb.WriteString("Fixora created a targeted GitOps pull request for review.\n")
+	sb.WriteString("Pull request")
+	if len(urls) != 1 {
+		sb.WriteString("s")
+	}
+	sb.WriteString(":\n")
+	for _, url := range urls {
+		sb.WriteString("- ")
+		sb.WriteString(strings.TrimSpace(url))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Next step: review the proposed manifest change before merging.")
+	return strings.TrimSpace(sb.String())
+}
+
 func professionalPolicyReason(reason string) string {
 	switch {
 	case strings.Contains(reason, "nested Kubernetes object"):
@@ -98,9 +119,9 @@ func remediationSummary(strategy string) string {
 	strategy = strings.TrimSpace(strings.ToLower(strategy))
 	switch strategy {
 	case "", "none":
-		return "No automated pull request was opened. Fixora did not identify a safe patch strategy for this incident."
+		return "Evaluation in progress. Fixora is checking whether a safe GitOps patch can be generated. A follow-up message will report whether a PR was opened, paused, or requires approval."
 	default:
-		return fmt.Sprintf("Recommended patch strategy: %s.", strategy)
+		return fmt.Sprintf("Evaluation in progress. Candidate patch strategy: %s. A follow-up message will report whether a PR was opened, paused, or requires approval.", strategy)
 	}
 }
 

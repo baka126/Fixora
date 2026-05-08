@@ -27,41 +27,78 @@ spec:
 	}
 }
 
-func TestNormalizeRawPodPatchIdentityRetargetsStandalonePod(t *testing.T) {
+func TestApplyRawManifestPatchPreservesMetadataAndOrder(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "oom-test-2", Namespace: "default"}}
-	content := `
+	pod.Spec.Containers = []v1.Container{{Name: "stress"}}
+	original := `
 apiVersion: v1
 kind: Pod
 metadata:
   name: oom-test
+  annotations:
+    fixora.io/repo-url: "https://github.com/baka126/fixora-demo.git"
+    fixora.io/repo-path: "pod.yaml"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: stress
+    image: polinux/stress
+    resources:
+      limits:
+        memory: "100Mi"
+    args: ["stress", "--vm", "1", "--vm-bytes", "500M", "--vm-hang", "1"]
+`
+	generated := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-test-2
 spec:
   containers:
   - name: stress
     image: alexeiled/stress-ng
+    args:
+    - --vm
+    - "1"
+    - --vm-bytes
+    - 500M
+    - --vm-hang
+    - "1"
 `
 
-	got, changed, err := normalizeRawPodPatchIdentity(pod, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, content)
+	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod)
 	if err != nil {
-		t.Fatalf("normalize raw pod patch: %v", err)
+		t.Fatalf("apply raw manifest patch: %v", err)
 	}
 	if !changed {
-		t.Fatal("expected pod identity to be normalized")
+		t.Fatal("expected image patch to be applied")
 	}
-	if !strings.Contains(got, "name: oom-test-2") {
-		t.Fatalf("expected normalized pod name, got:\n%s", got)
+	if !strings.Contains(got, "name: oom-test\n") {
+		t.Fatalf("expected original pod name to be preserved, got:\n%s", got)
 	}
 	if !strings.Contains(got, "image: alexeiled/stress-ng") {
 		t.Fatalf("expected image fix to remain, got:\n%s", got)
 	}
+	if !strings.Contains(got, `args: ["stress", "--vm", "1", "--vm-bytes", "500M", "--vm-hang", "1"]`) {
+		t.Fatalf("expected immutable pod args to be preserved for image patch, got:\n%s", got)
+	}
+	if !strings.Contains(got, "fixora.io/repo-url") {
+		t.Fatalf("expected annotations to be preserved, got:\n%s", got)
+	}
+	restartPolicyIndex := strings.Index(got, "restartPolicy: Never")
+	containersIndex := strings.Index(got, "containers:")
+	if restartPolicyIndex < 0 || containersIndex < 0 || restartPolicyIndex > containersIndex {
+		t.Fatalf("expected restartPolicy to remain before containers, got:\n%s", got)
+	}
 }
 
-func TestNormalizeRawPodPatchIdentitySkipsKustomize(t *testing.T) {
+func TestApplyRawManifestPatchSkipsKustomize(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "oom-test-2", Namespace: "default"}}
 	content := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: oom-test\n"
 
-	got, changed, err := normalizeRawPodPatchIdentity(pod, gitops.WorkloadSource{ManifestType: gitops.ManifestKustomize}, content)
+	got, changed, err := applyRawManifestPatch(content, content, gitops.WorkloadSource{ManifestType: gitops.ManifestKustomize}, Diagnosis{PatchStrategy: PatchImage}, pod)
 	if err != nil {
-		t.Fatalf("normalize kustomize patch: %v", err)
+		t.Fatalf("apply kustomize patch: %v", err)
 	}
 	if changed {
 		t.Fatalf("expected kustomize content not to be retargeted, got:\n%s", got)

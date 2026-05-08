@@ -50,7 +50,7 @@ func enforcePatchGuardrails(source gitops.WorkloadSource, changes []vcs.FileChan
 
 func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, content []byte, allowedImageRegistries []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
-	matchedExpectedTarget := len(expectedTargets) == 0 || source.ManifestType == gitops.ManifestHelm || source.ManifestType == gitops.ManifestFluxHelmRelease
+	matchedExpectedTarget := len(expectedTargets) == 0 || source.Controller == gitops.ControllerAnnotation || source.ManifestType == gitops.ManifestHelm || source.ManifestType == gitops.ManifestFluxHelmRelease
 	checkedWorkloadDoc := false
 	for {
 		var doc map[string]interface{}
