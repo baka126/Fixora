@@ -1115,6 +1115,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		slog.Info("Skipping GitOps remediation: privacy settings prohibit sending Git context to AI", "ns", pod.Namespace, "pod", pod.Name)
 		return
 	}
+	diagnosis = refineDiagnosisFromEvidence(diagnosis, evidence)
 
 	vcsType := pod.Annotations["fixora.io/vcs-type"]
 	if vcsType == "" {
@@ -1284,8 +1285,18 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				return
 			}
 			previousContent = append([]byte(nil), origBytes...)
+			normalized, changed, err := applyRawManifestPatch(string(origBytes), content, repoInfo.Source, diagnosis, pod)
+			if err != nil {
+				slog.Error("Failed to normalize raw manifest patch; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
+				notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(key, err.Error()))
+				return
+			}
+			if changed {
+				slog.Info("Applied raw manifest patch to original file structure", "file", filePath, "pod", pod.Name, "strategy", diagnosis.PatchStrategy)
+				content = normalized
+			}
 			// Check if this looks like a resources snippet
-			if strings.Contains(content, "limits:") || strings.Contains(content, "requests:") {
+			if isSurgicalContainerSnippet(content) {
 				containerName := pod.Name
 				if len(pod.Spec.Containers) > 0 {
 					containerName = pod.Spec.Containers[0].Name
@@ -1317,10 +1328,10 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 			telemetry.IncValidation("manifest-aware", "passed")
 			if c.config.PolicyGuardrailsEnabled {
-				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, pod.Namespace, c.config.ExcludedNamespaces); err != nil {
+				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, c.config.AllowedReplacementImages, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
-					notifications.SendNotification(c.config, fmt.Sprintf("❌ Policy guardrail rejected remediation for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
+					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
 					return
 				}
 			}
@@ -1474,11 +1485,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	}
 
 	if len(createdUrls) > 0 {
-		msg := fmt.Sprintf("🚀 Created remediation PRs for %s/%s:\n", pod.Namespace, pod.Name)
-		for _, u := range createdUrls {
-			msg += fmt.Sprintf("- %s\n", u)
-		}
-		notifications.SendNotification(c.config, msg)
+		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(pod.Namespace, pod.Name, createdUrls))
 	}
 }
 
@@ -1535,7 +1542,7 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 	} else if prURL != "" {
 		slog.Info("Successfully created approved remediation PR", "ns", fix.PodNamespace, "pod", fix.PodName, "url", prURL)
 		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPROpened, prURL, "")
-		notifications.SendNotification(c.config, fmt.Sprintf("🚀 Created remediation PR for %s/%s: %s", fix.PodNamespace, fix.PodName, prURL))
+		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(fix.PodNamespace, fix.PodName, []string{prURL}))
 	}
 }
 

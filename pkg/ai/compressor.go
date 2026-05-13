@@ -28,7 +28,7 @@ func CompressLogs(logs string) string {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Strip timestamp for comparison
 		normalized := timestampRegex.ReplaceAllString(line, "")
 		normalized = strings.TrimSpace(normalized)
@@ -87,7 +87,7 @@ func cleanYAML(m map[string]interface{}) {
 		delete(meta, "resourceVersion")
 		delete(meta, "uid")
 		delete(meta, "generation")
-		
+
 		// Remove empty maps
 		if ann, ok := meta["annotations"].(map[string]interface{}); ok && len(ann) == 0 {
 			delete(meta, "annotations")
@@ -194,7 +194,7 @@ func SurgicalUpdate(originalYaml, containerName, snippetYaml string) (string, er
 	if err := yaml.Unmarshal([]byte(snippetYaml), &snippetNode); err != nil {
 		return "", err
 	}
-	
+
 	// Snippet is usually a map of fields
 	targetSnippet := &snippetNode
 	if snippetNode.Kind == yaml.DocumentNode && len(snippetNode.Content) > 0 {
@@ -203,6 +203,9 @@ func SurgicalUpdate(originalYaml, containerName, snippetYaml string) (string, er
 
 	if targetSnippet.Kind != yaml.MappingNode {
 		return "", fmt.Errorf("invalid snippet format: expected mapping")
+	}
+	if IsKubernetesManifest(snippetYaml) {
+		return "", fmt.Errorf("refusing to apply full Kubernetes manifest as a container snippet")
 	}
 
 	containerNode := findContainerNode(&root, containerName)
@@ -221,11 +224,26 @@ func SurgicalUpdate(originalYaml, containerName, snippetYaml string) (string, er
 	return string(bytes), err
 }
 
+func IsKubernetesManifest(yamlStr string) bool {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlStr), &root); err != nil {
+		return false
+	}
+	target := &root
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		target = root.Content[0]
+	}
+	if target.Kind != yaml.MappingNode {
+		return false
+	}
+	return findKey(target, "apiVersion") != nil && findKey(target, "kind") != nil
+}
+
 func applyMapping(dest, src *yaml.Node) {
 	for i := 0; i < len(src.Content); i += 2 {
 		key := src.Content[i].Value
 		val := src.Content[i+1]
-		
+
 		found := false
 		for j := 0; j < len(dest.Content); j += 2 {
 			if dest.Content[j].Value == key {

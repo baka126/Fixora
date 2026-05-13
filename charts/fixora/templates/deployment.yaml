@@ -196,6 +196,8 @@ spec:
               value: {{ .Values.policyGuardrails.enabled | quote }}
             - name: ALLOWED_IMAGE_REGISTRIES
               value: {{ join "," .Values.policyGuardrails.allowedImageRegistries | quote }}
+            - name: ALLOWED_REPLACEMENT_IMAGES
+              value: {{ join "," .Values.policyGuardrails.allowedReplacementImages | quote }}
 
             # Modular Feature Toggles
             - name: K8S_WATCHER_ENABLED

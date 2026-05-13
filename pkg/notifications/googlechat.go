@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
+	"strings"
 	"time"
 
 	"fixora/pkg/config"
@@ -72,38 +74,23 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		return nil
 	}
 
-	headerTitle := "Fixora: Forensic Diagnostic Report"
-	headerSubtitle := "Automated root cause analysis"
+	return sendGoogleChat(cfg, buildGoogleChatEvidencePayload(cfg, evidence))
+}
 
-	if evidence.PredictiveWarning {
-		headerTitle = "Fixora: Predictive Leak Warning"
-		headerSubtitle = "Memory growth trajectory detected"
-	}
+func buildGoogleChatEvidencePayload(cfg *config.Config, evidence EvidenceChain) GoogleChatPayload {
+	view := buildEvidenceMessageView(evidence)
 
 	mainWidgets := []GoogleChatWidget{
-		{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📊 Metric Proof</b><br>" + evidence.MetricProof}},
+		{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Summary</b><br>" + googleChatText(view.Summary)}},
+		{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Root cause</b><br>" + googleChatText(view.RootCause)}},
+		{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Remediation</b><br>" + googleChatText(view.Remediation)}},
 	}
 
-	if evidence.PredictiveWarning && evidence.EstimatedHoursToOOM > 0 {
-		oomText := fmt.Sprintf("<b>⏳ Estimated Hours until OOM:</b> %.1f hours", evidence.EstimatedHoursToOOM)
-		mainWidgets = append(mainWidgets, GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: oomText}})
+	if view.Signals != "" {
+		mainWidgets = append(mainWidgets, GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Signals</b><br><pre>" + html.EscapeString(view.Signals) + "</pre>"}})
 	}
-
-	mainWidgets = append(mainWidgets,
-		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🔍 Cluster Context</b><br>" + evidence.ClusterContext}},
-		GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>📈 Historical Pattern</b><br>" + evidence.HistoricalPattern}},
-	)
-
-	// If not in App Mode, embed the timeline directly as buttons won't work in simple webhooks
-	if !cfg.GoogleChatAppMode && evidence.EventTimeline != "" {
-		timelineText := evidence.EventTimeline
-		if len(timelineText) > 1000 {
-			timelineText = "... [truncated] ...\n" + timelineText[len(timelineText)-1000:]
-		}
-		mainWidgets = append(mainWidgets, GoogleChatWidget{
-			TextParagraph: &GoogleChatTextParagraph{Text: "<b>🕒 Event Timeline</b><br><pre>" + timelineText + "</pre>"},
-		})
-	}
+	mainWidgets = append(mainWidgets, GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>History</b><br>" + googleChatText(view.History)}})
+	mainWidgets = append(mainWidgets, GoogleChatWidget{TextParagraph: &GoogleChatTextParagraph{Text: "<b>Cost impact</b><br>" + googleChatText(view.FinOps)}})
 
 	// Interactive Buttons (Only if App Mode is enabled)
 	var buttons []GoogleChatButton
@@ -124,7 +111,7 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 
 			if evidence.ShowEventButton {
 				buttons = append(buttons, GoogleChatButton{
-					Text: "🕒 View Event Timeline",
+					Text: "View events",
 					OnClick: GoogleChatOnClick{
 						Action: &GoogleChatAction{
 							Function: "view_events",
@@ -140,7 +127,7 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 
 		if evidence.StackTrace != "" {
 			buttons = append(buttons, GoogleChatButton{
-				Text: "📜 Show Stack Trace",
+				Text: "View stack trace",
 				OnClick: GoogleChatOnClick{
 					Action: &GoogleChatAction{
 						Function: "view_trace",
@@ -156,7 +143,7 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 
 	if evidence.ShowFixButton && cfg.GoogleChatAppMode {
 		buttons = append(buttons, GoogleChatButton{
-			Text: "⚡ Execute Fix",
+			Text: "Execute fix",
 			OnClick: GoogleChatOnClick{
 				Action: &GoogleChatAction{
 					Function: "execute_fix",
@@ -183,18 +170,12 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 				CardId: "forensic_report",
 				Card: GoogleChatCard{
 					Header: GoogleChatHeader{
-						Title:    headerTitle,
-						Subtitle: headerSubtitle,
+						Title:    view.Title,
+						Subtitle: view.Subtitle,
 					},
 					Sections: []GoogleChatSection{
 						{
 							Widgets: mainWidgets,
-						},
-						{
-							Widgets: []GoogleChatWidget{
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>🧠 Root Cause</b><br>" + evidence.RootCause}},
-								{TextParagraph: &GoogleChatTextParagraph{Text: "<b>💰 FinOps Impact</b><br>" + evidence.FinOpsImpact}},
-							},
 						},
 					},
 				},
@@ -202,7 +183,11 @@ func sendGoogleChatEvidenceChain(cfg *config.Config, evidence EvidenceChain) err
 		},
 	}
 
-	return sendGoogleChat(cfg, payload)
+	return payload
+}
+
+func googleChatText(value string) string {
+	return strings.ReplaceAll(html.EscapeString(value), "\n", "<br>")
 }
 
 func sendGoogleChatNotification(cfg *config.Config, message string) error {
