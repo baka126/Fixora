@@ -684,13 +684,7 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 			continue
 		}
 
-		// Global Investigation Lock check
 		ctx := context.Background()
-		if !c.history.CheckAndLockInvestigation(ctx, ns, pod, 30*time.Minute) {
-			slog.Debug("Skipping alert trigger: pod already under investigation", "ns", ns, "pod", pod, "alert", reason)
-			continue
-		}
-
 		// Double-check recent alert processing specifically for Alertmanager source
 		if c.history.IsAlertRecentlyProcessed(ctx, ns, pod, reason, 30*time.Minute) {
 			continue
@@ -799,13 +793,6 @@ func (c *Controller) enqueuePod(obj interface{}) {
 	}
 
 	if reason != "" {
-		// Global Investigation Lock check for k8s watcher
-		ctx := context.Background()
-		if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, 30*time.Minute) {
-			slog.Debug("Ignoring K8s Watcher trigger: pod already under investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
-			return
-		}
-
 		slog.Info("K8s Watcher detected pod failure, enqueuing diagnostic", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 		c.queue.Add(podWorkItem{
 			namespace: pod.Namespace,
@@ -846,6 +833,12 @@ func (c *Controller) processDiagnostic(work podWorkItem) error {
 	pod, err := c.clientset.CoreV1().Pods(work.namespace).Get(ctx, work.name, metav1.GetOptions{})
 	if err != nil {
 		return err
+	}
+	identity := c.workloadIdentityForPod(ctx, pod)
+	lockName := remediationBranchSubject(pod, identity)
+	if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockName, 30*time.Minute) {
+		slog.Debug("Skipping diagnostic trigger: workload already under investigation", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", work.reason)
+		return nil
 	}
 	c.diagnosePod(ctx, pod, work.reason)
 	return nil
@@ -1133,6 +1126,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		slog.Warn("No VCS provider found for remediation", "ns", pod.Namespace, "pod", pod.Name, "type", vcsType)
 		return
 	}
+	identity := c.workloadIdentityForPod(ctx, pod)
 
 	var aggregatedContext strings.Builder
 	repoMap := make(map[string]discoveredRepo)
@@ -1180,7 +1174,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		}
 		source.ManifestType = gitops.DetectManifestTypeFromFiles(source.ManifestType, source.Path, files)
 		repoInfo.Source = source
-		for _, newPath := range allowedNewPatchFiles(pod, source, diagnosis) {
+		for _, newPath := range allowedNewPatchFiles(pod, identity, source, diagnosis) {
 			repoInfo.AllowedNewFiles[newPath] = true
 		}
 
@@ -1222,7 +1216,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			if c.config.PrivacyScrubGitContent {
 				contentStr = tokenizer.Tokenize(contentStr)
 			}
-			aggregatedContext.WriteString(fmt.Sprintf("[GITOPS SOURCE: %s]\n[REPO: %s/%s, FILE: %s]\n%s\n\n", gitOpsPatchInstructions(source, pod, diagnosis), repoOwner, repoName, cleanPath, contentStr))
+			aggregatedContext.WriteString(fmt.Sprintf("[GITOPS SOURCE: %s]\n[REPO: %s/%s, FILE: %s]\n%s\n\n", gitOpsPatchInstructions(source, pod, identity, diagnosis), repoOwner, repoName, cleanPath, contentStr))
 		}
 		repoMap[key] = repoInfo
 	}
@@ -1316,6 +1310,19 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			Create:          isNewFile,
 		})
 	}
+	for repoKey, changes := range patchesByRepo {
+		filtered := filterNoopFileChanges(changes)
+		if len(filtered) == 0 {
+			slog.Info("Skipping remediation repo: generated patch has no file changes after normalization", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey)
+			delete(patchesByRepo, repoKey)
+			continue
+		}
+		patchesByRepo[repoKey] = filtered
+	}
+	if len(patchesByRepo) == 0 {
+		slog.Info("Skipping remediation: all generated patches were no-ops after normalization", "ns", pod.Namespace, "pod", pod.Name)
+		return
+	}
 
 	// Validate patches
 	for repoKey, changes := range patchesByRepo {
@@ -1384,6 +1391,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	// branch so unrelated manifest changes do not land in one broad PR.
 	timestamp := time.Now().Unix()
 	var prPlans []remediationPROption
+	branchSubject := remediationBranchSubject(pod, identity)
 	for patchedRepoKey, changes := range patchesByRepo {
 		parts := strings.Split(patchedRepoKey, "/")
 		if len(parts) != 2 {
@@ -1399,9 +1407,15 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			source = rm.Source
 		}
 
-		for _, opts := range buildManifestAwarePROptions(pod, evidence, diagnosis, aiResp.Confidence, repoOwner, repoName, baseBranch, source, changes, timestamp) {
+		sourceBranchSubject := remediationSourceBranchSubject(branchSubject, source)
+		for _, opts := range buildManifestAwarePROptions(pod, evidence, diagnosis, aiResp.Confidence, repoOwner, repoName, baseBranch, source, changes, sourceBranchSubject, timestamp) {
 			prPlans = append(prPlans, remediationPROption{Options: opts, Source: source})
 		}
+	}
+	prPlans = c.filterActiveRemediationPlans(ctx, provider, pod, identity, prPlans)
+	if len(prPlans) == 0 {
+		slog.Info("Skipping remediation: active PR or pending approval already exists for workload", "ns", pod.Namespace, "pod", pod.Name)
+		return
 	}
 
 	if effectiveMode == config.AutoFix {
@@ -1464,6 +1478,11 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	for _, plan := range prPlans {
 		opts := plan.Options
 		remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "")
+		if err := validatePROptionsFresh(ctx, provider, opts); err != nil {
+			slog.Warn("Skipping stale remediation PR: source changed before creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head, "error", err)
+			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", err.Error())
+			continue
+		}
 		if !c.allowAutoFixPR() {
 			slog.Warn("Auto-fix PR rate limit reached, skipping targeted PR creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head)
 			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", "auto-fix PR rate limit reached")
@@ -1487,6 +1506,85 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	if len(createdUrls) > 0 {
 		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(pod.Namespace, pod.Name, createdUrls))
 	}
+}
+
+func (c *Controller) filterActiveRemediationPlans(ctx context.Context, provider vcs.Provider, pod *v1.Pod, identity workloadIdentity, plans []remediationPROption) []remediationPROption {
+	if len(plans) == 0 {
+		return nil
+	}
+	filtered := make([]remediationPROption, 0, len(plans))
+	seen := make(map[string]bool)
+	for _, plan := range plans {
+		opts := plan.Options
+		prefix := remediationBranchPrefix(opts.Head)
+		key := strings.Join([]string{opts.RepoOwner, opts.RepoName, prefix}, "/")
+		if seen[key] {
+			slog.Info("Skipping duplicate remediation plan in current batch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey(opts.RepoOwner, opts.RepoName), "head_prefix", prefix)
+			continue
+		}
+		seen[key] = true
+
+		if c.inMemoryPendingFixExists(pod.Namespace, opts.RepoOwner, opts.RepoName, prefix) {
+			slog.Info("Skipping remediation: pending approval already exists in memory", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey(opts.RepoOwner, opts.RepoName), "head_prefix", prefix)
+			continue
+		}
+
+		if c.history != nil && c.history.HasDB() {
+			rec, active, err := c.history.ActiveRemediationForPlan(ctx, pod.Namespace, pod.Name, identity, opts.RepoOwner, opts.RepoName, prefix)
+			if err != nil {
+				slog.Error("Failed to check active remediation state; skipping duplicate-prone plan", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey(opts.RepoOwner, opts.RepoName), "head_prefix", prefix, "error", err)
+				continue
+			}
+			if active {
+				ref := firstNonEmpty(rec.PRURL, rec.Options.Head)
+				slog.Info("Skipping remediation: active remediation already exists", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey(opts.RepoOwner, opts.RepoName), "head_prefix", prefix, "existing", ref, "status", rec.Status)
+				continue
+			}
+		}
+
+		exists, url, err := provider.PullRequestExists(ctx, opts.RepoOwner, opts.RepoName, prefix)
+		if err != nil {
+			slog.Error("Failed to check existing remediation PR; skipping duplicate-prone plan", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey(opts.RepoOwner, opts.RepoName), "head_prefix", prefix, "error", err)
+			continue
+		}
+		if exists {
+			slog.Info("Skipping remediation: open PR already exists", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey(opts.RepoOwner, opts.RepoName), "head_prefix", prefix, "url", url)
+			continue
+		}
+		filtered = append(filtered, plan)
+	}
+	return filtered
+}
+
+func (c *Controller) inMemoryPendingFixExists(namespace, repoOwner, repoName, headPrefix string) bool {
+	if c == nil {
+		return false
+	}
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	for _, fix := range c.pendingFixes {
+		if fix.PodNamespace != namespace {
+			continue
+		}
+		if fix.Options.RepoOwner != repoOwner || fix.Options.RepoName != repoName {
+			continue
+		}
+		if strings.HasPrefix(fix.Options.Head, headPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterNoopFileChanges(changes []vcs.FileChange) []vcs.FileChange {
+	filtered := make([]vcs.FileChange, 0, len(changes))
+	for _, change := range changes {
+		if !change.Create && !change.Delete && len(change.PreviousContent) > 0 && bytes.Equal(bytes.TrimSpace(change.PreviousContent), bytes.TrimSpace(change.NewContent)) {
+			continue
+		}
+		filtered = append(filtered, change)
+	}
+	return filtered
 }
 
 func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
@@ -1533,6 +1631,12 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 		notifications.SendNotification(c.config, "❌ Remediation failed: No VCS provider configured.")
 		return
 	}
+	if err := validatePendingFixFresh(ctx, provider, fix); err != nil {
+		slog.Warn("Pending remediation source changed before approval; refusing stale PR", "ns", fix.PodNamespace, "pod", fix.PodName, "head", fix.Options.Head, "error", err)
+		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPRFailed, "", err.Error())
+		notifications.SendNotification(c.config, fmt.Sprintf("Remediation approval expired for %s/%s because the source manifest changed. Fixora will re-evaluate the latest GitOps state on the next alert.", fix.PodNamespace, fix.PodName))
+		return
+	}
 
 	prURL, err := provider.CreatePullRequest(ctx, fix.Options)
 	if err != nil {
@@ -1544,6 +1648,26 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPROpened, prURL, "")
 		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(fix.PodNamespace, fix.PodName, []string{prURL}))
 	}
+}
+
+func validatePendingFixFresh(ctx context.Context, provider vcs.Provider, fix PendingFix) error {
+	return validatePROptionsFresh(ctx, provider, fix.Options)
+}
+
+func validatePROptionsFresh(ctx context.Context, provider vcs.Provider, opts vcs.PullRequestOptions) error {
+	for _, file := range opts.Files {
+		if file.Create || file.Delete || len(file.PreviousContent) == 0 {
+			continue
+		}
+		current, err := provider.GetFileContent(ctx, opts.RepoOwner, opts.RepoName, file.FilePath, opts.Base)
+		if err != nil {
+			return fmt.Errorf("failed to re-read %s before PR creation: %w", file.FilePath, err)
+		}
+		if !bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(file.PreviousContent)) {
+			return fmt.Errorf("source file %s changed after remediation was generated", file.FilePath)
+		}
+	}
+	return nil
 }
 
 // GetPodLogs fetches and scrubs logs for a specific pod. Public for use by server (Slack modal).

@@ -120,16 +120,25 @@ func (g *GitLabProvider) GetFileContent(ctx context.Context, repoOwner, repoName
 func (g *GitLabProvider) PullRequestExists(ctx context.Context, repoOwner, repoName, headBranch string) (bool, string, error) {
 	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
 	opts := &gitlab.ListProjectMergeRequestsOptions{
-		State:        gitlab.Ptr("opened"),
-		SourceBranch: gitlab.Ptr(headBranch),
+		State: gitlab.Ptr("opened"),
+		ListOptions: gitlab.ListOptions{
+			PerPage: 100,
+		},
 	}
-	mrs, _, err := g.client.MergeRequests.ListProjectMergeRequests(projectID, opts)
-	if err != nil {
-		return false, "", err
-	}
-
-	if len(mrs) > 0 {
-		return true, mrs[0].WebURL, nil
+	for {
+		mrs, resp, err := g.client.MergeRequests.ListProjectMergeRequests(projectID, opts)
+		if err != nil {
+			return false, "", err
+		}
+		for _, mr := range mrs {
+			if mr.SourceBranch == headBranch || strings.HasPrefix(mr.SourceBranch, headBranch) {
+				return true, mr.WebURL, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 
 	return false, "", nil

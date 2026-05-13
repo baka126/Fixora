@@ -144,17 +144,24 @@ func (g *GitHubProvider) GetFileContent(ctx context.Context, repoOwner, repoName
 func (g *GitHubProvider) PullRequestExists(ctx context.Context, repoOwner, repoName, headBranch string) (bool, string, error) {
 	opts := &github.PullRequestListOptions{
 		State: "open",
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
 	}
-	prs, _, err := g.client.PullRequests.List(ctx, repoOwner, repoName, opts)
-	if err != nil {
-		return false, "", err
-	}
-
-	for _, pr := range prs {
-		if pr.Head.GetLabel() == headBranch || pr.Head.GetRef() == headBranch ||
-			strings.HasPrefix(pr.Head.GetLabel(), headBranch) || strings.HasPrefix(pr.Head.GetRef(), headBranch) {
-			return true, pr.GetHTMLURL(), nil
+	for {
+		prs, resp, err := g.client.PullRequests.List(ctx, repoOwner, repoName, opts)
+		if err != nil {
+			return false, "", err
 		}
+		for _, pr := range prs {
+			if githubPRHeadMatches(pr, headBranch) {
+				return true, pr.GetHTMLURL(), nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 
 	return false, "", nil

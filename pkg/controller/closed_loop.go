@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -186,6 +187,50 @@ func (h *historyCache) RemediationFeedback(ctx context.Context, namespace, podNa
 		feedback = append(feedback, row)
 	}
 	return formatRemediationFeedback(feedback)
+}
+
+func (h *historyCache) ActiveRemediationForPlan(ctx context.Context, namespace, podName string, identity workloadIdentity, repoOwner, repoName, headPrefix string) (RemediationRecord, bool, error) {
+	if h == nil || h.db == nil {
+		return RemediationRecord{}, false, nil
+	}
+	query := `
+		SELECT id, COALESCE(investigation_id, 0), namespace, pod_name,
+		       COALESCE(diagnosis_category, ''), COALESCE(patch_strategy, ''),
+		       status, COALESCE(vcs_type, ''), repo_owner, repo_name,
+		       base_branch, head_branch, COALESCE(pr_url, ''), COALESCE(pr_title, ''),
+		       updated_at
+		FROM remediation_outcomes
+		WHERE namespace = $1
+		  AND (
+		    pod_name = $2
+		    OR (COALESCE(workload_kind, '') = $3 AND COALESCE(workload_name, '') = $4)
+		  )
+		  AND repo_owner = $5
+		  AND repo_name = $6
+		  AND head_branch LIKE $7
+		  AND (
+		    status IN ('pending_approval', 'pr_opened', 'observing')
+		    OR (status IN ('generated', 'pr_failed', 'production_failed', 'revert_opened', 'revert_failed') AND updated_at > $8)
+		  )
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`
+	var rec RemediationRecord
+	var status string
+	err := h.db.QueryRowContext(ctx, query, namespace, podName, identity.Kind, identity.Name, repoOwner, repoName, headPrefix+"%", time.Now().Add(-1*time.Hour)).Scan(
+		&rec.ID, &rec.InvestigationID, &rec.Namespace, &rec.PodName,
+		&rec.DiagnosisCategory, &rec.PatchStrategy, &status, &rec.VCSType,
+		&rec.Options.RepoOwner, &rec.Options.RepoName, &rec.Options.Base, &rec.Options.Head,
+		&rec.PRURL, &rec.Options.Title, &rec.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return RemediationRecord{}, false, nil
+	}
+	if err != nil {
+		return RemediationRecord{}, false, err
+	}
+	rec.Status = RemediationStatus(status)
+	return rec, true, nil
 }
 
 func (h *historyCache) RemediationsForMonitoring(ctx context.Context, limit int) []RemediationRecord {
