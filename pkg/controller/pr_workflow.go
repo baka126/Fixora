@@ -24,13 +24,17 @@ func buildTargetedPROptions(
 	repoName string,
 	baseBranch string,
 	changes []vcs.FileChange,
+	branchSubject string,
 	timestamp int64,
 ) []vcs.PullRequestOptions {
+	if strings.TrimSpace(branchSubject) == "" {
+		branchSubject = pod.Name
+	}
 	groups := splitChangesByFile(changes)
 	opts := make([]vcs.PullRequestOptions, 0, len(groups))
 	for _, group := range groups {
 		scope := prScopeFromChangeGroup(diagnosis, group)
-		branch := fmt.Sprintf("fixora/%s-%s-%s-%d", slugify(string(diagnosis.PatchStrategy)), slugify(pod.Name), slugify(scope.BranchPart), timestamp)
+		branch := fmt.Sprintf("fixora/%s-%s-%s-%d", slugify(string(diagnosis.PatchStrategy)), slugify(branchSubject), slugify(scope.BranchPart), timestamp)
 		opts = append(opts, vcs.PullRequestOptions{
 			Title:         fmt.Sprintf("Fixora: %s for %s/%s", scope.TitleAction, pod.Namespace, pod.Name),
 			Body:          targetedPRBody(evidence, diagnosis, aiConfidence, group),
@@ -55,10 +59,14 @@ func buildManifestAwarePROptions(
 	baseBranch string,
 	source gitops.WorkloadSource,
 	changes []vcs.FileChange,
+	branchSubject string,
 	timestamp int64,
 ) []vcs.PullRequestOptions {
 	if source.ManifestType != gitops.ManifestKustomize {
-		return buildTargetedPROptions(pod, evidence, diagnosis, aiConfidence, repoOwner, repoName, baseBranch, changes, timestamp)
+		return buildTargetedPROptions(pod, evidence, diagnosis, aiConfidence, repoOwner, repoName, baseBranch, changes, branchSubject, timestamp)
+	}
+	if strings.TrimSpace(branchSubject) == "" {
+		branchSubject = pod.Name
 	}
 
 	sorted := append([]vcs.FileChange(nil), changes...)
@@ -66,7 +74,7 @@ func buildManifestAwarePROptions(
 		return sorted[i].FilePath < sorted[j].FilePath
 	})
 	scope := prScopeFromChangeGroup(diagnosis, sorted)
-	branch := fmt.Sprintf("fixora/%s-%s-kustomize-%s-%d", slugify(string(diagnosis.PatchStrategy)), slugify(pod.Name), slugify(scope.BranchPart), timestamp)
+	branch := fmt.Sprintf("fixora/%s-%s-kustomize-%s-%d", slugify(string(diagnosis.PatchStrategy)), slugify(branchSubject), slugify(scope.BranchPart), timestamp)
 	return []vcs.PullRequestOptions{{
 		Title:         fmt.Sprintf("Fixora: update Kustomize overlay for %s/%s", pod.Namespace, pod.Name),
 		Body:          targetedPRBody(evidence, diagnosis, aiConfidence, sorted),
@@ -215,4 +223,39 @@ func slugify(value string) string {
 		return value[:48]
 	}
 	return value
+}
+
+func remediationBranchPrefix(head string) string {
+	head = strings.TrimSpace(head)
+	idx := strings.LastIndex(head, "-")
+	if idx < 0 || idx == len(head)-1 {
+		return head
+	}
+	for _, r := range head[idx+1:] {
+		if r < '0' || r > '9' {
+			return head
+		}
+	}
+	return head[:idx+1]
+}
+
+func remediationBranchSubject(pod *v1.Pod, identity workloadIdentity) string {
+	if identity.Kind != "" && identity.Name != "" {
+		return identity.Kind + "-" + identity.Name
+	}
+	if pod == nil {
+		return "workload"
+	}
+	return pod.Name
+}
+
+func remediationSourceBranchSubject(subject string, source gitops.WorkloadSource) string {
+	parts := []string{subject}
+	for _, item := range []string{source.Environment, source.Region, source.AppName, source.Path} {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			parts = append(parts, item)
+		}
+	}
+	return strings.Join(parts, "-")
 }

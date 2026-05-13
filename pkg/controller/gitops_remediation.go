@@ -24,16 +24,17 @@ func (c *Controller) resolveGitOpsSources(ctx context.Context, pod *v1.Pod) []gi
 	return sources
 }
 
-func gitOpsPatchInstructions(source gitops.WorkloadSource, pod *v1.Pod, diagnosis Diagnosis) string {
+func gitOpsPatchInstructions(source gitops.WorkloadSource, pod *v1.Pod, identity workloadIdentity, diagnosis Diagnosis) string {
+	workloadRef := workloadReference(pod, identity)
 	switch source.ManifestType {
 	case gitops.ManifestKustomize:
-		return fmt.Sprintf("%s. Kustomize overlay detected: do not edit rendered/base workload manifests directly. Update kustomization.yaml and create or update a StrategicMergePatch under an allowed patch path for pod %s. Patch strategy: %s", source.Summary(), pod.Name, diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Kustomize overlay detected: target the owner workload %s, not the ephemeral pod name. Do not edit rendered/base workload manifests directly. Update kustomization.yaml and create or update a StrategicMergePatch under an allowed patch path. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
 	case gitops.ManifestHelm:
-		return fmt.Sprintf("%s. Helm source detected: prefer values.yaml for environment-specific changes; edit templates only when the structural chart template is the root cause. Patch strategy: %s", source.Summary(), diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Helm source detected: target the owner workload %s. Prefer values.yaml for environment-specific changes such as image, resources, probes, env, and scheduling; edit templates only when the structural chart template is the root cause. Do not patch a rendered Pod manifest. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
 	case gitops.ManifestFluxHelmRelease:
-		return fmt.Sprintf("%s. Flux HelmRelease detected: prefer HelmRelease values or referenced values files, not rendered workload YAML. Patch strategy: %s", source.Summary(), diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Flux HelmRelease detected: target the owner workload %s. Prefer HelmRelease values or referenced values files, not rendered workload YAML. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
 	default:
-		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for affected workload %s/%s. Return a valid full manifest with top-level apiVersion/kind/metadata/spec and update existing fields in place. Preserve metadata.name, annotations, namespace, restartPolicy placement, and unrelated field ordering unless directly required by the fix. If this is a Pod image fix, change only image or imagePullPolicy because live Pods reject args, command, resources, and most spec updates; do not nest a complete manifest under containers. Patch strategy: %s", source.Summary(), pod.Namespace, pod.Name, diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for affected workload %s in namespace %s. Prefer controller manifests such as Deployment, StatefulSet, DaemonSet, Job, or CronJob over bare Pod manifests when an owner workload exists. Return a valid full manifest with top-level apiVersion/kind/metadata/spec and update existing fields in place. Preserve metadata.name, annotations, namespace, restartPolicy placement, and unrelated field ordering unless directly required by the fix. If this is a bare Pod image fix, change only image or imagePullPolicy because live Pods reject args, command, resources, and most spec updates; do not nest a complete manifest under containers. Patch strategy: %s", source.Summary(), workloadRef, pod.Namespace, diagnosis.PatchStrategy)
 	}
 }
 
@@ -62,11 +63,11 @@ func isGitOpsEditableFile(source gitops.WorkloadSource, filePath string) bool {
 	}
 }
 
-func allowedNewPatchFiles(pod *v1.Pod, source gitops.WorkloadSource, diagnosis Diagnosis) []string {
+func allowedNewPatchFiles(pod *v1.Pod, identity workloadIdentity, source gitops.WorkloadSource, diagnosis Diagnosis) []string {
 	if source.ManifestType != gitops.ManifestKustomize {
 		return nil
 	}
-	name := fmt.Sprintf("%s-%s.yaml", slugify(pod.Name), slugify(string(diagnosis.PatchStrategy)))
+	name := fmt.Sprintf("%s-%s.yaml", slugify(remediationBranchSubject(pod, identity)), slugify(string(diagnosis.PatchStrategy)))
 	return []string{path.Join(source.Path, "fixora-patches", name)}
 }
 
@@ -140,4 +141,14 @@ func validationMessage(result validation.ValidationResult) string {
 		return result.Error.Error()
 	}
 	return "validation failed"
+}
+
+func workloadReference(pod *v1.Pod, identity workloadIdentity) string {
+	if identity.Kind != "" && identity.Name != "" {
+		return identity.Kind + "/" + identity.Name
+	}
+	if pod == nil {
+		return "unknown workload"
+	}
+	return "Pod/" + pod.Name
 }
