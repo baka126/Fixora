@@ -8,6 +8,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  UI_IMAGE_NAME: ${{ github.repository }}-ui
 
 jobs:
   build:
@@ -40,7 +41,13 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Build and push Docker image
+      - name: Extract UI Docker metadata
+        id: meta-ui
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.UI_IMAGE_NAME }}
+
+      - name: Build and push Fixora server image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -51,3 +58,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push Fixora UI image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./ui
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-ui.outputs.tags }}
+          labels: ${{ steps.meta-ui.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=max,scope=ui

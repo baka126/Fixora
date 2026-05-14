@@ -24,6 +24,20 @@ If release name contains chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+Create the UI service/deployment name.
+*/}}
+{{- define "fixora.uiFullname" -}}
+{{- printf "%s-ui" (include "fixora.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Returns true if the dashboard UI is enabled.
+*/}}
+{{- define "fixora.uiEnabled" -}}
+{{- if or .Values.ui.enabled .Values._UI }}true{{- end }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "fixora.chart" -}}

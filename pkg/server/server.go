@@ -23,6 +23,7 @@ import (
 type Server struct {
 	controller *controller.Controller
 	config     *config.Config
+	hub        *Hub
 }
 
 const maxRequestBodyBytes = 1 << 20 // 1 MiB
@@ -31,6 +32,7 @@ func New(ctrl *controller.Controller, cfg *config.Config) *Server {
 	return &Server{
 		controller: ctrl,
 		config:     cfg,
+		hub:        NewHub(),
 	}
 }
 
@@ -41,6 +43,14 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("/slack/interactions", s.handleSlackInteraction)
 	mux.HandleFunc("/googlechat/interactions", s.handleGoogleChatInteraction)
+	mux.HandleFunc("/api/v1/dashboard", s.handleDashboard)
+	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/v1/auth/setup-status", s.handleSetupStatus)
+	mux.HandleFunc("/api/v1/auth/setup", s.handleSetup)
+	mux.HandleFunc("/api/v1/auth/users", s.handleCreateUser)
+	mux.HandleFunc("/api/v1/ws", s.handleWebSocket)
+
+	go s.hub.Run()
 
 	srv := &http.Server{
 		Addr:              ":" + s.config.ServerPort,
@@ -79,6 +89,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodGet {
 		fmt.Fprint(w, "OK")
+	}
+}
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if err := json.NewEncoder(w).Encode(s.controller.DashboardSnapshot(r.Context())); err != nil {
+		slog.Error("Failed to encode dashboard snapshot", "error", err)
 	}
 }
 

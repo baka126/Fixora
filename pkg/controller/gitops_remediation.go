@@ -45,7 +45,12 @@ func isGitOpsContextFile(source gitops.WorkloadSource, filePath string) bool {
 	switch source.ManifestType {
 	case gitops.ManifestKustomize:
 		return true
-	case gitops.ManifestHelm, gitops.ManifestFluxHelmRelease:
+	case gitops.ManifestFluxHelmRelease:
+		if isFluxHelmReleaseFleetSource(source) {
+			return true
+		}
+		return isHelmRelevantFile(filePath)
+	case gitops.ManifestHelm:
 		return isHelmRelevantFile(filePath)
 	default:
 		return true
@@ -56,7 +61,12 @@ func isGitOpsEditableFile(source gitops.WorkloadSource, filePath string) bool {
 	switch source.ManifestType {
 	case gitops.ManifestKustomize:
 		return isKustomizeControlFile(filePath) || isKustomizePatchFile(filePath)
-	case gitops.ManifestHelm, gitops.ManifestFluxHelmRelease:
+	case gitops.ManifestFluxHelmRelease:
+		if isFluxHelmReleaseFleetSource(source) {
+			return isRemediableManifest(filePath)
+		}
+		return isHelmEditableFile(filePath)
+	case gitops.ManifestHelm:
 		return isHelmEditableFile(filePath)
 	default:
 		return isRemediableManifest(filePath)
@@ -110,6 +120,13 @@ func isHelmEditableFile(filePath string) bool {
 	lower := strings.ToLower(filePath)
 	base := path.Base(lower)
 	return base == "values.yaml" || base == "values.yml" || strings.Contains(lower, "helmrelease") || strings.Contains(lower, "/templates/")
+}
+
+func isFluxHelmReleaseFleetSource(source gitops.WorkloadSource) bool {
+	return source.ManifestType == gitops.ManifestFluxHelmRelease &&
+		source.RepoURL != "" &&
+		source.Helm.RepoURL != "" &&
+		source.RepoURL != source.Helm.RepoURL
 }
 
 func validateManifestAwarePatchSet(source gitops.WorkloadSource, changes []vcs.FileChange) error {

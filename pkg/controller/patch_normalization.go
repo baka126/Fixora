@@ -18,8 +18,8 @@ func isSurgicalContainerSnippet(content string) bool {
 	return strings.Contains(content, "limits:") || strings.Contains(content, "requests:")
 }
 
-func applyRawManifestPatch(original, generated string, source gitops.WorkloadSource, diagnosis Diagnosis, pod *v1.Pod) (string, bool, error) {
-	if source.ManifestType == gitops.ManifestHelm || source.ManifestType == gitops.ManifestKustomize || source.ManifestType == gitops.ManifestFluxHelmRelease {
+func applyRawManifestPatch(original, generated string, source gitops.WorkloadSource, diagnosis Diagnosis, pod *v1.Pod, identity workloadIdentity, failingContainerName string) (string, bool, error) {
+	if source.ManifestType == gitops.ManifestHelm || source.ManifestType == gitops.ManifestFluxHelmRelease {
 		return generated, false, nil
 	}
 	if !ai.IsKubernetesManifest(generated) {
@@ -43,19 +43,20 @@ func applyRawManifestPatch(original, generated string, source gitops.WorkloadSou
 	if generatedDoc == nil || scalarValue(originalDoc, "kind") != scalarValue(generatedDoc, "kind") {
 		return generated, false, nil
 	}
-	if scalarValue(originalDoc, "kind") != "Pod" {
+	kind := scalarValue(originalDoc, "kind")
+	if !isPatchableWorkloadKind(kind) {
 		return generated, false, nil
 	}
-	if err := validateRawPodManifestIdentity(originalDoc, pod); err != nil {
+	if err := validateRawWorkloadManifestIdentity(originalDoc, kind, pod, identity); err != nil {
 		return "", false, err
 	}
-
-	containerName := ""
-	if len(pod.Spec.Containers) > 0 {
-		containerName = pod.Spec.Containers[0].Name
+	if source.ManifestType == gitops.ManifestKustomize {
+		return generated, false, nil
 	}
-	originalContainer := podContainerMapping(originalDoc, containerName)
-	generatedContainer := podContainerMapping(generatedDoc, containerName)
+
+	containerName := targetContainerName(pod, failingContainerName)
+	originalContainer := workloadContainerMapping(originalDoc, kind, containerName)
+	generatedContainer := workloadContainerMapping(generatedDoc, kind, containerName)
 	if originalContainer == nil || generatedContainer == nil {
 		return generated, false, nil
 	}
@@ -81,17 +82,86 @@ func applyRawManifestPatch(original, generated string, source gitops.WorkloadSou
 	return string(bytes), true, nil
 }
 
-func validateRawPodManifestIdentity(doc *yaml.Node, pod *v1.Pod) error {
+func validateRawWorkloadManifestIdentity(doc *yaml.Node, kind string, pod *v1.Pod, identity workloadIdentity) error {
 	metadata := mappingValue(doc, "metadata")
 	manifestName := scalarValue(metadata, "name")
 	manifestNamespace := scalarValue(metadata, "namespace")
-	if pod.Name != "" && manifestName != "" && manifestName != pod.Name {
-		return fmt.Errorf("raw Pod manifest identity mismatch: source declares Pod/%s but incident is Pod/%s", manifestName, pod.Name)
+	targetKind := identity.Kind
+	targetName := identity.Name
+	if targetKind == "" || targetName == "" {
+		targetKind = "Pod"
+		if pod != nil {
+			targetName = pod.Name
+		}
 	}
-	if pod.Namespace != "" && manifestNamespace != "" && manifestNamespace != pod.Namespace {
-		return fmt.Errorf("raw Pod manifest namespace mismatch: source declares namespace %s but incident is namespace %s", manifestNamespace, pod.Namespace)
+	if kind == "Pod" && targetKind != "Pod" {
+		return fmt.Errorf("raw Pod manifest is not a safe source for controller-owned workload: source declares Pod/%s but incident is owned by %s/%s", manifestName, targetKind, targetName)
+	}
+	if targetKind != "" && kind != targetKind {
+		return fmt.Errorf("raw workload manifest kind mismatch: source declares %s/%s but incident target is %s/%s", kind, manifestName, targetKind, targetName)
+	}
+	if targetName != "" && manifestName != "" && manifestName != targetName {
+		return fmt.Errorf("raw workload manifest identity mismatch: source declares %s/%s but incident target is %s/%s", kind, manifestName, targetKind, targetName)
+	}
+	if pod != nil && pod.Namespace != "" && manifestNamespace != "" && manifestNamespace != pod.Namespace {
+		return fmt.Errorf("raw workload manifest namespace mismatch: source declares namespace %s but incident is namespace %s", manifestNamespace, pod.Namespace)
 	}
 	return nil
+}
+
+func targetContainerName(pod *v1.Pod, failingContainerName string) string {
+	if strings.TrimSpace(failingContainerName) != "" {
+		return strings.TrimSpace(failingContainerName)
+	}
+	if pod != nil && len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Name
+	}
+	if pod != nil && len(pod.Spec.InitContainers) > 0 {
+		return pod.Spec.InitContainers[0].Name
+	}
+	return ""
+}
+
+func failingContainerNameForPod(pod *v1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if isFailingContainerStatus(status) {
+			return status.Name
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if isFailingContainerStatus(status) {
+			return status.Name
+		}
+	}
+	return ""
+}
+
+func isFailingContainerStatus(status v1.ContainerStatus) bool {
+	if status.State.Waiting != nil {
+		switch status.State.Waiting.Reason {
+		case "CrashLoopBackOff", "CreateContainerConfigError", "ImagePullBackOff", "ErrImagePull", "CreateContainerError":
+			return true
+		}
+	}
+	if status.State.Terminated != nil {
+		return status.State.Terminated.ExitCode != 0 ||
+			status.State.Terminated.Reason == "OOMKilled" ||
+			status.State.Terminated.Reason == "ContainerCannotRun" ||
+			status.State.Terminated.Reason == "DeadlineExceeded"
+	}
+	return false
+}
+
+func isPatchableWorkloadKind(kind string) bool {
+	switch kind {
+	case "Pod", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyContainerPatchFields(dest, src *yaml.Node, strategy PatchStrategy) bool {
@@ -138,24 +208,58 @@ func patchYAMLScalar(content, oldValue, newValue string) (string, bool) {
 	return pattern.ReplaceAllString(content, "${1}${2}"+newValue+"${3}"), true
 }
 
-func podContainerMapping(doc *yaml.Node, containerName string) *yaml.Node {
+func workloadContainerMapping(doc *yaml.Node, kind, containerName string) *yaml.Node {
+	for _, containers := range workloadContainerNodes(doc, kind) {
+		if containers == nil || containers.Kind != yaml.SequenceNode {
+			continue
+		}
+		for _, container := range containers.Content {
+			if container.Kind != yaml.MappingNode {
+				continue
+			}
+			if containerName == "" || scalarValue(container, "name") == containerName {
+				return container
+			}
+		}
+	}
+	return nil
+}
+
+func workloadContainerNodes(doc *yaml.Node, kind string) []*yaml.Node {
 	spec := mappingValue(doc, "spec")
 	if spec == nil {
 		return nil
 	}
-	containers := mappingValue(spec, "containers")
-	if containers == nil || containers.Kind != yaml.SequenceNode {
+	switch kind {
+	case "Pod":
+		return containerNodesFromSpec(spec)
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
+		return templateContainerNodes(spec)
+	case "Job":
+		return templateContainerNodes(spec)
+	case "CronJob":
+		jobTemplate := mappingValue(spec, "jobTemplate")
+		jobSpec := mappingValue(jobTemplate, "spec")
+		return templateContainerNodes(jobSpec)
+	default:
 		return nil
 	}
-	for _, container := range containers.Content {
-		if container.Kind != yaml.MappingNode {
-			continue
-		}
-		if containerName == "" || scalarValue(container, "name") == containerName {
-			return container
-		}
+}
+
+func templateContainerNodes(spec *yaml.Node) []*yaml.Node {
+	template := mappingValue(spec, "template")
+	templateSpec := mappingValue(template, "spec")
+	return containerNodesFromSpec(templateSpec)
+}
+
+func containerNodesFromSpec(spec *yaml.Node) []*yaml.Node {
+	if spec == nil {
+		return nil
 	}
-	return nil
+	return []*yaml.Node{
+		mappingValue(spec, "containers"),
+		mappingValue(spec, "initContainers"),
+	}
 }
 
 func yamlNodesEqual(a, b *yaml.Node) bool {

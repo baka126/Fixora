@@ -53,6 +53,25 @@ type WorkloadSource struct {
 	Environment    string
 	Region         string
 	Reason         string
+	Helm           HelmSource
+}
+
+type HelmSource struct {
+	ReleaseName        string
+	Namespace          string
+	RepoURL            string
+	Chart              string
+	ChartVersion       string
+	ChartPath          string
+	SourceRefKind      string
+	SourceRefName      string
+	SourceRefNamespace string
+	ValueFiles         []string
+	Parameters         map[string]string
+	FileParameters     map[string]string
+	ValuesFrom         []string
+	HasInlineValues    bool
+	HasValuesObject    bool
 }
 
 func (s WorkloadSource) Summary() string {
@@ -78,6 +97,54 @@ func (s WorkloadSource) Summary() string {
 	}
 	if s.Reason != "" {
 		parts = append(parts, "reason="+s.Reason)
+	}
+	if summary := s.Helm.Summary(); summary != "" {
+		parts = append(parts, "helm={"+summary+"}")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (h HelmSource) Summary() string {
+	var parts []string
+	if h.ReleaseName != "" {
+		parts = append(parts, "release="+h.ReleaseName)
+	}
+	if h.Namespace != "" {
+		parts = append(parts, "namespace="+h.Namespace)
+	}
+	if h.Chart != "" {
+		parts = append(parts, "chart="+h.Chart)
+	}
+	if h.ChartVersion != "" {
+		parts = append(parts, "version="+h.ChartVersion)
+	}
+	if h.ChartPath != "" {
+		parts = append(parts, "chartPath="+h.ChartPath)
+	}
+	if h.RepoURL != "" {
+		parts = append(parts, "repo="+h.RepoURL)
+	}
+	if len(h.ValueFiles) > 0 {
+		parts = append(parts, "valueFiles="+strings.Join(h.ValueFiles, "|"))
+	}
+	if len(h.Parameters) > 0 {
+		parts = append(parts, fmt.Sprintf("parameters=%d", len(h.Parameters)))
+	}
+	if len(h.FileParameters) > 0 {
+		parts = append(parts, fmt.Sprintf("fileParameters=%d", len(h.FileParameters)))
+	}
+	if len(h.ValuesFrom) > 0 {
+		parts = append(parts, "valuesFrom="+strings.Join(h.ValuesFrom, "|"))
+	}
+	if h.HasInlineValues {
+		parts = append(parts, "inlineValues=true")
+	}
+	if h.HasValuesObject {
+		parts = append(parts, "valuesObject=true")
+	}
+	if h.SourceRefName != "" {
+		ref := strings.Join(nonEmptyStrings(h.SourceRefKind, h.SourceRefNamespace, h.SourceRefName), "/")
+		parts = append(parts, "sourceRef="+ref)
 	}
 	return strings.Join(parts, ", ")
 }
@@ -219,6 +286,18 @@ func (r *Resolver) resolveFluxHelmReleases(ctx context.Context, pod *v1.Pod) []W
 			if releaseName != name && releaseName != specReleaseName {
 				continue
 			}
+			helm := helmSourceFromFluxHelmRelease(ctx, r, item)
+			if fleetSource, ok := r.sourceForFluxManagedObject(ctx, item.GetNamespace(), item.GetName(), "HelmRelease"); ok {
+				fleetSource.Controller = ControllerFlux
+				fleetSource.AppName = item.GetName()
+				fleetSource.AppNamespace = item.GetNamespace()
+				fleetSource.ManifestType = ManifestFluxHelmRelease
+				fleetSource.Helm = helm
+				enrichOverlay(&fleetSource)
+				fleetSource.Reason = "matched Flux Kustomization inventory for HelmRelease"
+				sources = append(sources, fleetSource)
+				continue
+			}
 			src := r.sourceFromFluxHelmRelease(ctx, item)
 			src.Controller = ControllerFlux
 			src.AppName = item.GetName()
@@ -268,15 +347,61 @@ func (r *Resolver) sourceFromFluxKustomization(ctx context.Context, obj unstruct
 }
 
 func (r *Resolver) sourceFromFluxHelmRelease(ctx context.Context, obj unstructured.Unstructured) WorkloadSource {
+	helm := helmSourceFromFluxHelmRelease(ctx, r, obj)
+	return WorkloadSource{
+		RepoURL:        helm.RepoURL,
+		TargetRevision: firstNonEmpty(helm.ChartVersion),
+		Path:           strings.TrimPrefix(helm.ChartPath, "./"),
+		Helm:           helm,
+	}
+}
+
+func helmSourceFromFluxHelmRelease(ctx context.Context, r *Resolver, obj unstructured.Unstructured) HelmSource {
 	sourceRef, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "chart", "spec", "sourceRef")
 	sourceNamespace := firstNonEmpty(sourceRef["namespace"], obj.GetNamespace())
 	repoURL, revision := r.resolveFluxSourceRef(ctx, sourceNamespace, sourceRef["kind"], sourceRef["name"])
 	chartPath, _, _ := unstructured.NestedString(obj.Object, "spec", "chart", "spec", "chart")
-	return WorkloadSource{
-		RepoURL:        repoURL,
-		TargetRevision: revision,
-		Path:           strings.TrimPrefix(chartPath, "./"),
+	chartVersion, _, _ := unstructured.NestedString(obj.Object, "spec", "chart", "spec", "version")
+	releaseName, _, _ := unstructured.NestedString(obj.Object, "spec", "releaseName")
+	targetNamespace, _, _ := unstructured.NestedString(obj.Object, "spec", "targetNamespace")
+	_, hasInlineValues, _ := unstructured.NestedMap(obj.Object, "spec", "values")
+	return HelmSource{
+		ReleaseName:        firstNonEmpty(releaseName, obj.GetName()),
+		Namespace:          firstNonEmpty(targetNamespace, obj.GetNamespace()),
+		RepoURL:            repoURL,
+		Chart:              chartPath,
+		ChartVersion:       firstNonEmpty(chartVersion, revision),
+		ChartPath:          strings.TrimPrefix(chartPath, "./"),
+		SourceRefKind:      sourceRef["kind"],
+		SourceRefName:      sourceRef["name"],
+		SourceRefNamespace: sourceNamespace,
+		ValuesFrom:         fluxValuesFrom(obj.Object),
+		HasInlineValues:    hasInlineValues,
 	}
+}
+
+func (r *Resolver) sourceForFluxManagedObject(ctx context.Context, namespace, name, kind string) (WorkloadSource, bool) {
+	for _, gvr := range []schema.GroupVersionResource{
+		{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"},
+		{Group: "kustomize.toolkit.fluxcd.io", Version: "v1beta2", Resource: "kustomizations"},
+	} {
+		items, err := r.dynamicClient.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			continue
+		}
+		for _, item := range items.Items {
+			if !fluxInventoryContains(item.Object, namespace, name, kind) {
+				continue
+			}
+			src := r.sourceFromFluxKustomization(ctx, item)
+			if src.RepoURL == "" {
+				continue
+			}
+			return src, true
+		}
+		break
+	}
+	return WorkloadSource{}, false
 }
 
 func (r *Resolver) resolveFluxSourceRef(ctx context.Context, namespace, kind, name string) (string, string) {
@@ -387,6 +512,7 @@ func sourceFromArgoMap(source map[string]interface{}) WorkloadSource {
 	pathValue, _ := source["path"].(string)
 	targetRevision, _ := source["targetRevision"].(string)
 	chart, _ := source["chart"].(string)
+	helm := helmSourceFromArgoMap(source)
 	manifestType := ManifestUnknown
 	if chart != "" {
 		manifestType = ManifestHelm
@@ -403,7 +529,43 @@ func sourceFromArgoMap(source map[string]interface{}) WorkloadSource {
 		Path:           strings.TrimPrefix(pathValue, "./"),
 		TargetRevision: targetRevision,
 		ManifestType:   manifestType,
+		Helm:           helm,
 	}
+}
+
+func helmSourceFromArgoMap(source map[string]interface{}) HelmSource {
+	repoURL, _ := source["repoURL"].(string)
+	pathValue, _ := source["path"].(string)
+	targetRevision, _ := source["targetRevision"].(string)
+	chart, _ := source["chart"].(string)
+	helm := HelmSource{
+		RepoURL:      repoURL,
+		Chart:        chart,
+		ChartVersion: targetRevision,
+	}
+	if pathValue != "" && chart == "" {
+		helm.ChartPath = strings.TrimPrefix(pathValue, "./")
+	}
+	rawHelm, _ := source["helm"].(map[string]interface{})
+	if rawHelm == nil {
+		return helm
+	}
+	if releaseName, _ := rawHelm["releaseName"].(string); releaseName != "" {
+		helm.ReleaseName = releaseName
+	}
+	helm.ValueFiles = stringSlice(rawHelm["valueFiles"])
+	helm.Parameters = namedValueMap(rawHelm["parameters"])
+	helm.FileParameters = namedValueMap(rawHelm["fileParameters"])
+	if values, _ := rawHelm["values"].(string); strings.TrimSpace(values) != "" {
+		helm.HasInlineValues = true
+	}
+	if _, ok := rawHelm["valuesObject"].(map[string]interface{}); ok {
+		helm.HasValuesObject = true
+	}
+	if _, ok := rawHelm["valuesObject"]; ok {
+		helm.HasValuesObject = true
+	}
+	return helm
 }
 
 func fluxInventoryContainsAny(obj map[string]interface{}, refs []workloadRef) bool {
@@ -432,6 +594,77 @@ func fluxInventoryContains(obj map[string]interface{}, namespace, name, kind str
 		}
 	}
 	return false
+}
+
+func fluxValuesFrom(obj map[string]interface{}) []string {
+	items, ok, _ := unstructured.NestedSlice(obj, "spec", "valuesFrom")
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		kind, _ := entry["kind"].(string)
+		name, _ := entry["name"].(string)
+		valuesKey, _ := entry["valuesKey"].(string)
+		targetPath, _ := entry["targetPath"].(string)
+		ref := strings.Join(nonEmptyStrings(kind, name), "/")
+		var details []string
+		if valuesKey != "" {
+			details = append(details, "key="+valuesKey)
+		}
+		if targetPath != "" {
+			details = append(details, "targetPath="+targetPath)
+		}
+		if len(details) > 0 {
+			ref += "(" + strings.Join(details, ",") + ")"
+		}
+		if ref != "" {
+			values = append(values, ref)
+		}
+	}
+	return values
+}
+
+func stringSlice(raw interface{}) []string {
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		value, ok := item.(string)
+		if ok && strings.TrimSpace(value) != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func namedValueMap(raw interface{}) map[string]string {
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	values := map[string]string{}
+	for _, item := range items {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := entry["name"].(string)
+		value, _ := entry["value"].(string)
+		if name != "" {
+			values[name] = value
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }
 
 func inferManifestType(current ManifestType, pathValue, repoURL string) ManifestType {
@@ -489,7 +722,7 @@ func dedupeSources(sources []WorkloadSource) []WorkloadSource {
 	seen := map[string]bool{}
 	var deduped []WorkloadSource
 	for _, source := range sources {
-		key := strings.Join([]string{string(source.Controller), source.RepoURL, source.TargetRevision, source.Path, string(source.ManifestType)}, "|")
+		key := strings.Join([]string{string(source.Controller), source.RepoURL, source.TargetRevision, source.Path, string(source.ManifestType), source.Helm.Chart, source.Helm.ChartVersion, strings.Join(source.Helm.ValueFiles, ",")}, "|")
 		if seen[key] {
 			continue
 		}
@@ -523,4 +756,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func nonEmptyStrings(values ...string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
 }

@@ -1200,10 +1200,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 
 			if len(targetFields) > 0 && isRemediableManifest(cleanPath) {
-				containerName := pod.Name
-				if len(pod.Spec.Containers) > 0 {
-					containerName = pod.Spec.Containers[0].Name
-				}
+				containerName := targetContainerName(pod, failingContainerNameForPod(pod))
 				snippet, err := ai.ExtractSnippet(contentStr, containerName, targetFields)
 				if err == nil {
 					slog.Info("Extracted targeted failure context", "file", cleanPath, "fields", targetFields)
@@ -1279,7 +1276,8 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 				return
 			}
 			previousContent = append([]byte(nil), origBytes...)
-			normalized, changed, err := applyRawManifestPatch(string(origBytes), content, repoInfo.Source, diagnosis, pod)
+			failingContainerName := failingContainerNameForPod(pod)
+			normalized, changed, err := applyRawManifestPatch(string(origBytes), content, repoInfo.Source, diagnosis, pod, identity, failingContainerName)
 			if err != nil {
 				slog.Error("Failed to normalize raw manifest patch; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", key, "file", filePath, "error", err)
 				notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(key, err.Error()))
@@ -1291,10 +1289,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 			// Check if this looks like a resources snippet
 			if isSurgicalContainerSnippet(content) {
-				containerName := pod.Name
-				if len(pod.Spec.Containers) > 0 {
-					containerName = pod.Spec.Containers[0].Name
-				}
+				containerName := targetContainerName(pod, failingContainerNameForPod(pod))
 				merged, err := ai.SurgicalUpdate(string(origBytes), containerName, content)
 				if err == nil {
 					slog.Info("Surgically applied targeted resource update", "file", filePath)
@@ -1326,7 +1321,9 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	// Validate patches
 	for repoKey, changes := range patchesByRepo {
+		source := gitops.WorkloadSource{}
 		if repoInfo, ok := repoMap[repoKey]; ok {
+			source = repoInfo.Source
 			if err := validateManifestAwarePatchSet(repoInfo.Source, changes); err != nil {
 				telemetry.IncValidation("manifest-aware", "failed")
 				slog.Error("Manifest-aware patch validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
@@ -1361,12 +1358,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 		}
 		for _, change := range changes {
-			var vResult validation.ValidationResult
-			if strings.Contains(change.FilePath, "values.yaml") {
-				vResult = validation.ValidateYAML(change.NewContent)
-			} else {
-				vResult = validation.ValidateManifest(change.NewContent)
-			}
+			vResult := validateRemediationFileChange(source, change)
 
 			if !vResult.Valid {
 				telemetry.IncValidation("file", "failed")
@@ -1505,6 +1497,28 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	if len(createdUrls) > 0 {
 		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(pod.Namespace, pod.Name, createdUrls))
+	}
+}
+
+func validateRemediationFileChange(source gitops.WorkloadSource, change vcs.FileChange) validation.ValidationResult {
+	if change.Delete {
+		return validation.ValidationResult{Valid: true, Skipped: true, Output: "delete validation skipped"}
+	}
+	lowerPath := strings.ToLower(change.FilePath)
+	base := path.Base(lowerPath)
+	switch source.ManifestType {
+	case gitops.ManifestHelm:
+		if strings.Contains(lowerPath, "/templates/") {
+			return validation.ValidationResult{Valid: true, Skipped: true, Output: "helm template file validation deferred to render sandbox"}
+		}
+		return validation.ValidateYAML(change.NewContent)
+	case gitops.ManifestFluxHelmRelease:
+		return validation.ValidateYAML(change.NewContent)
+	default:
+		if base == "values.yaml" || base == "values.yml" {
+			return validation.ValidateYAML(change.NewContent)
+		}
+		return validation.ValidateManifest(change.NewContent)
 	}
 }
 

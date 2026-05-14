@@ -87,6 +87,125 @@ func TestResolveAnnotationFallback(t *testing.T) {
 	}
 }
 
+func TestResolveArgoCDHelmSourceMetadata(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "nginx-abc", Namespace: "prod", Labels: map[string]string{"app.kubernetes.io/instance": "edge"}}}
+	app := appWithSource("edge", map[string]interface{}{
+		"repoURL":        "https://charts.bitnami.com/bitnami",
+		"chart":          "nginx",
+		"targetRevision": "15.4.2",
+		"helm": map[string]interface{}{
+			"releaseName": "edge",
+			"valueFiles":  []interface{}{"values-prod.yaml", "values-us-east-1.yaml"},
+			"parameters": []interface{}{
+				map[string]interface{}{"name": "image.tag", "value": "1.25.3"},
+			},
+			"values": "resources:\n  limits:\n    memory: 256Mi\n",
+		},
+	}, map[string]interface{}{
+		"kind":      "Pod",
+		"name":      "nginx-abc",
+		"namespace": "prod",
+	})
+	resolver := NewResolver(fake.NewSimpleClientset(pod), dynamicClient(app), ResolverConfig{ArgoCDEnabled: true, ArgoCDNamespace: "argocd"})
+
+	got, err := resolver.ResolvePod(context.Background(), pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 source, got %d", len(got))
+	}
+	src := got[0]
+	if src.ManifestType != ManifestHelm || src.Helm.Chart != "nginx" || src.Helm.ChartVersion != "15.4.2" {
+		t.Fatalf("expected Helm chart metadata, got %+v", src)
+	}
+	if src.Helm.ReleaseName != "edge" || len(src.Helm.ValueFiles) != 2 || src.Helm.Parameters["image.tag"] != "1.25.3" || !src.Helm.HasInlineValues {
+		t.Fatalf("expected Helm values metadata, got %+v", src.Helm)
+	}
+}
+
+func TestResolveFluxHelmReleaseMetadata(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "api-abc",
+		Namespace: "prod",
+		Labels:    map[string]string{"helm.toolkit.fluxcd.io/name": "api"},
+	}}
+	hr := fluxHelmRelease("api", "prod", map[string]interface{}{
+		"releaseName":     "api-prod",
+		"targetNamespace": "prod",
+		"chart": map[string]interface{}{"spec": map[string]interface{}{
+			"chart":   "podinfo",
+			"version": "6.6.2",
+			"sourceRef": map[string]interface{}{
+				"kind":      "HelmRepository",
+				"name":      "podinfo",
+				"namespace": "flux-system",
+			},
+		}},
+		"valuesFrom": []interface{}{
+			map[string]interface{}{"kind": "ConfigMap", "name": "api-values", "valuesKey": "values.yaml"},
+		},
+		"values": map[string]interface{}{"replicaCount": int64(2)},
+	})
+	repo := fluxHelmRepository("podinfo", "flux-system", "https://stefanprodan.github.io/podinfo")
+	resolver := NewResolver(fake.NewSimpleClientset(pod), dynamicClient(hr, repo), ResolverConfig{})
+
+	got, err := resolver.ResolvePod(context.Background(), pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 source, got %d", len(got))
+	}
+	src := got[0]
+	if src.ManifestType != ManifestFluxHelmRelease || src.Helm.Chart != "podinfo" || src.Helm.ChartVersion != "6.6.2" {
+		t.Fatalf("expected Flux HelmRelease chart metadata, got %+v", src)
+	}
+	if src.Helm.ReleaseName != "api-prod" || src.Helm.SourceRefKind != "HelmRepository" || len(src.Helm.ValuesFrom) != 1 || !src.Helm.HasInlineValues {
+		t.Fatalf("expected Flux Helm values metadata, got %+v", src.Helm)
+	}
+}
+
+func TestResolveFluxHelmReleasePrefersFleetRepoSource(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "api-abc",
+		Namespace: "prod",
+		Labels:    map[string]string{"helm.toolkit.fluxcd.io/name": "api"},
+	}}
+	hr := fluxHelmRelease("api", "prod", map[string]interface{}{
+		"chart": map[string]interface{}{"spec": map[string]interface{}{
+			"chart":   "podinfo",
+			"version": "6.6.2",
+			"sourceRef": map[string]interface{}{
+				"kind":      "HelmRepository",
+				"name":      "podinfo",
+				"namespace": "flux-system",
+			},
+		}},
+	})
+	chartRepo := fluxHelmRepository("podinfo", "flux-system", "https://stefanprodan.github.io/podinfo")
+	fleetRepo := fluxGitRepository("fleet", "flux-system", "https://github.com/acme/fleet.git", "main")
+	kustomization := fluxKustomization("apps-prod", "flux-system", "fleet", "./clusters/prod/us-east-1", []interface{}{
+		map[string]interface{}{"id": "prod_prod_api_helm.toolkit.fluxcd.io_HelmRelease"},
+	})
+	resolver := NewResolver(fake.NewSimpleClientset(pod), dynamicClient(hr, chartRepo, fleetRepo, kustomization), ResolverConfig{})
+
+	got, err := resolver.ResolvePod(context.Background(), pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 source, got %d: %+v", len(got), got)
+	}
+	src := got[0]
+	if src.RepoURL != "https://github.com/acme/fleet.git" || src.Path != "clusters/prod/us-east-1" {
+		t.Fatalf("expected fleet Git source for PR target, got %+v", src)
+	}
+	if src.ManifestType != ManifestFluxHelmRelease || src.Helm.RepoURL != "https://stefanprodan.github.io/podinfo" || src.Helm.Chart != "podinfo" {
+		t.Fatalf("expected Helm chart metadata preserved on fleet source, got %+v", src)
+	}
+}
+
 func TestDetectManifestTypeFromFiles(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -122,6 +241,14 @@ func dynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 }
 
 func app(name, repoURL, path, revision string, resource map[string]interface{}) *unstructured.Unstructured {
+	return appWithSource(name, map[string]interface{}{
+		"repoURL":        repoURL,
+		"path":           path,
+		"targetRevision": revision,
+	}, resource)
+}
+
+func appWithSource(name string, source map[string]interface{}, resource map[string]interface{}) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Application",
@@ -130,17 +257,79 @@ func app(name, repoURL, path, revision string, resource map[string]interface{}) 
 			"namespace": "argocd",
 		},
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"repoURL":        repoURL,
-				"path":           path,
-				"targetRevision": revision,
-			},
+			"source": source,
 			"destination": map[string]interface{}{
 				"namespace": "prod",
 			},
 		},
 		"status": map[string]interface{}{
 			"resources": []interface{}{resource},
+		},
+	}}
+}
+
+func fluxHelmRelease(name, namespace string, spec map[string]interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "helm.toolkit.fluxcd.io/v2",
+		"kind":       "HelmRelease",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}}
+}
+
+func fluxHelmRepository(name, namespace, url string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "source.toolkit.fluxcd.io/v1",
+		"kind":       "HelmRepository",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"url": url,
+		},
+	}}
+}
+
+func fluxGitRepository(name, namespace, url, branch string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "source.toolkit.fluxcd.io/v1",
+		"kind":       "GitRepository",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"url": url,
+			"ref": map[string]interface{}{
+				"branch": branch,
+			},
+		},
+	}}
+}
+
+func fluxKustomization(name, namespace, sourceName, path string, inventory []interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+		"kind":       "Kustomization",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"path": path,
+			"sourceRef": map[string]interface{}{
+				"kind": "GitRepository",
+				"name": sourceName,
+			},
+		},
+		"status": map[string]interface{}{
+			"inventory": map[string]interface{}{
+				"entries": inventory,
+			},
 		},
 	}}
 }

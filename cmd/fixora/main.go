@@ -19,6 +19,7 @@ import (
 
 	"fixora/pkg/config"
 	"fixora/pkg/controller"
+	"fixora/pkg/db"
 	"fixora/pkg/server"
 )
 
@@ -57,6 +58,11 @@ func main() {
 
 	cfg := config.Load()
 	slog.Info("Starting Fixora", "mode", cfg.Mode, "log_level", os.Getenv("LOG_LEVEL"))
+
+	if err := db.Connect(context.Background()); err != nil {
+		slog.Error("Failed to initialize database", "error", err)
+	}
+	defer db.Close()
 
 	var k8sConfig *rest.Config
 	var err error

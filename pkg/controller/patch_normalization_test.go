@@ -66,7 +66,7 @@ spec:
     - "1"
 `
 
-	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod)
+	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Pod", Name: "oom-test"}, "")
 	if err != nil {
 		t.Fatalf("apply raw manifest patch: %v", err)
 	}
@@ -137,7 +137,7 @@ spec:
     image: alexeiled/stress-ng
 `
 
-	_, _, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod)
+	_, _, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Pod", Name: "oom-test-5"}, "")
 	if err == nil {
 		t.Fatal("expected raw Pod manifest identity mismatch to be rejected")
 	}
@@ -148,9 +148,9 @@ spec:
 
 func TestApplyRawManifestPatchSkipsKustomize(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "oom-test-2", Namespace: "default"}}
-	content := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: oom-test\n"
+	content := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: oom-test-2\n"
 
-	got, changed, err := applyRawManifestPatch(content, content, gitops.WorkloadSource{ManifestType: gitops.ManifestKustomize}, Diagnosis{PatchStrategy: PatchImage}, pod)
+	got, changed, err := applyRawManifestPatch(content, content, gitops.WorkloadSource{ManifestType: gitops.ManifestKustomize}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Pod", Name: "oom-test-2"}, "")
 	if err != nil {
 		t.Fatalf("apply kustomize patch: %v", err)
 	}
@@ -159,5 +159,201 @@ func TestApplyRawManifestPatchSkipsKustomize(t *testing.T) {
 	}
 	if got != content {
 		t.Fatalf("expected original content to be preserved, got:\n%s", got)
+	}
+}
+
+func TestApplyRawManifestPatchUpdatesDeploymentTemplate(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
+	pod.Spec.Containers = []v1.Container{{Name: "api"}}
+	original := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v1
+        args: ["serve"]
+`
+	generated := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v2
+        args: ["serve", "--log-level=info"]
+`
+
+	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchEnvOrVolumeRef}, pod, workloadIdentity{Kind: "Deployment", Name: "api"}, "")
+	if err != nil {
+		t.Fatalf("apply deployment patch: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected deployment template patch to be applied")
+	}
+	if !strings.Contains(got, `args: ["serve", "--log-level=info"]`) && !strings.Contains(got, `- --log-level=info`) {
+		t.Fatalf("expected deployment pod template args to be updated, got:\n%s", got)
+	}
+}
+
+func TestApplyRawManifestPatchRejectsBarePodForOwnedWorkload(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
+	pod.Spec.Containers = []v1.Container{{Name: "api"}}
+	original := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api-7d9f-abc
+spec:
+  containers:
+  - name: api
+    image: ghcr.io/acme/api:v1
+`
+	generated := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api-7d9f-abc
+spec:
+  containers:
+  - name: api
+    image: ghcr.io/acme/api:v2
+`
+
+	_, _, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Deployment", Name: "api"}, "")
+	if err == nil {
+		t.Fatal("expected bare Pod source to be rejected for controller-owned workload")
+	}
+	if !strings.Contains(err.Error(), "controller-owned workload") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestApplyRawManifestPatchTargetsSecondaryContainer(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
+	pod.Spec.Containers = []v1.Container{{Name: "api"}, {Name: "sidecar"}}
+	original := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v1
+      - name: sidecar
+        image: ghcr.io/acme/sidecar:v1
+`
+	generated := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v2
+      - name: sidecar
+        image: ghcr.io/acme/sidecar:v2
+`
+
+	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Deployment", Name: "api"}, "sidecar")
+	if err != nil {
+		t.Fatalf("apply sidecar patch: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected sidecar image patch to be applied")
+	}
+	if !strings.Contains(got, "image: ghcr.io/acme/api:v1") {
+		t.Fatalf("expected primary container image to remain unchanged, got:\n%s", got)
+	}
+	if !strings.Contains(got, "image: ghcr.io/acme/sidecar:v2") {
+		t.Fatalf("expected sidecar image to be updated, got:\n%s", got)
+	}
+}
+
+func TestApplyRawManifestPatchTargetsInitContainer(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
+	pod.Spec.InitContainers = []v1.Container{{Name: "migrate"}}
+	pod.Spec.Containers = []v1.Container{{Name: "api"}}
+	original := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: migrate
+        image: ghcr.io/acme/migrate:v1
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v1
+`
+	generated := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: migrate
+        image: ghcr.io/acme/migrate:v2
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v2
+`
+
+	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Deployment", Name: "api"}, "migrate")
+	if err != nil {
+		t.Fatalf("apply initContainer patch: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected initContainer patch to be applied")
+	}
+	if !strings.Contains(got, "image: ghcr.io/acme/migrate:v2") {
+		t.Fatalf("expected initContainer image to be updated, got:\n%s", got)
+	}
+	if !strings.Contains(got, "image: ghcr.io/acme/api:v1") {
+		t.Fatalf("expected app container image to remain unchanged, got:\n%s", got)
+	}
+}
+
+func TestApplyRawManifestPatchRejectsKustomizePatchIdentityMismatch(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
+	original := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v1
+`
+
+	_, _, err := applyRawManifestPatch(original, original, gitops.WorkloadSource{ManifestType: gitops.ManifestKustomize}, Diagnosis{PatchStrategy: PatchImage}, pod, workloadIdentity{Kind: "Deployment", Name: "api"}, "api")
+	if err == nil {
+		t.Fatal("expected Kustomize patch identity mismatch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
