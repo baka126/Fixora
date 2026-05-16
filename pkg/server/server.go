@@ -49,6 +49,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/auth/setup", s.handleSetup)
 	mux.HandleFunc("/api/v1/auth/users", s.handleCreateUser)
 	mux.HandleFunc("/api/v1/audit/investigations/", s.handleInvestigationDetail)
+	mux.HandleFunc("/api/v1/remediations/", s.handleRemediations)
 	mux.HandleFunc("/api/v1/ws", s.handleWebSocket)
 
 	go s.hub.Run()

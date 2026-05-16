@@ -9,11 +9,13 @@ import {
   GitPullRequestArrow,
   LineChart,
   Settings,
+  Edit2,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { useStore } from '../store/useStore';
 import { AuditDetailPanel } from '../components/AuditDetailPanel';
+import { DiffEditorPanel } from '../components/DiffEditorPanel';
 import type {
   DashboardAuditEvent,
   DashboardGitOpsSource,
@@ -57,6 +59,7 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
   const meta = pageMeta[kind];
   const Icon = meta.icon;
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
+  const [editingRemediationId, setEditingRemediationId] = useState<number | null>(null);
 
   return (
     <div className="p-4">
@@ -72,7 +75,7 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
             </div>
           </div>
         </header>
-        {kind === 'remediations' && <Remediations rows={dashboard?.remediations || []} />}
+        {kind === 'remediations' && <Remediations rows={dashboard?.remediations || []} onEdit={setEditingRemediationId} />}
         {kind === 'gitops' && <GitOpsSources rows={dashboard?.gitopsSources || []} />}
         {kind === 'predictions' && <Predictions rows={dashboard?.predictions || []} />}
         {kind === 'audit' && <AuditEvents rows={dashboard?.auditEvents || []} onSelect={setSelectedAuditId} />}
@@ -85,25 +88,45 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
           onClose={() => setSelectedAuditId(null)}
         />
       )}
+
+      {editingRemediationId && (
+        <DiffEditorPanel
+          remediationId={editingRemediationId}
+          onClose={() => setEditingRemediationId(null)}
+        />
+      )}
     </div>
   );
 };
 
-const Remediations = ({ rows }: { rows: DashboardRemediation[] }) => {
+const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: (id: number) => void }) => {
   if (!rows.length) return <Empty title="No remediations recorded yet" message="Generated patches, pending approvals, PR links, and validation outcomes will appear here." />;
   return (
-    <Table headers={['Status', 'Workload', 'Repository', 'Branch', 'Strategy', 'Age', 'PR']}>
-      {rows.map((row) => (
-        <tr key={row.id} className="border-t border-[#e5e7eb]">
-          <td className="px-4 py-3"><Status value={row.status} /></td>
-          <td className="px-4 py-3 font-medium">{row.workload.kind}/{row.workload.name}</td>
-          <td className="px-4 py-3">{row.repository || 'Not mapped'}</td>
-          <td className="px-4 py-3">{row.headBranch || row.baseBranch || 'Pending'}</td>
-          <td className="px-4 py-3">{row.strategy || 'Pending'}</td>
-          <td className="px-4 py-3">{row.age}</td>
-          <td className="px-4 py-3">{row.prUrl ? <External href={row.prUrl} label="Open" /> : 'Not opened'}</td>
-        </tr>
-      ))}
+    <Table headers={['Status', 'Workload', 'Repository', 'Branch', 'Strategy', 'PR', 'Actions']}>
+      {rows.map((row) => {
+        const canEdit = row.prUrl && row.status !== 'merged' && row.status !== 'closed' && row.status !== 'failed';
+        return (
+          <tr key={row.id} className="border-t border-[#e5e7eb]">
+            <td className="px-4 py-3"><Status value={row.status} /></td>
+            <td className="px-4 py-3 font-medium">{row.workload.kind}/{row.workload.name}</td>
+            <td className="px-4 py-3">{row.repository || 'Not mapped'}</td>
+            <td className="px-4 py-3">{row.headBranch || row.baseBranch || 'Pending'}</td>
+            <td className="px-4 py-3">{row.strategy || 'Pending'}</td>
+            <td className="px-4 py-3">{row.prUrl ? <External href={row.prUrl} label="Open" /> : 'Not opened'}</td>
+            <td className="px-4 py-3">
+              {canEdit && (
+                <button
+                  onClick={() => onEdit(row.id)}
+                  className="flex items-center gap-1.5 rounded text-[12px] font-medium text-[#2563eb] hover:bg-[#eff6ff] px-2 py-1 transition-colors"
+                >
+                  <Edit2 className="h-3.5 w-3.5" />
+                  Edit
+                </button>
+              )}
+            </td>
+          </tr>
+        );
+      })}
     </Table>
   );
 };

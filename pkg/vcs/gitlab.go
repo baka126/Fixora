@@ -167,3 +167,32 @@ func (g *GitLabProvider) GetPullRequestStatus(ctx context.Context, repoOwner, re
 	}
 	return status, nil
 }
+
+func (g *GitLabProvider) AppendCommit(ctx context.Context, repoOwner, repoName, branch string, files []FileChange, message string) error {
+	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
+	
+	var actions []*gitlab.CommitActionOptions
+	for _, file := range files {
+		action := gitlab.FileUpdate
+		if file.Delete {
+			action = gitlab.FileDelete
+		} else if file.Create {
+			action = gitlab.FileCreate
+		}
+		commitAction := &gitlab.CommitActionOptions{
+			Action:   gitlab.Ptr(action),
+			FilePath: gitlab.String(file.FilePath),
+		}
+		if !file.Delete {
+			commitAction.Content = gitlab.String(string(file.NewContent))
+		}
+		actions = append(actions, commitAction)
+	}
+
+	_, _, err := g.client.Commits.CreateCommit(projectID, &gitlab.CreateCommitOptions{
+		Branch:        gitlab.String(branch),
+		CommitMessage: gitlab.String(message),
+		Actions:       actions,
+	})
+	return err
+}

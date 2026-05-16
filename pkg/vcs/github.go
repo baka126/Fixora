@@ -210,3 +210,57 @@ func githubPRHeadMatches(pr *github.PullRequest, headBranch string) bool {
 		strings.HasPrefix(pr.Head.GetLabel(), headBranch) ||
 		strings.HasPrefix(pr.Head.GetRef(), headBranch)
 }
+
+func (g *GitHubProvider) AppendCommit(ctx context.Context, repoOwner, repoName, branch string, files []FileChange, message string) error {
+	refName := "refs/heads/" + branch
+	ref, _, err := g.client.Git.GetRef(ctx, repoOwner, repoName, refName)
+	if err != nil {
+		return err
+	}
+
+	baseCommit, _, err := g.client.Git.GetCommit(ctx, repoOwner, repoName, ref.Object.GetSHA())
+	if err != nil {
+		return err
+	}
+
+	var entries []*github.TreeEntry
+	for _, file := range files {
+		if file.Delete {
+			entries = append(entries, &github.TreeEntry{
+				Path: github.String(file.FilePath),
+				SHA:  github.String(""),
+			})
+			continue
+		}
+		entries = append(entries, &github.TreeEntry{
+			Path:    github.String(file.FilePath),
+			Mode:    github.String("100644"),
+			Type:    github.String("blob"),
+			Content: github.String(string(file.NewContent)),
+		})
+	}
+
+	tree, _, err := g.client.Git.CreateTree(ctx, repoOwner, repoName, baseCommit.Tree.GetSHA(), entries)
+	if err != nil {
+		return err
+	}
+
+	commit := &github.Commit{
+		Message: github.String(message),
+		Tree:    tree,
+		Parents: []*github.Commit{baseCommit},
+	}
+	newCommit, _, err := g.client.Git.CreateCommit(ctx, repoOwner, repoName, commit)
+	if err != nil {
+		return err
+	}
+
+	newRef := &github.Reference{
+		Ref: github.String(refName),
+		Object: &github.GitObject{
+			SHA: newCommit.SHA,
+		},
+	}
+	_, _, err = g.client.Git.UpdateRef(ctx, repoOwner, repoName, newRef, false)
+	return err
+}

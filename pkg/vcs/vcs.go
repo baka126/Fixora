@@ -32,6 +32,7 @@ type PullRequestStatus struct {
 
 type Provider interface {
 	CreatePullRequest(ctx context.Context, opts PullRequestOptions) (string, error) // Returns PR URL
+	AppendCommit(ctx context.Context, repoOwner, repoName, branch string, files []FileChange, message string) error
 	GetFileContent(ctx context.Context, repoOwner, repoName, path, ref string) ([]byte, error)
 	ListFiles(ctx context.Context, repoOwner, repoName, path, ref string) (map[string][]byte, error)
 	PullRequestExists(ctx context.Context, repoOwner, repoName, headBranch string) (bool, string, error) // Returns true and URL if exists
