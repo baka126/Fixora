@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,9 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"fixora/pkg/alertmanager"
 	"fixora/pkg/finops"
 	"fixora/pkg/security"
 
+	"gopkg.in/yaml.v3"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -226,6 +230,29 @@ type DashboardNodeCost struct {
 	MonthlyCost   float64 `json:"monthlyCost"`
 	PricingSource string  `json:"pricingSource"`
 	Status        string  `json:"status"`
+}
+
+type DashboardActiveAlert struct {
+	ID           string                `json:"id"`
+	AlertName    string                `json:"alertName"`
+	Severity     string                `json:"severity"`
+	Namespace    string                `json:"namespace"`
+	ResourceKind string                `json:"resourceKind"`
+	ResourceName string                `json:"resourceName"`
+	PodName      string                `json:"podName,omitempty"`
+	Status       string                `json:"status"`
+	StartsAt     time.Time             `json:"startsAt"`
+	Age          string                `json:"age"`
+	Summary      string                `json:"summary,omitempty"`
+	Used         bool                  `json:"used"`
+	Decision     string                `json:"decision"`
+	Reason       string                `json:"reason"`
+	Labels       []DashboardAlertLabel `json:"labels,omitempty"`
+}
+
+type DashboardAlertLabel struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 type dashboardInvestigationRow struct {
@@ -444,6 +471,85 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.NodeCosts = nodeCosts
 
 	return snapshot
+}
+
+func (c *Controller) ActiveAlertDecisions(ctx context.Context) ([]DashboardActiveAlert, error) {
+	if c.amClient == nil || !c.config.AlertmanagerEnabled || c.config.AlertmanagerURL == "" {
+		return []DashboardActiveAlert{}, nil
+	}
+	alerts, err := c.amClient.GetAlerts()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DashboardActiveAlert, 0, len(alerts))
+	for _, alert := range alerts {
+		out = append(out, c.dashboardActiveAlertDecision(ctx, alert))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].StartsAt.After(out[j].StartsAt)
+	})
+	return out, nil
+}
+
+func (c *Controller) dashboardActiveAlertDecision(ctx context.Context, alert alertmanager.Alert) DashboardActiveAlert {
+	ns := strings.TrimSpace(alert.Labels["namespace"])
+	pod := strings.TrimSpace(alert.Labels["pod"])
+	alertName := firstNonEmpty(alert.Labels["alertname"], "Alert")
+	resourceKind, resourceName := alertResourceIdentity(alert)
+	if resourceKind == "" && pod != "" {
+		resourceKind, resourceName = "Pod", pod
+	}
+	status := firstNonEmpty(alert.Status.State, "unknown")
+	startsAt := alert.StartsAt
+	if startsAt.IsZero() {
+		startsAt = time.Now()
+	}
+	decision := DashboardActiveAlert{
+		ID:           activeAlertID(alert),
+		AlertName:    security.ScrubPII(alertName),
+		Severity:     firstNonEmpty(alert.Labels["severity"], alert.Labels["priority"], "unknown"),
+		Namespace:    security.ScrubPII(ns),
+		ResourceKind: security.ScrubPII(firstNonEmpty(resourceKind, "Unknown")),
+		ResourceName: security.ScrubPII(firstNonEmpty(resourceName, "unmapped")),
+		PodName:      security.ScrubPII(pod),
+		Status:       status,
+		StartsAt:     startsAt,
+		Age:          humanAge(startsAt),
+		Summary:      alertSummary(alert),
+		Labels:       selectedAlertLabels(alert.Labels),
+	}
+
+	switch {
+	case status != "firing":
+		decision.Decision = "skipped"
+		decision.Reason = fmt.Sprintf("Alert status is %q, not firing.", status)
+	case len(alert.Status.SilencedBy) > 0:
+		decision.Decision = "skipped"
+		decision.Reason = "Alertmanager has silenced this alert."
+	case len(alert.Status.InhibitedBy) > 0:
+		decision.Decision = "skipped"
+		decision.Reason = "Alertmanager has inhibited this alert behind a higher-level alert."
+	case !c.matchesAlertFilters(alert):
+		decision.Decision = "skipped"
+		decision.Reason = "Alert labels do not match Fixora Alertmanager include/exclude filters."
+	case ns == "":
+		decision.Decision = "skipped"
+		decision.Reason = "Missing namespace label; Fixora cannot scope diagnostics safely."
+	case !c.isNamespaceScoped(ns):
+		decision.Decision = "skipped"
+		decision.Reason = "Namespace is outside Fixora's configured scope."
+	case pod == "":
+		decision.Decision = "skipped"
+		decision.Reason = "Missing pod label; current Alertmanager automation needs a pod to collect logs, events, and owner workload context."
+	case c.history != nil && c.history.IsAlertRecentlyProcessed(ctx, ns, pod, alertName, 30*time.Minute):
+		decision.Decision = "deduplicated"
+		decision.Reason = "Recently processed; Fixora suppresses repeat diagnostics for 30 minutes to avoid duplicate PRs."
+	default:
+		decision.Used = true
+		decision.Decision = "used"
+		decision.Reason = "Firing pod alert with namespace and pod labels; Fixora can run diagnostics and correlate the owner workload."
+	}
+	return decision
 }
 
 func dashboardMetadata() DashboardMetadata {
@@ -1252,6 +1358,99 @@ func dashboardPodKey(namespace, pod string) string {
 	return namespace + "/" + pod
 }
 
+func activeAlertID(alert alertmanager.Alert) string {
+	h := sha1.New()
+	for _, key := range sortedMapKeys(alert.Labels) {
+		fmt.Fprintf(h, "%s=%s\n", key, alert.Labels[key])
+	}
+	fmt.Fprintf(h, "startsAt=%s", alert.StartsAt.UTC().Format(time.RFC3339Nano))
+	return fmt.Sprintf("alert-%x", h.Sum(nil))[:18]
+}
+
+func alertResourceIdentity(alert alertmanager.Alert) (string, string) {
+	type candidate struct {
+		kind string
+		keys []string
+	}
+	for _, item := range []candidate{
+		{"Deployment", []string{"deployment", "deployment_name", "k8s_deployment"}},
+		{"StatefulSet", []string{"statefulset", "statefulset_name"}},
+		{"DaemonSet", []string{"daemonset", "daemonset_name"}},
+		{"Job", []string{"job", "job_name"}},
+		{"CronJob", []string{"cronjob", "cronjob_name"}},
+		{"ReplicaSet", []string{"replicaset", "replicaset_name"}},
+		{"Service", []string{"service", "service_name", "kubernetes_service"}},
+		{"Pod", []string{"pod", "pod_name", "kubernetes_pod_name"}},
+	} {
+		for _, key := range item.keys {
+			if value := strings.TrimSpace(alert.Labels[key]); value != "" {
+				return item.kind, value
+			}
+		}
+	}
+	kind := strings.TrimSpace(firstNonEmpty(alert.Labels["kind"], alert.Labels["resource_kind"]))
+	name := strings.TrimSpace(firstNonEmpty(alert.Labels["name"], alert.Labels["resource"], alert.Labels["resource_name"], alert.Labels["workload"]))
+	if kind != "" && name != "" {
+		return kind, name
+	}
+	return "", ""
+}
+
+func alertSummary(alert alertmanager.Alert) string {
+	for _, key := range []string{"summary", "description", "message"} {
+		if value := strings.TrimSpace(alert.Annotations[key]); value != "" {
+			return truncateDashboard(security.ScrubPII(value), 180)
+		}
+	}
+	return ""
+}
+
+func selectedAlertLabels(labels map[string]string) []DashboardAlertLabel {
+	allowed := map[string]bool{
+		"alertname":            true,
+		"severity":             true,
+		"priority":             true,
+		"namespace":            true,
+		"pod":                  true,
+		"container":            true,
+		"deployment":           true,
+		"statefulset":          true,
+		"daemonset":            true,
+		"job":                  true,
+		"service":              true,
+		"instance":             true,
+		"cluster":              true,
+		"prometheus":           true,
+		"resource":             true,
+		"resource_name":        true,
+		"resource_kind":        true,
+		"workload":             true,
+		"kubernetes_name":      true,
+		"kubernetes_pod":       true,
+		"kubernetes_node":      true,
+		"kubernetes_kind":      true,
+		"kubernetes_namespace": true,
+	}
+	keys := sortedMapKeys(labels)
+	out := make([]DashboardAlertLabel, 0, len(keys))
+	for _, key := range keys {
+		if !allowed[key] {
+			continue
+		}
+		out = append(out, DashboardAlertLabel{Key: key, Value: truncateDashboard(security.ScrubPII(labels[key]), 80)})
+	}
+	return out
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func contextValue(context, key string) string {
 	prefix := key + ":"
 	for _, line := range strings.Split(context, "\n") {
@@ -1317,38 +1516,118 @@ func humanAge(t time.Time) string {
 }
 
 func (c *Controller) dashboardEnvironment(ctx context.Context) string {
-	for _, key := range []string{"FIXORA_CLUSTER_NAME", "CLUSTER_NAME", "KUBERNETES_CLUSTER_NAME"} {
+	for _, key := range []string{
+		"FIXORA_CLUSTER_NAME",
+		"FIXORA_CLUSTER",
+		"CLUSTER_NAME",
+		"CLUSTER",
+		"KUBERNETES_CLUSTER_NAME",
+		"K8S_CLUSTER_NAME",
+		"EKS_CLUSTER_NAME",
+		"GKE_CLUSTER_NAME",
+		"AKS_CLUSTER_NAME",
+	} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}
 	}
 	if c.clientset != nil {
-		nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
-		if err == nil && len(nodes.Items) > 0 {
-			if name := clusterNameFromNodeLabels(nodes.Items[0].Labels); name != "" {
-				return name
+		nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 100})
+		if err == nil {
+			for _, node := range nodes.Items {
+				if name := clusterNameFromNodeLabels(node.Labels); name != "" {
+					return name
+				}
+			}
+		}
+		for _, ref := range []struct {
+			namespace string
+			name      string
+		}{
+			{"kube-public", "cluster-info"},
+			{"kube-system", "cluster-info"},
+		} {
+			cm, err := c.clientset.CoreV1().ConfigMaps(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
+			if err == nil {
+				if name := clusterNameFromClusterInfo(cm); name != "" {
+					return name
+				}
 			}
 		}
 	}
 	return "default-cluster"
 }
 
+func clusterNameFromClusterInfo(cm *v1.ConfigMap) string {
+	if cm == nil {
+		return ""
+	}
+	for _, key := range []string{"cluster-name", "clusterName", "name"} {
+		if value := strings.TrimSpace(cm.Data[key]); usableClusterName(value) {
+			return value
+		}
+	}
+	if kubeconfig := strings.TrimSpace(cm.Data["kubeconfig"]); kubeconfig != "" {
+		var parsed struct {
+			Clusters []struct {
+				Name string `yaml:"name"`
+			} `yaml:"clusters"`
+		}
+		if err := yaml.Unmarshal([]byte(kubeconfig), &parsed); err == nil {
+			for _, cluster := range parsed.Clusters {
+				if usableClusterName(cluster.Name) {
+					return strings.TrimSpace(cluster.Name)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func usableClusterName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	switch strings.ToLower(value) {
+	case "cluster", "default", "default-cluster", "kubernetes":
+		return false
+	default:
+		return true
+	}
+}
+
 func clusterNameFromNodeLabels(labels map[string]string) string {
 	for _, key := range []string{
+		"fixora.io/cluster-name",
+		"cluster-name",
+		"cluster",
 		"eks.amazonaws.com/cluster-name",
+		"alpha.eksctl.io/cluster-name",
+		"eksctl.io/cluster-name",
+		"eksctl.cluster.k8s.io/v1alpha1/cluster-name",
+		"kops.k8s.io/cluster",
 		"kubernetes.azure.com/cluster",
-		"cluster.x-k8s.io/cluster-name",
 		"topology.gke.io/cluster-name",
+		"cloud.google.com/gke-cluster",
+		"cluster.x-k8s.io/cluster-name",
+		"management.cattle.io/cluster-name",
 	} {
-		if value := strings.TrimSpace(labels[key]); value != "" {
+		if value := strings.TrimSpace(labels[key]); usableClusterName(value) {
 			return value
+		}
+	}
+	for key, value := range labels {
+		key = strings.ToLower(key)
+		if strings.Contains(key, "cluster") && strings.Contains(key, "name") && usableClusterName(value) {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
 }
 
 func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64, int, []DashboardNodeCost) {
-	if c.clientset == nil || c.pricingProvider == nil {
+	if c.clientset == nil {
 		return 0, 0, nil
 	}
 	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -1365,9 +1644,14 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64,
 			Vendor:       firstNonEmpty(vendor, "unknown"),
 			Region:       firstNonEmpty(region, "unknown"),
 			InstanceType: firstNonEmpty(instanceType, "unknown"),
-			Status:       "unpriced",
+			Status:       "pricing_unavailable",
 		}
-		if vendor != "" && region != "" && instanceType != "" {
+		switch {
+		case vendor == "" || region == "" || instanceType == "":
+			row.Status = "metadata_missing"
+		case c.pricingProvider == nil:
+			row.Status = "pricing_not_configured"
+		default:
 			if profile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType); err == nil && profile != nil {
 				row.MonthlyCost = ((profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)) * 730
 				row.PricingSource = profile.Name

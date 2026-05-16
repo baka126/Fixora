@@ -179,6 +179,29 @@ export interface DashboardNodeCost {
   status: string;
 }
 
+export interface DashboardAlertLabel {
+  key: string;
+  value: string;
+}
+
+export interface DashboardActiveAlert {
+  id: string;
+  alertName: string;
+  severity: string;
+  namespace: string;
+  resourceKind: string;
+  resourceName: string;
+  podName?: string;
+  status: string;
+  startsAt: string;
+  age: string;
+  summary?: string;
+  used: boolean;
+  decision: string;
+  reason: string;
+  labels?: DashboardAlertLabel[];
+}
+
 export interface DashboardAuditEvent {
   id: string;
   type: string;

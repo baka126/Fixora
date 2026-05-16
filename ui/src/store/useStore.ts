@@ -29,11 +29,17 @@ export const useStore = create<AppState>()(
       timeRange: 'Last 24h',
       setUser: (user) => set({ user }),
       setToken: (token) => set({ token }),
-      setDashboard: (dashboard) => set((state) => ({
-        dashboard,
-        selectedCluster: state.selectedCluster || dashboard?.environment || 'cluster',
-        timeRange: state.timeRange || dashboard?.timeRange || 'Last 24h',
-      })),
+      setDashboard: (dashboard) => set((state) => {
+        const environment = dashboard?.environment || '';
+        const selectedCluster = !state.selectedCluster || isGenericClusterName(state.selectedCluster)
+          ? environment || 'cluster'
+          : state.selectedCluster;
+        return {
+          dashboard,
+          selectedCluster,
+          timeRange: state.timeRange || dashboard?.timeRange || 'Last 24h',
+        };
+      }),
       setSelectedCluster: (selectedCluster) => set({ selectedCluster }),
       setSearchQuery: (searchQuery) => set({ searchQuery }),
       setTimeRange: (timeRange) => set({ timeRange }),
@@ -45,3 +51,8 @@ export const useStore = create<AppState>()(
     }
   )
 );
+
+const isGenericClusterName = (value: string) => {
+  const normalized = value.trim().toLowerCase();
+  return normalized === '' || normalized === 'cluster' || normalized === 'default' || normalized === 'default-cluster';
+};

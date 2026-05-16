@@ -39,6 +39,7 @@ ui:
   resources: {}
 
 logLevel: "INFO" # DEBUG, INFO, WARN, ERROR
+clusterName: "" # Optional display name used when Kubernetes/provider metadata cannot expose a stable cluster name.
 
 imagePullSecrets: []
 nameOverride: ""

@@ -99,7 +99,7 @@ export const Layout = () => {
 
   return (
     <div className="min-h-screen bg-[#f7f8fb] text-[#111827]">
-      <aside className="fixed inset-y-0 left-0 z-20 flex w-[202px] flex-col border-r border-[#e5e7eb] bg-white">
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-[202px] flex-col border-r border-[#e5e7eb] bg-white lg:flex">
         <div className="flex h-[76px] items-center gap-3 px-6">
           <div className="grid h-9 w-9 place-items-center rounded-lg bg-gradient-to-br from-[#ff7a1a] to-[#ef4444] text-white shadow-sm">
             <ShieldCheck className="h-5 w-5" />
@@ -147,8 +147,14 @@ export const Layout = () => {
         </div>
       </aside>
 
-      <div className="min-h-screen pl-[202px]">
-        <header className="sticky top-0 z-10 flex h-[76px] items-center gap-4 border-b border-[#e5e7eb] bg-white px-4">
+      <div className="min-h-screen lg:pl-[202px]">
+        <header className="sticky top-0 z-10 flex min-h-[76px] flex-wrap items-center gap-3 border-b border-[#e5e7eb] bg-white px-3 py-3 lg:flex-nowrap lg:gap-4 lg:px-4">
+          <div className="flex items-center gap-2 lg:hidden">
+            <div className="grid h-9 w-9 place-items-center rounded-lg bg-gradient-to-br from-[#ff7a1a] to-[#ef4444] text-white shadow-sm">
+              <ShieldCheck className="h-5 w-5" />
+            </div>
+            <strong className="text-[22px] leading-none text-[#111827]">Fixora</strong>
+          </div>
           <div className="relative">
           <button
             onClick={() => {
@@ -156,7 +162,7 @@ export const Layout = () => {
               setTimeOpen(false);
               setNotificationsOpen(false);
             }}
-            className="flex h-10 min-w-[156px] items-center justify-between rounded-md border border-[#e5e7eb] bg-white px-4 text-[13px] font-medium text-[#111827]"
+            className="flex h-10 min-w-[142px] items-center justify-between rounded-md border border-[#e5e7eb] bg-white px-3 text-[13px] font-medium text-[#111827] sm:min-w-[156px] sm:px-4"
           >
             <span className="flex items-center gap-2">
               <span className="h-3 w-3 rounded-full bg-[#15803d]" />
@@ -188,7 +194,7 @@ export const Layout = () => {
           )}
           </div>
 
-          <div className="flex h-10 flex-1 items-center gap-3 rounded-md border border-[#e5e7eb] bg-white px-3 text-[#6b7280]">
+          <div className="order-3 flex h-10 w-full flex-[1_0_100%] items-center gap-3 rounded-md border border-[#e5e7eb] bg-white px-3 text-[#6b7280] md:order-none md:w-auto md:flex-1">
             <Search className="h-4 w-4" />
             <input
               value={searchQuery}
@@ -201,7 +207,7 @@ export const Layout = () => {
                 Clear
               </button>
             )}
-            <kbd className="rounded border border-[#e5e7eb] px-1.5 py-0.5 text-[11px] text-[#6b7280]">⌘ K</kbd>
+            <kbd className="hidden rounded border border-[#e5e7eb] px-1.5 py-0.5 text-[11px] text-[#6b7280] sm:inline">⌘ K</kbd>
           </div>
 
           <div className="relative">
@@ -211,7 +217,7 @@ export const Layout = () => {
               setClusterOpen(false);
               setNotificationsOpen(false);
             }}
-            className="flex h-10 min-w-[130px] items-center justify-between rounded-md border border-[#e5e7eb] bg-white px-4 text-[13px] font-medium"
+            className="flex h-10 min-w-[118px] items-center justify-between rounded-md border border-[#e5e7eb] bg-white px-3 text-[13px] font-medium sm:min-w-[130px] sm:px-4"
           >
             <span className="flex items-center gap-2">
               <CalendarDays className="h-4 w-4 text-[#374151]" />
@@ -238,7 +244,7 @@ export const Layout = () => {
           )}
           </div>
 
-          <div className="hidden items-center gap-2 xl:flex">
+          <div className="hidden items-center gap-2 2xl:flex">
             {(dashboard?.integrations || []).map((integration) => {
               const Icon = integrationIcon(integration.name);
               const healthy = integration.status === 'ok';
@@ -254,7 +260,7 @@ export const Layout = () => {
             })}
           </div>
 
-          <div className="relative">
+          <div className="relative ml-auto lg:ml-0">
           <button
             onClick={() => {
               setNotificationsOpen((open) => !open);
@@ -310,6 +316,26 @@ export const Layout = () => {
             <LogOut className="h-4 w-4 text-[#6b7280]" />
           </button>
         </header>
+
+        <nav className="flex gap-2 overflow-x-auto border-b border-[#e5e7eb] bg-white px-3 py-2 lg:hidden">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              className={({ isActive }) =>
+                `flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-[13px] font-medium ${
+                  isActive
+                    ? 'bg-[#fde7e5] text-[#dc2626]'
+                    : 'text-[#1f2937] hover:bg-[#f3f4f6]'
+                }`
+              }
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
 
         <main className="min-w-0">
           <Outlet />

@@ -41,6 +41,7 @@ import {
 import { apiClient } from '../api/client';
 import { useStore } from '../store/useStore';
 import type {
+  DashboardActiveAlert,
   DashboardDependencyEdge,
   DashboardDependencyNode,
   DashboardEvidence,
@@ -70,6 +71,9 @@ export const Dashboard = () => {
   const [kindFilter, setKindFilter] = useState('all');
   const [highConfidenceOnly, setHighConfidenceOnly] = useState(false);
   const [incidentPage, setIncidentPage] = useState(1);
+  const [activeAlerts, setActiveAlerts] = useState<DashboardActiveAlert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertsError, setAlertsError] = useState('');
 
   const refreshDashboard = (showRefresh = true) => {
     if (showRefresh) setRefreshing(true);
@@ -110,6 +114,49 @@ export const Dashboard = () => {
     };
   }, [setDashboard]);
 
+  const refreshActiveAlerts = () => {
+    setAlertsLoading(true);
+    setAlertsError('');
+    apiClient
+      .get('/alerts/active')
+      .then(({ data }: { data: DashboardActiveAlert[] }) => {
+        setActiveAlerts(Array.isArray(data) ? data : []);
+      })
+      .catch((err) => {
+        if (err.response?.status === 503) {
+          setActiveAlerts([]);
+          setAlertsError('Alertmanager is not configured for active alert polling.');
+          return;
+        }
+        setAlertsError('Failed to load active Alertmanager alerts.');
+      })
+      .finally(() => setAlertsLoading(false));
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    apiClient
+      .get('/alerts/active')
+      .then(({ data }: { data: DashboardActiveAlert[] }) => {
+        if (mounted) setActiveAlerts(Array.isArray(data) ? data : []);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        if (err.response?.status === 503) {
+          setActiveAlerts([]);
+          setAlertsError('Alertmanager is not configured for active alert polling.');
+          return;
+        }
+        setAlertsError('Failed to load active Alertmanager alerts.');
+      })
+      .finally(() => {
+        if (mounted) setAlertsLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const incidents = dashboard?.incidents || [];
   const filteredIncidents = filterIncidents(incidents, {
     cluster: selectedCluster || dashboard?.environment || 'cluster',
@@ -119,6 +166,7 @@ export const Dashboard = () => {
     kind: kindFilter,
     highConfidenceOnly,
   });
+  const filteredActiveAlerts = filterActiveAlerts(activeAlerts, searchQuery, timeRange);
   const selectedIncident = filteredIncidents.find((incident) => incident.id === selectedId) || filteredIncidents[0] || null;
 
   if (loading && !dashboard) {
@@ -147,11 +195,11 @@ export const Dashboard = () => {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-76px)] grid-cols-[minmax(720px,1fr)_392px] gap-0">
-      <section className="min-w-0 space-y-4 p-4">
+    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 gap-0 2xl:grid-cols-[minmax(720px,1fr)_392px]">
+      <section className="min-w-0 space-y-4 p-3 sm:p-4">
         {!!dashboard?.availability?.length && <AvailabilityBanner availability={dashboard.availability} />}
 
-        <div className="grid grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
           {(dashboard?.kpis || []).map((kpi) => (
             <KpiCard key={kpi.label} kpi={kpi} />
           ))}
@@ -174,7 +222,15 @@ export const Dashboard = () => {
           onRefresh={() => refreshDashboard(true)}
         />
 
-        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-3">
+        <ActiveAlertsPanel
+          alerts={filteredActiveAlerts}
+          totalAlerts={activeAlerts.length}
+          loading={alertsLoading}
+          error={alertsError}
+          onRefresh={refreshActiveAlerts}
+        />
+
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
           <RemediationPipeline stages={dashboard?.pipeline || []} />
           <DependencyGraph incident={selectedIncident} />
         </div>
@@ -244,6 +300,33 @@ const filterIncidents = (
   });
 };
 
+const filterActiveAlerts = (alerts: DashboardActiveAlert[], query: string, range: string) => {
+  const normalizedQuery = query.trim().toLowerCase();
+  const maxAgeMinutes = timeRangeToMinutes(range);
+  return alerts.filter((alert) => {
+    if (maxAgeMinutes !== Infinity && ageToMinutes(alert.age) > maxAgeMinutes) {
+      return false;
+    }
+    if (!normalizedQuery) {
+      return true;
+    }
+    const haystack = [
+      alert.alertName,
+      alert.severity,
+      alert.namespace,
+      alert.resourceKind,
+      alert.resourceName,
+      alert.podName,
+      alert.status,
+      alert.decision,
+      alert.reason,
+      alert.summary,
+      ...(alert.labels || []).flatMap((label) => [label.key, label.value]),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(normalizedQuery);
+  });
+};
+
 const timeRangeToMinutes = (range: string) => {
   switch (range) {
     case 'Last 1h':
@@ -276,7 +359,7 @@ const ageToMinutes = (age: string) => {
 const KpiCard = ({ kpi }: { kpi: DashboardKPI }) => {
   const tone = toneStyles[kpi.tone || 'info'] || toneStyles.info;
   return (
-    <div className="h-[124px] rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+    <div className="min-h-[124px] rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <div className="text-[13px] font-semibold text-[#111827]">{kpi.label}</div>
       <div className="mt-3 flex items-end justify-between gap-3">
         <div>
@@ -526,8 +609,129 @@ const IncidentTable = ({
   );
 };
 
+const ActiveAlertsPanel = ({
+  alerts,
+  totalAlerts,
+  loading,
+  error,
+  onRefresh,
+}: {
+  alerts: DashboardActiveAlert[];
+  totalAlerts: number;
+  loading: boolean;
+  error: string;
+  onRefresh: () => void;
+}) => (
+  <section className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+    <header className="flex items-center justify-between border-b border-[#e5e7eb] px-4 py-3">
+      <div>
+        <div className="flex items-center gap-2">
+          <h2 className="text-[15px] font-semibold text-[#111827]">Alertmanager Active Alerts</h2>
+          <span className="rounded-full bg-[#eff6ff] px-2 py-0.5 text-[11px] font-semibold text-[#2563eb]">{totalAlerts}</span>
+        </div>
+        <p className="mt-1 text-[12px] text-[#647084]">Shows whether Fixora is acting on each scraped alert and why skipped alerts are ignored.</p>
+      </div>
+      <button
+        onClick={onRefresh}
+        disabled={loading}
+        className="grid h-9 w-9 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#111827] hover:bg-[#f8fafc] disabled:opacity-60"
+        title="Refresh active alerts"
+      >
+        <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+      </button>
+    </header>
+    {error ? (
+      <div className="m-4 flex items-start gap-3 rounded-md border border-[#fed7aa] bg-[#fff7ed] p-3 text-[13px] text-[#9a3412]">
+        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>{error}</span>
+      </div>
+    ) : alerts.length ? (
+      <div className="max-h-[292px] overflow-auto">
+        <table className="w-full min-w-[880px] table-fixed text-left text-[12px]">
+          <thead className="sticky top-0 z-[1] bg-[#f8fafc] text-[#111827]">
+            <tr className="border-b border-[#e5e7eb]">
+              <th className="w-[22%] px-3 py-3 font-semibold">Alert</th>
+              <th className="w-[22%] px-3 py-3 font-semibold">Resource</th>
+              <th className="w-[12%] px-3 py-3 font-semibold">Status</th>
+              <th className="w-[14%] px-3 py-3 font-semibold">Fixora</th>
+              <th className="px-3 py-3 font-semibold">Reason</th>
+              <th className="w-[8%] px-3 py-3 font-semibold">Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {alerts.map((alert) => (
+              <tr key={alert.id} className="border-b border-[#eef2f7] last:border-b-0 hover:bg-[#f8fafc]">
+                <td className="px-3 py-3 align-top">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <TriangleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${alert.used ? 'text-[#16a34a]' : 'text-[#f97316]'}`} />
+                    <div className="min-w-0">
+                      <div className="truncate font-semibold text-[#111827]">{alert.alertName}</div>
+                      <div className="mt-1 flex items-center gap-1">
+                        <SeverityPill value={alert.severity} />
+                        {alert.namespace && <span className="truncate text-[11px] text-[#647084]">{alert.namespace}</span>}
+                      </div>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <div className="truncate font-medium text-[#111827]">{alert.resourceKind}/{alert.resourceName}</div>
+                  {alert.podName && alert.resourceName !== alert.podName && (
+                    <div className="mt-0.5 truncate text-[11px] text-[#647084]">Pod/{alert.podName}</div>
+                  )}
+                  {!!alert.labels?.length && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {alert.labels.slice(0, 3).map((label) => (
+                        <span key={`${alert.id}-${label.key}`} className="rounded bg-[#f1f5f9] px-1.5 py-0.5 text-[10px] text-[#475569]">
+                          {label.key}:{label.value}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <span className="rounded-md bg-[#f1f5f9] px-2 py-1 text-[11px] font-medium text-[#475569]">{alert.status}</span>
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <AlertDecisionPill alert={alert} />
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <div className="line-clamp-2 text-[#334155]" title={alert.reason}>{alert.reason}</div>
+                  {alert.summary && <div className="mt-1 line-clamp-1 text-[11px] text-[#647084]" title={alert.summary}>{alert.summary}</div>}
+                </td>
+                <td className="px-3 py-3 align-top font-medium text-[#647084]">{alert.age || 'now'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    ) : (
+      <MiniEmpty message={loading ? 'Loading active Alertmanager alerts...' : 'No active Alertmanager alerts match the current search and time range.'} />
+    )}
+  </section>
+);
+
+const AlertDecisionPill = ({ alert }: { alert: DashboardActiveAlert }) => {
+  const tone = alert.used
+    ? 'bg-[#dcfce7] text-[#15803d]'
+    : alert.decision === 'deduplicated'
+      ? 'bg-[#eff6ff] text-[#2563eb]'
+      : 'bg-[#fee2e2] text-[#dc2626]';
+  const label = alert.used ? 'Used' : alert.decision === 'deduplicated' ? 'Deduped' : 'Not used';
+  return <span className={`rounded-md px-2 py-1 text-[11px] font-semibold ${tone}`}>{label}</span>;
+};
+
+const SeverityPill = ({ value }: { value: string }) => {
+  const normalized = (value || 'unknown').toLowerCase();
+  const tone = normalized === 'critical' || normalized === 'page'
+    ? 'bg-[#fee2e2] text-[#dc2626]'
+    : normalized === 'warning'
+      ? 'bg-[#ffedd5] text-[#ea580c]'
+      : 'bg-[#f1f5f9] text-[#475569]';
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}>{value || 'unknown'}</span>;
+};
+
 const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) => (
-  <aside className="border-l border-[#e5e7eb] bg-white p-3">
+  <aside className="border-t border-[#e5e7eb] bg-white p-3 2xl:border-l 2xl:border-t-0">
     {!incident ? (
       <EmptyState
         icon={<FileText className="h-8 w-8" />}
@@ -670,52 +874,54 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
     {stages.length === 0 ? (
       <MiniEmpty message="No remediation workflow state has been recorded yet." />
     ) : (
-      <div className="overflow-hidden rounded-md border border-[#e5e7eb] bg-white">
-        <div className="relative grid grid-cols-7 border-b border-[#e5e7eb] px-2 pb-2 pt-5">
-          <div className="absolute left-3 right-3 top-[30px] h-0.5 bg-[#d1d5db]" />
-          {stages.map((stage) => {
-            const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
-            return (
-              <div key={stage.id} className="relative z-[1] flex flex-col items-center gap-1">
-                <div className="text-[11px] font-semibold" style={{ color: stageTone }}>{stage.count}</div>
-                <span className="h-3 w-3 rounded-full border-2 border-white shadow-sm" style={{ background: stageTone }} />
-              </div>
-            );
-          })}
-        </div>
-        <div className="grid grid-cols-7">
-          {stages.map((stage) => {
-            const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
-            const visibleItems = stage.items?.slice(0, 2) || [];
-            const hidden = Math.max((stage.items?.length || 0) - visibleItems.length, 0);
-            return (
-              <div key={stage.id} className="min-h-[198px] border-r border-[#e5e7eb] last:border-r-0">
-                <div className="h-1" style={{ background: stageTone }} />
-                <div className="m-2 rounded-md border border-[#eef2f7] bg-[#f8fafc] px-2 py-3 text-center">
-                  <div className="text-[12px] font-semibold leading-4 text-[#111827]">{stage.label}</div>
+      <div className="overflow-x-auto rounded-md border border-[#e5e7eb] bg-white">
+        <div className="min-w-[760px]">
+          <div className="relative grid grid-cols-7 border-b border-[#e5e7eb] px-2 pb-2 pt-5">
+            <div className="absolute left-3 right-3 top-[30px] h-0.5 bg-[#d1d5db]" />
+            {stages.map((stage) => {
+              const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
+              return (
+                <div key={stage.id} className="relative z-[1] flex flex-col items-center gap-1">
+                  <div className="text-[11px] font-semibold" style={{ color: stageTone }}>{stage.count}</div>
+                  <span className="h-3 w-3 rounded-full border-2 border-white shadow-sm" style={{ background: stageTone }} />
                 </div>
-                <div className="space-y-2 px-2 pb-2">
-                  {visibleItems.length ? (
-                    visibleItems.map((item) => (
-                      <a
-                        key={item.id}
-                        href={item.url || undefined}
-                        target={item.url ? '_blank' : undefined}
-                        rel="noreferrer"
-                        className="block rounded border border-transparent p-1 text-[11px] hover:border-[#e5e7eb] hover:bg-[#f8fafc]"
-                      >
-                        <div className="truncate font-semibold text-[#111827]">{item.label}</div>
-                        <div className="mt-0.5 truncate text-[#6b7280]">{item.age || item.repository}</div>
-                      </a>
-                    ))
-                  ) : (
-                    <div className="px-1 text-[11px] text-[#9ca3af]">No items</div>
-                  )}
-                  {hidden > 0 && <div className="px-1 pt-2 text-[11px] font-medium text-[#647084]">+{hidden} more</div>}
+              );
+            })}
+          </div>
+          <div className="grid grid-cols-7">
+            {stages.map((stage) => {
+              const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
+              const visibleItems = stage.items?.slice(0, 2) || [];
+              const hidden = Math.max((stage.items?.length || 0) - visibleItems.length, 0);
+              return (
+                <div key={stage.id} className="min-h-[198px] border-r border-[#e5e7eb] last:border-r-0">
+                  <div className="h-1" style={{ background: stageTone }} />
+                  <div className="m-2 rounded-md border border-[#eef2f7] bg-[#f8fafc] px-2 py-3 text-center">
+                    <div className="text-[12px] font-semibold leading-4 text-[#111827]">{stage.label}</div>
+                  </div>
+                  <div className="space-y-2 px-2 pb-2">
+                    {visibleItems.length ? (
+                      visibleItems.map((item) => (
+                        <a
+                          key={item.id}
+                          href={item.url || undefined}
+                          target={item.url ? '_blank' : undefined}
+                          rel="noreferrer"
+                          className="block rounded border border-transparent p-1 text-[11px] hover:border-[#e5e7eb] hover:bg-[#f8fafc]"
+                        >
+                          <div className="truncate font-semibold text-[#111827]">{item.label}</div>
+                          <div className="mt-0.5 truncate text-[#6b7280]">{item.age || item.repository}</div>
+                        </a>
+                      ))
+                    ) : (
+                      <div className="px-1 text-[11px] text-[#9ca3af]">No items</div>
+                    )}
+                    {hidden > 0 && <div className="px-1 pt-2 text-[11px] font-medium text-[#647084]">+{hidden} more</div>}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
     )}
@@ -762,7 +968,7 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
   };
 
   return (
-    <section className={`rounded-lg border border-[#e5e7eb] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${expanded ? 'fixed inset-4 z-40' : ''}`}>
+    <section className={`rounded-lg border border-[#e5e7eb] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${expanded ? 'fixed inset-2 z-40 sm:inset-4' : ''}`}>
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-[14px] font-semibold text-[#111827]">Dependency Graph</h2>
         <AlertCircle className="h-3.5 w-3.5 text-[#94a3b8]" />
@@ -775,7 +981,7 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
         </button>
       </div>
       {incident && nodes.length ? (
-        <div className={`grid gap-3 ${expanded ? 'grid-cols-[1fr_300px] h-[calc(100%-44px)]' : 'grid-cols-1'}`}>
+        <div className={`grid gap-3 ${expanded ? 'h-[calc(100%-44px)] grid-cols-1 xl:grid-cols-[1fr_300px]' : 'grid-cols-1'}`}>
           <GraphCanvas
             nodes={visibleNodes}
             edges={visibleEdges}

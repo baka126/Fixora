@@ -44,6 +44,10 @@ spec:
               value: {{ .Values.service.targetPort | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
+            {{- if .Values.clusterName }}
+            - name: FIXORA_CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            {{- end }}
             {{- if .Values.slack.token }}
             - name: SLACK_TOKEN
               valueFrom:
