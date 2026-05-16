@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"fixora/pkg/auth"
 	"fixora/pkg/db"
@@ -43,7 +44,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var user models.User
 	var passwordHash string
 	err := db.Pool.QueryRow(context.Background(), "SELECT id, username, password_hash, role, created_at FROM users WHERE username = $1", req.Username).Scan(&user.ID, &user.Username, &passwordHash, &user.Role, &user.CreatedAt)
-	
+
 	if err != nil {
 		slog.Warn("Login failed: user not found", "username", req.Username)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
@@ -81,8 +82,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var count int
-	err := db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM users").Scan(&count)
+	count, err := userCount(r.Context())
 	if err != nil {
 		slog.Error("Failed to query user count", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -104,9 +104,13 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var count int
-	err := db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM users").Scan(&count)
-	if err != nil || count > 0 {
+	count, err := userCount(r.Context())
+	if err != nil {
+		slog.Error("Failed to query user count during setup", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if count > 0 {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
@@ -156,9 +160,31 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func userCount(ctx context.Context) (int, error) {
+	var count int
+	err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&count)
+	if err == nil {
+		return count, nil
+	}
+	if !isUndefinedTableError(err) {
+		return 0, err
+	}
+	slog.Warn("Auth users table missing; creating auth schema")
+	if schemaErr := db.EnsureSchema(ctx); schemaErr != nil {
+		return 0, schemaErr
+	}
+	if err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func isUndefinedTableError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "SQLSTATE 42P01") || strings.Contains(err.Error(), `relation "users" does not exist`))
+}
+
 type CreateUserRequest struct {
 	Username string      `json:"username"`
 	Password string      `json:"password"`
 	Role     models.Role `json:"role"`
 }
-

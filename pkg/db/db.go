@@ -47,10 +47,13 @@ func Connect(ctx context.Context) error {
 	}
 
 	slog.Info("Connected to PostgreSQL database")
-	return initSchema(ctx)
+	return EnsureSchema(ctx)
 }
 
-func initSchema(ctx context.Context) error {
+func EnsureSchema(ctx context.Context) error {
+	if Pool == nil {
+		return fmt.Errorf("database pool is not initialized")
+	}
 	query := `
 	CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 	CREATE TABLE IF NOT EXISTS users (

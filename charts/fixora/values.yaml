@@ -7,7 +7,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "v0.4.6"
+  tag: "v0.4.7"
 
 _UI: false
 
@@ -18,7 +18,7 @@ ui:
   image:
     repository: ghcr.io/baka126/fixora-ui
     pullPolicy: IfNotPresent
-    tag: "v0.4.6"
+    tag: "v0.4.7"
   service:
     type: ClusterIP
     port: 80
@@ -39,7 +39,7 @@ ui:
   resources: {}
 
 logLevel: "INFO" # DEBUG, INFO, WARN, ERROR
-clusterName: "" # Optional display name used when Kubernetes/provider metadata cannot expose a stable cluster name.
+clusterName: "Groov-Prod" # Optional display name used when Kubernetes/provider metadata cannot expose a stable cluster name.
 
 imagePullSecrets: []
 nameOverride: ""
