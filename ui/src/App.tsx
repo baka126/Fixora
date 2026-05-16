@@ -6,6 +6,7 @@ import { Login } from './pages/Login';
 import { Setup } from './pages/Setup';
 import { Dashboard } from './pages/Dashboard';
 import { DataPage } from './pages/DataPage';
+import { Alerts } from './pages/Alerts';
 import { apiClient } from './api/client';
 import { Loader2 } from 'lucide-react';
 
@@ -70,6 +71,7 @@ function App() {
             }
           >
             <Route index element={<Dashboard />} />
+            <Route path="alerts" element={<Alerts />} />
             <Route path="remediations" element={<DataPage kind="remediations" />} />
             <Route path="gitops" element={<DataPage kind="gitops" />} />
             <Route path="predictions" element={<DataPage kind="predictions" />} />

@@ -26,6 +26,7 @@ import type { DashboardIntegration } from '../types';
 
 const navItems = [
   { to: '/', icon: TriangleAlert, label: 'Incidents' },
+  { to: '/alerts', icon: Activity, label: 'Alerts' },
   { to: '/remediations', icon: GitPullRequestArrow, label: 'Remediations' },
   { to: '/gitops', icon: FileCode2, label: 'GitOps Sources' },
   { to: '/predictions', icon: LineChart, label: 'Predictions' },

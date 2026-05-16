@@ -224,6 +224,15 @@ func (h *historyCache) initDB() {
 			last_processed_at TIMESTAMP NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_processed_alerts_timestamp ON processed_alerts (last_processed_at);`,
+		`CREATE TABLE IF NOT EXISTS alert_watch_rules (
+			watch_key VARCHAR(512) PRIMARY KEY,
+			alertname TEXT,
+			namespace TEXT,
+			pod_name TEXT,
+			container TEXT,
+			labels JSONB,
+			created_at TIMESTAMP NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS investigation_locks (
 			pod_key VARCHAR(512) PRIMARY KEY,
 			locked_at TIMESTAMP NOT NULL
@@ -626,6 +635,43 @@ func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertnam
 	h.alertMu.Lock()
 	defer h.alertMu.Unlock()
 	h.recentAlerts[key] = time.Now()
+}
+
+func (h *historyCache) SaveAlertWatch(ctx context.Context, alert alertmanager.Alert) {
+	if h.db == nil {
+		return
+	}
+	labelsJSON, _ := json.Marshal(alert.Labels)
+	_, err := h.db.ExecContext(ctx, `
+		INSERT INTO alert_watch_rules (watch_key, alertname, namespace, pod_name, container, labels, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (watch_key)
+		DO UPDATE SET labels = EXCLUDED.labels, created_at = EXCLUDED.created_at
+	`, alertWatchKey(alert), alert.Labels["alertname"], alert.Labels["namespace"], alert.Labels["pod"], alert.Labels["container"], labelsJSON, time.Now())
+	if err != nil {
+		slog.Error("Failed to save alert watch rule", "error", err)
+	}
+}
+
+func (h *historyCache) LoadAlertWatchKeys(ctx context.Context) map[string]time.Time {
+	watches := map[string]time.Time{}
+	if h.db == nil {
+		return watches
+	}
+	rows, err := h.db.QueryContext(ctx, `SELECT watch_key, created_at FROM alert_watch_rules`)
+	if err != nil {
+		slog.Error("Failed to load alert watch rules", "error", err)
+		return watches
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var createdAt time.Time
+		if err := rows.Scan(&key, &createdAt); err == nil && key != "" {
+			watches[key] = createdAt
+		}
+	}
+	return watches
 }
 
 func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod string, window time.Duration) bool {

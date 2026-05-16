@@ -123,6 +123,25 @@ func TestDashboardActiveAlertDecisionExplainsMissingPod(t *testing.T) {
 	}
 }
 
+func TestRuntimeWatchedAlertBypassesConfiguredIncludeFilter(t *testing.T) {
+	cfg := &config.Config{
+		AlertmanagerEnabled:       true,
+		AlertmanagerIncludeLabels: map[string]string{"fixora": "true"},
+	}
+	alert := alertmanager.Alert{
+		Labels: map[string]string{
+			"alertname": "KubePodCrashLooping",
+			"namespace": "payments",
+			"pod":       "api-123",
+		},
+	}
+	ctrl := &Controller{config: cfg, history: newHistoryCache(cfg), alertWatches: map[string]time.Time{alertWatchKey(alert): time.Now()}}
+
+	if !ctrl.matchesAlertFilters(alert) {
+		t.Fatalf("runtime watched alert should bypass configured include filters")
+	}
+}
+
 func TestDashboardEnvironmentUsesNodeClusterLabels(t *testing.T) {
 	ctrl := &Controller{
 		clientset: fake.NewSimpleClientset(&v1.Node{

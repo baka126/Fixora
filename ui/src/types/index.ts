@@ -199,6 +199,8 @@ export interface DashboardActiveAlert {
   used: boolean;
   decision: string;
   reason: string;
+  canInclude?: boolean;
+  includeReason?: string;
   labels?: DashboardAlertLabel[];
 }
 

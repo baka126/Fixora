@@ -41,7 +41,6 @@ import {
 import { apiClient } from '../api/client';
 import { useStore } from '../store/useStore';
 import type {
-  DashboardActiveAlert,
   DashboardDependencyEdge,
   DashboardDependencyNode,
   DashboardEvidence,
@@ -71,9 +70,6 @@ export const Dashboard = () => {
   const [kindFilter, setKindFilter] = useState('all');
   const [highConfidenceOnly, setHighConfidenceOnly] = useState(false);
   const [incidentPage, setIncidentPage] = useState(1);
-  const [activeAlerts, setActiveAlerts] = useState<DashboardActiveAlert[]>([]);
-  const [alertsLoading, setAlertsLoading] = useState(true);
-  const [alertsError, setAlertsError] = useState('');
 
   const refreshDashboard = (showRefresh = true) => {
     if (showRefresh) setRefreshing(true);
@@ -114,49 +110,6 @@ export const Dashboard = () => {
     };
   }, [setDashboard]);
 
-  const refreshActiveAlerts = () => {
-    setAlertsLoading(true);
-    setAlertsError('');
-    apiClient
-      .get('/alerts/active')
-      .then(({ data }: { data: DashboardActiveAlert[] }) => {
-        setActiveAlerts(Array.isArray(data) ? data : []);
-      })
-      .catch((err) => {
-        if (err.response?.status === 503) {
-          setActiveAlerts([]);
-          setAlertsError('Alertmanager is not configured for active alert polling.');
-          return;
-        }
-        setAlertsError('Failed to load active Alertmanager alerts.');
-      })
-      .finally(() => setAlertsLoading(false));
-  };
-
-  useEffect(() => {
-    let mounted = true;
-    apiClient
-      .get('/alerts/active')
-      .then(({ data }: { data: DashboardActiveAlert[] }) => {
-        if (mounted) setActiveAlerts(Array.isArray(data) ? data : []);
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        if (err.response?.status === 503) {
-          setActiveAlerts([]);
-          setAlertsError('Alertmanager is not configured for active alert polling.');
-          return;
-        }
-        setAlertsError('Failed to load active Alertmanager alerts.');
-      })
-      .finally(() => {
-        if (mounted) setAlertsLoading(false);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
   const incidents = dashboard?.incidents || [];
   const filteredIncidents = filterIncidents(incidents, {
     cluster: selectedCluster || dashboard?.environment || 'cluster',
@@ -166,7 +119,6 @@ export const Dashboard = () => {
     kind: kindFilter,
     highConfidenceOnly,
   });
-  const filteredActiveAlerts = filterActiveAlerts(activeAlerts, searchQuery, timeRange);
   const selectedIncident = filteredIncidents.find((incident) => incident.id === selectedId) || filteredIncidents[0] || null;
 
   if (loading && !dashboard) {
@@ -220,14 +172,6 @@ export const Dashboard = () => {
           onHighConfidenceOnlyChange={setHighConfidenceOnly}
           refreshing={refreshing}
           onRefresh={() => refreshDashboard(true)}
-        />
-
-        <ActiveAlertsPanel
-          alerts={filteredActiveAlerts}
-          totalAlerts={activeAlerts.length}
-          loading={alertsLoading}
-          error={alertsError}
-          onRefresh={refreshActiveAlerts}
         />
 
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -295,33 +239,6 @@ const filterIncidents = (
       incident.gitops?.repo,
       incident.gitops?.path,
       incident.pr?.branch,
-    ].filter(Boolean).join(' ').toLowerCase();
-    return haystack.includes(normalizedQuery);
-  });
-};
-
-const filterActiveAlerts = (alerts: DashboardActiveAlert[], query: string, range: string) => {
-  const normalizedQuery = query.trim().toLowerCase();
-  const maxAgeMinutes = timeRangeToMinutes(range);
-  return alerts.filter((alert) => {
-    if (maxAgeMinutes !== Infinity && ageToMinutes(alert.age) > maxAgeMinutes) {
-      return false;
-    }
-    if (!normalizedQuery) {
-      return true;
-    }
-    const haystack = [
-      alert.alertName,
-      alert.severity,
-      alert.namespace,
-      alert.resourceKind,
-      alert.resourceName,
-      alert.podName,
-      alert.status,
-      alert.decision,
-      alert.reason,
-      alert.summary,
-      ...(alert.labels || []).flatMap((label) => [label.key, label.value]),
     ].filter(Boolean).join(' ').toLowerCase();
     return haystack.includes(normalizedQuery);
   });
@@ -607,127 +524,6 @@ const IncidentTable = ({
       )}
     </div>
   );
-};
-
-const ActiveAlertsPanel = ({
-  alerts,
-  totalAlerts,
-  loading,
-  error,
-  onRefresh,
-}: {
-  alerts: DashboardActiveAlert[];
-  totalAlerts: number;
-  loading: boolean;
-  error: string;
-  onRefresh: () => void;
-}) => (
-  <section className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-    <header className="flex items-center justify-between border-b border-[#e5e7eb] px-4 py-3">
-      <div>
-        <div className="flex items-center gap-2">
-          <h2 className="text-[15px] font-semibold text-[#111827]">Alertmanager Active Alerts</h2>
-          <span className="rounded-full bg-[#eff6ff] px-2 py-0.5 text-[11px] font-semibold text-[#2563eb]">{totalAlerts}</span>
-        </div>
-        <p className="mt-1 text-[12px] text-[#647084]">Shows whether Fixora is acting on each scraped alert and why skipped alerts are ignored.</p>
-      </div>
-      <button
-        onClick={onRefresh}
-        disabled={loading}
-        className="grid h-9 w-9 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#111827] hover:bg-[#f8fafc] disabled:opacity-60"
-        title="Refresh active alerts"
-      >
-        <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-      </button>
-    </header>
-    {error ? (
-      <div className="m-4 flex items-start gap-3 rounded-md border border-[#fed7aa] bg-[#fff7ed] p-3 text-[13px] text-[#9a3412]">
-        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-        <span>{error}</span>
-      </div>
-    ) : alerts.length ? (
-      <div className="max-h-[292px] overflow-auto">
-        <table className="w-full min-w-[880px] table-fixed text-left text-[12px]">
-          <thead className="sticky top-0 z-[1] bg-[#f8fafc] text-[#111827]">
-            <tr className="border-b border-[#e5e7eb]">
-              <th className="w-[22%] px-3 py-3 font-semibold">Alert</th>
-              <th className="w-[22%] px-3 py-3 font-semibold">Resource</th>
-              <th className="w-[12%] px-3 py-3 font-semibold">Status</th>
-              <th className="w-[14%] px-3 py-3 font-semibold">Fixora</th>
-              <th className="px-3 py-3 font-semibold">Reason</th>
-              <th className="w-[8%] px-3 py-3 font-semibold">Age</th>
-            </tr>
-          </thead>
-          <tbody>
-            {alerts.map((alert) => (
-              <tr key={alert.id} className="border-b border-[#eef2f7] last:border-b-0 hover:bg-[#f8fafc]">
-                <td className="px-3 py-3 align-top">
-                  <div className="flex min-w-0 items-start gap-2">
-                    <TriangleAlert className={`mt-0.5 h-4 w-4 shrink-0 ${alert.used ? 'text-[#16a34a]' : 'text-[#f97316]'}`} />
-                    <div className="min-w-0">
-                      <div className="truncate font-semibold text-[#111827]">{alert.alertName}</div>
-                      <div className="mt-1 flex items-center gap-1">
-                        <SeverityPill value={alert.severity} />
-                        {alert.namespace && <span className="truncate text-[11px] text-[#647084]">{alert.namespace}</span>}
-                      </div>
-                    </div>
-                  </div>
-                </td>
-                <td className="px-3 py-3 align-top">
-                  <div className="truncate font-medium text-[#111827]">{alert.resourceKind}/{alert.resourceName}</div>
-                  {alert.podName && alert.resourceName !== alert.podName && (
-                    <div className="mt-0.5 truncate text-[11px] text-[#647084]">Pod/{alert.podName}</div>
-                  )}
-                  {!!alert.labels?.length && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {alert.labels.slice(0, 3).map((label) => (
-                        <span key={`${alert.id}-${label.key}`} className="rounded bg-[#f1f5f9] px-1.5 py-0.5 text-[10px] text-[#475569]">
-                          {label.key}:{label.value}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </td>
-                <td className="px-3 py-3 align-top">
-                  <span className="rounded-md bg-[#f1f5f9] px-2 py-1 text-[11px] font-medium text-[#475569]">{alert.status}</span>
-                </td>
-                <td className="px-3 py-3 align-top">
-                  <AlertDecisionPill alert={alert} />
-                </td>
-                <td className="px-3 py-3 align-top">
-                  <div className="line-clamp-2 text-[#334155]" title={alert.reason}>{alert.reason}</div>
-                  {alert.summary && <div className="mt-1 line-clamp-1 text-[11px] text-[#647084]" title={alert.summary}>{alert.summary}</div>}
-                </td>
-                <td className="px-3 py-3 align-top font-medium text-[#647084]">{alert.age || 'now'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    ) : (
-      <MiniEmpty message={loading ? 'Loading active Alertmanager alerts...' : 'No active Alertmanager alerts match the current search and time range.'} />
-    )}
-  </section>
-);
-
-const AlertDecisionPill = ({ alert }: { alert: DashboardActiveAlert }) => {
-  const tone = alert.used
-    ? 'bg-[#dcfce7] text-[#15803d]'
-    : alert.decision === 'deduplicated'
-      ? 'bg-[#eff6ff] text-[#2563eb]'
-      : 'bg-[#fee2e2] text-[#dc2626]';
-  const label = alert.used ? 'Used' : alert.decision === 'deduplicated' ? 'Deduped' : 'Not used';
-  return <span className={`rounded-md px-2 py-1 text-[11px] font-semibold ${tone}`}>{label}</span>;
-};
-
-const SeverityPill = ({ value }: { value: string }) => {
-  const normalized = (value || 'unknown').toLowerCase();
-  const tone = normalized === 'critical' || normalized === 'page'
-    ? 'bg-[#fee2e2] text-[#dc2626]'
-    : normalized === 'warning'
-      ? 'bg-[#ffedd5] text-[#ea580c]'
-      : 'bg-[#f1f5f9] text-[#475569]';
-  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}>{value || 'unknown'}</span>;
 };
 
 const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) => (

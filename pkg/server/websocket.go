@@ -136,6 +136,10 @@ func (c *Client) readPump() {
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Require Auth
 	// (In a real implementation, you'd extract the token from query param or header)
+	if !websocket.IsWebSocketUpgrade(r) {
+		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
+		return
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

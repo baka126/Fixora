@@ -111,6 +111,8 @@ type Controller struct {
 	isLeader        atomic.Bool
 	leaderIdentity  string
 	customScrubbers []*regexp.Regexp
+	alertWatchMu    sync.RWMutex
+	alertWatches    map[string]time.Time
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
@@ -185,6 +187,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	}
 
 	history := newHistoryCache(cfg)
+	alertWatches := history.LoadAlertWatchKeys(context.Background())
 	var evtStreamer *events.EventStreamer
 	if history.HasDB() {
 		evtStreamer = events.NewEventStreamer(clientset, history.DB())
@@ -218,6 +221,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 		pendingFixes:    make(map[string]PendingFix),
 		leaderIdentity:  fmt.Sprintf("%s-%d", getHostname(), time.Now().UnixNano()),
 		customScrubbers: customScrubbers,
+		alertWatches:    alertWatches,
 	}
 }
 
@@ -657,6 +661,23 @@ func (c *Controller) IsNamespaceScoped(ns string) bool {
 }
 
 func (c *Controller) matchesAlertFilters(alert alertmanager.Alert) bool {
+	configured := c.matchesConfiguredAlertFilters(alert)
+	if !configured && !c.isRuntimeWatchedAlert(alert) {
+		return false
+	}
+
+	// Essential label check: Must have pod and namespace to be actionable by Fixora
+	if alert.Labels["namespace"] == "" || alert.Labels["pod"] == "" {
+		return false
+	}
+
+	return true
+}
+
+func (c *Controller) matchesConfiguredAlertFilters(alert alertmanager.Alert) bool {
+	if c.config == nil {
+		return true
+	}
 	// 1. Check Include Labels (Must match all provided includes)
 	if len(c.config.AlertmanagerIncludeLabels) > 0 {
 		for k, v := range c.config.AlertmanagerIncludeLabels {
@@ -675,12 +696,22 @@ func (c *Controller) matchesAlertFilters(alert alertmanager.Alert) bool {
 		}
 	}
 
-	// 3. Essential label check: Must have pod and namespace to be actionable by Fixora
-	if alert.Labels["namespace"] == "" || alert.Labels["pod"] == "" {
-		return false
-	}
-
 	return true
+}
+
+func (c *Controller) isRuntimeWatchedAlert(alert alertmanager.Alert) bool {
+	c.alertWatchMu.RLock()
+	defer c.alertWatchMu.RUnlock()
+	return c.alertWatches[alertWatchKey(alert)] != (time.Time{})
+}
+
+func alertWatchKey(alert alertmanager.Alert) string {
+	return strings.Join([]string{
+		alert.Labels["alertname"],
+		alert.Labels["namespace"],
+		alert.Labels["pod"],
+		alert.Labels["container"],
+	}, "\x00")
 }
 
 // pullAlertsFromAlertmanager scrapes active alerts from Alertmanager and triggers diagnostics for pod-related alerts.

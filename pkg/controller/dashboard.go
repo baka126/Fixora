@@ -233,21 +233,23 @@ type DashboardNodeCost struct {
 }
 
 type DashboardActiveAlert struct {
-	ID           string                `json:"id"`
-	AlertName    string                `json:"alertName"`
-	Severity     string                `json:"severity"`
-	Namespace    string                `json:"namespace"`
-	ResourceKind string                `json:"resourceKind"`
-	ResourceName string                `json:"resourceName"`
-	PodName      string                `json:"podName,omitempty"`
-	Status       string                `json:"status"`
-	StartsAt     time.Time             `json:"startsAt"`
-	Age          string                `json:"age"`
-	Summary      string                `json:"summary,omitempty"`
-	Used         bool                  `json:"used"`
-	Decision     string                `json:"decision"`
-	Reason       string                `json:"reason"`
-	Labels       []DashboardAlertLabel `json:"labels,omitempty"`
+	ID            string                `json:"id"`
+	AlertName     string                `json:"alertName"`
+	Severity      string                `json:"severity"`
+	Namespace     string                `json:"namespace"`
+	ResourceKind  string                `json:"resourceKind"`
+	ResourceName  string                `json:"resourceName"`
+	PodName       string                `json:"podName,omitempty"`
+	Status        string                `json:"status"`
+	StartsAt      time.Time             `json:"startsAt"`
+	Age           string                `json:"age"`
+	Summary       string                `json:"summary,omitempty"`
+	Used          bool                  `json:"used"`
+	Decision      string                `json:"decision"`
+	Reason        string                `json:"reason"`
+	CanInclude    bool                  `json:"canInclude"`
+	IncludeReason string                `json:"includeReason,omitempty"`
+	Labels        []DashboardAlertLabel `json:"labels,omitempty"`
 }
 
 type DashboardAlertLabel struct {
@@ -491,6 +493,36 @@ func (c *Controller) ActiveAlertDecisions(ctx context.Context) ([]DashboardActiv
 	return out, nil
 }
 
+func (c *Controller) IncludeActiveAlert(ctx context.Context, alertID string) (DashboardActiveAlert, error) {
+	if c.amClient == nil || !c.config.AlertmanagerEnabled || c.config.AlertmanagerURL == "" {
+		return DashboardActiveAlert{}, fmt.Errorf("alertmanager is not configured")
+	}
+	alerts, err := c.amClient.GetAlerts()
+	if err != nil {
+		return DashboardActiveAlert{}, err
+	}
+	for _, alert := range alerts {
+		if activeAlertID(alert) != alertID {
+			continue
+		}
+		decision := c.dashboardActiveAlertDecision(ctx, alert)
+		if !decision.CanInclude && !decision.Used {
+			return decision, fmt.Errorf("%s", decision.IncludeReason)
+		}
+		c.alertWatchMu.Lock()
+		if c.alertWatches == nil {
+			c.alertWatches = make(map[string]time.Time)
+		}
+		c.alertWatches[alertWatchKey(alert)] = time.Now()
+		c.alertWatchMu.Unlock()
+		if c.history != nil {
+			c.history.SaveAlertWatch(ctx, alert)
+		}
+		return c.dashboardActiveAlertDecision(ctx, alert), nil
+	}
+	return DashboardActiveAlert{}, fmt.Errorf("active alert not found")
+}
+
 func (c *Controller) dashboardActiveAlertDecision(ctx context.Context, alert alertmanager.Alert) DashboardActiveAlert {
 	ns := strings.TrimSpace(alert.Labels["namespace"])
 	pod := strings.TrimSpace(alert.Labels["pod"])
@@ -523,27 +555,36 @@ func (c *Controller) dashboardActiveAlertDecision(ctx context.Context, alert ale
 	case status != "firing":
 		decision.Decision = "skipped"
 		decision.Reason = fmt.Sprintf("Alert status is %q, not firing.", status)
+		decision.IncludeReason = "Only firing alerts can be included."
 	case len(alert.Status.SilencedBy) > 0:
 		decision.Decision = "skipped"
 		decision.Reason = "Alertmanager has silenced this alert."
+		decision.IncludeReason = "Silenced alerts should be unsilenced in Alertmanager first."
 	case len(alert.Status.InhibitedBy) > 0:
 		decision.Decision = "skipped"
 		decision.Reason = "Alertmanager has inhibited this alert behind a higher-level alert."
-	case !c.matchesAlertFilters(alert):
-		decision.Decision = "skipped"
-		decision.Reason = "Alert labels do not match Fixora Alertmanager include/exclude filters."
+		decision.IncludeReason = "Inhibited alerts are intentionally suppressed by Alertmanager."
 	case ns == "":
 		decision.Decision = "skipped"
 		decision.Reason = "Missing namespace label; Fixora cannot scope diagnostics safely."
+		decision.IncludeReason = "Add a namespace label to the alert rule first."
 	case !c.isNamespaceScoped(ns):
 		decision.Decision = "skipped"
 		decision.Reason = "Namespace is outside Fixora's configured scope."
+		decision.IncludeReason = "Update Fixora namespace scope before watching this alert."
 	case pod == "":
 		decision.Decision = "skipped"
 		decision.Reason = "Missing pod label; current Alertmanager automation needs a pod to collect logs, events, and owner workload context."
+		decision.IncludeReason = "Add a pod label or workload-to-pod mapping before Fixora can act on this alert."
+	case !c.matchesConfiguredAlertFilters(alert) && !c.isRuntimeWatchedAlert(alert):
+		decision.Decision = "skipped"
+		decision.Reason = "Alert labels do not match Fixora Alertmanager include/exclude filters."
+		decision.CanInclude = true
+		decision.IncludeReason = "Add this active alert to Fixora's runtime watch list."
 	case c.history != nil && c.history.IsAlertRecentlyProcessed(ctx, ns, pod, alertName, 30*time.Minute):
 		decision.Decision = "deduplicated"
 		decision.Reason = "Recently processed; Fixora suppresses repeat diagnostics for 30 minutes to avoid duplicate PRs."
+		decision.IncludeReason = "Already watched recently; wait for the duplicate suppression window to expire."
 	default:
 		decision.Used = true
 		decision.Decision = "used"

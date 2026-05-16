@@ -45,6 +45,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/googlechat/interactions", s.handleGoogleChatInteraction)
 	mux.HandleFunc("/api/v1/dashboard", s.handleDashboard)
 	mux.HandleFunc("/api/v1/alerts/active", s.handleGetActiveAlerts)
+	mux.HandleFunc("/api/v1/alerts/active/", s.handleActiveAlertAction)
 	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/v1/auth/setup-status", s.handleSetupStatus)
 	mux.HandleFunc("/api/v1/auth/setup", s.handleSetup)
