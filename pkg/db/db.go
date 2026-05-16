@@ -14,7 +14,21 @@ var Pool *pgxpool.Pool
 func Connect(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		slog.Warn("DATABASE_URL not set, database will not be connected")
+		host := os.Getenv("DB_HOST")
+		port := os.Getenv("DB_PORT")
+		user := os.Getenv("DB_USER")
+		password := os.Getenv("DB_PASSWORD")
+		dbname := os.Getenv("DB_NAME")
+		sslmode := os.Getenv("DB_SSLMODE")
+
+		if host != "" {
+			dsn = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+				user, password, host, port, dbname, sslmode)
+		}
+	}
+
+	if dsn == "" {
+		slog.Warn("Database configuration not found (DATABASE_URL or DB_HOST), database will not be connected")
 		return nil
 	}
 
