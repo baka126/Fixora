@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -10,8 +11,11 @@ import (
 	"fixora/pkg/db"
 	"fixora/pkg/models"
 
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+var errLastAdmin = errors.New("cannot remove the last admin")
 
 func validateAdmin(r *http.Request) bool {
 	authHeader := r.Header.Get("Authorization")
@@ -24,6 +28,23 @@ func validateAdmin(r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func requireUserDB(w http.ResponseWriter) bool {
+	if db.Pool == nil {
+		http.Error(w, "database not connected", http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+func validRole(role models.Role) bool {
+	switch role {
+	case models.RoleAdmin, models.RoleOperator, models.RoleViewer:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -43,8 +64,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
-	if db.Pool == nil {
-		http.Error(w, "database not connected", http.StatusInternalServerError)
+	if !requireUserDB(w) {
 		return
 	}
 
@@ -99,13 +119,22 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req CreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "" || req.Password == "" || req.Role == "" {
 		http.Error(w, "username, password, and role required", http.StatusBadRequest)
+		return
+	}
+	if !validRole(req.Role) {
+		http.Error(w, "invalid role", http.StatusBadRequest)
+		return
+	}
+	if !requireUserDB(w) {
 		return
 	}
 
@@ -139,31 +168,65 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 4 {
+	if len(parts) < 5 || parts[4] == "" {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 	id := parts[4]
 
 	if r.Method == http.MethodDelete {
-		_, err := db.Pool.Exec(r.Context(), "DELETE FROM users WHERE id = $1", id)
-		if err != nil {
+		if len(parts) != 5 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !requireUserDB(w) {
+			return
+		}
+		if err := s.deleteUser(r, id); err != nil {
+			if err == pgx.ErrNoRows {
+				http.Error(w, "user not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, errLastAdmin) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			slog.Error("Failed to delete user", "user_id", id, "error", err)
 			http.Error(w, "failed to delete user", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		return
 	} else if r.Method == http.MethodPut {
+		if len(parts) != 5 && !(len(parts) == 6 && parts[5] == "role") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		var req struct {
 			Role models.Role `json:"role"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Role == "" {
+		body := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		if err := json.NewDecoder(body).Decode(&req); err != nil || req.Role == "" {
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-
-		_, err := db.Pool.Exec(r.Context(), "UPDATE users SET role = $1 WHERE id = $2", req.Role, id)
-		if err != nil {
+		if !validRole(req.Role) {
+			http.Error(w, "invalid role", http.StatusBadRequest)
+			return
+		}
+		if !requireUserDB(w) {
+			return
+		}
+		if err := s.updateUserRole(r, id, req.Role); err != nil {
+			if err == pgx.ErrNoRows {
+				http.Error(w, "user not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, errLastAdmin) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			slog.Error("Failed to update user role", "user_id", id, "role", req.Role, "error", err)
 			http.Error(w, "failed to update user role", http.StatusInternalServerError)
 			return
 		}
@@ -177,6 +240,13 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 	if !validateAdmin(r) {
 		http.Error(w, "forbidden: admin role required", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireUserDB(w) {
 		return
 	}
 
@@ -206,12 +276,18 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(groups)
 		return
-	} else if r.Method == http.MethodPost {
+	} else {
 		var req struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		body := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		if err := json.NewDecoder(body).Decode(&req); err != nil {
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		req.Name = strings.TrimSpace(req.Name)
+		if req.Name == "" {
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
@@ -228,7 +304,6 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleGroupByID(w http.ResponseWriter, r *http.Request) {
@@ -237,17 +312,20 @@ func (s *Server) handleGroupByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Paths: 
+	// Paths:
 	// DELETE /api/v1/auth/groups/{id}
 	// POST /api/v1/auth/groups/{id}/users/{userId}
 	// DELETE /api/v1/auth/groups/{id}/users/{userId}
 
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 4 {
+	if len(parts) < 5 || parts[4] == "" {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 	groupID := parts[4]
+	if !requireUserDB(w) {
+		return
+	}
 
 	if len(parts) == 5 && r.Method == http.MethodDelete {
 		_, err := db.Pool.Exec(r.Context(), "DELETE FROM groups WHERE id = $1", groupID)
@@ -281,4 +359,75 @@ func (s *Server) handleGroupByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) deleteUser(r *http.Request, id string) error {
+	tx, err := db.Pool.Begin(r.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(r.Context())
+
+	var role models.Role
+	if err := tx.QueryRow(r.Context(), "SELECT role FROM users WHERE id = $1 FOR UPDATE", id).Scan(&role); err != nil {
+		return err
+	}
+	if role == models.RoleAdmin {
+		if err := lockAdminUsers(r, tx); err != nil {
+			return err
+		}
+		var adminCount int
+		if err := tx.QueryRow(r.Context(), "SELECT COUNT(*) FROM users WHERE role = $1", models.RoleAdmin).Scan(&adminCount); err != nil {
+			return err
+		}
+		if adminCount <= 1 {
+			return errLastAdmin
+		}
+	}
+
+	if _, err := tx.Exec(r.Context(), "DELETE FROM users WHERE id = $1", id); err != nil {
+		return err
+	}
+	return tx.Commit(r.Context())
+}
+
+func (s *Server) updateUserRole(r *http.Request, id string, nextRole models.Role) error {
+	tx, err := db.Pool.Begin(r.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(r.Context())
+
+	var currentRole models.Role
+	if err := tx.QueryRow(r.Context(), "SELECT role FROM users WHERE id = $1 FOR UPDATE", id).Scan(&currentRole); err != nil {
+		return err
+	}
+	if currentRole == models.RoleAdmin && nextRole != models.RoleAdmin {
+		if err := lockAdminUsers(r, tx); err != nil {
+			return err
+		}
+		var adminCount int
+		if err := tx.QueryRow(r.Context(), "SELECT COUNT(*) FROM users WHERE role = $1", models.RoleAdmin).Scan(&adminCount); err != nil {
+			return err
+		}
+		if adminCount <= 1 {
+			return errLastAdmin
+		}
+	}
+
+	if _, err := tx.Exec(r.Context(), "UPDATE users SET role = $1 WHERE id = $2", nextRole, id); err != nil {
+		return err
+	}
+	return tx.Commit(r.Context())
+}
+
+func lockAdminUsers(r *http.Request, tx pgx.Tx) error {
+	rows, err := tx.Query(r.Context(), "SELECT id FROM users WHERE role = $1 FOR UPDATE", models.RoleAdmin)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+	return rows.Err()
 }

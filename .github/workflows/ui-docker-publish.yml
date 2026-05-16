@@ -1,15 +1,15 @@
-name: Build and Publish Server Docker Image
+name: Build and Publish UI Docker Image
 
 on:
   push:
     branches: [ "main" ]
-    paths-ignore:
+    paths:
       - 'ui/**'
     tags: [ 'v*.*.*' ]
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  UI_IMAGE_NAME: ${{ github.repository }}-ui
 
 jobs:
   build:
@@ -36,19 +36,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
+      - name: Extract UI Docker metadata
+        id: meta-ui
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.UI_IMAGE_NAME }}
 
-      - name: Build and push Fixora server image
+      - name: Build and push Fixora UI image
         uses: docker/build-push-action@v7
         with:
-          context: .
+          context: ./ui
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-ui.outputs.tags }}
+          labels: ${{ steps.meta-ui.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=max,scope=ui
