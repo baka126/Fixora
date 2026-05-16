@@ -21,6 +21,8 @@ type EvidenceChain struct {
 	PredictiveWarning      bool
 	EstimatedHoursToOOM    float64
 	AIConfidence           int
+	AIPrompt               string
+	AIResponse             string
 
 	// New fields for interactive triage
 	StackTrace    string
@@ -42,6 +44,8 @@ func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 	evidence.FinOpsImpact = security.ScrubPII(evidence.FinOpsImpact)
 	evidence.StackTrace = security.ScrubPII(evidence.StackTrace)
 	evidence.FinOpsDetails = security.ScrubPII(evidence.FinOpsDetails)
+	evidence.AIPrompt = security.ScrubPII(evidence.AIPrompt)
+	evidence.AIResponse = security.ScrubPII(evidence.AIResponse)
 
 	var errs []string
 

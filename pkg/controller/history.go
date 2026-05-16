@@ -14,6 +14,7 @@ import (
 	"fixora/pkg/alertmanager"
 	"fixora/pkg/config"
 	"fixora/pkg/notifications"
+	"fixora/pkg/security"
 )
 
 type Incident struct {
@@ -95,8 +96,12 @@ func (h *historyCache) initDB() {
 			root_cause TEXT,
 			ai_confidence INTEGER,
 			finops_impact TEXT,
-			finops_details TEXT
+			finops_details TEXT,
+			ai_prompt TEXT,
+			ai_response TEXT
 		);`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS ai_prompt TEXT;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS ai_response TEXT;`,
 		`CREATE INDEX IF NOT EXISTS idx_investigations_pod ON investigations (namespace, pod_name);`,
 		`CREATE TABLE IF NOT EXISTS incident_history (
 			id SERIAL PRIMARY KEY,
@@ -299,8 +304,8 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 		INSERT INTO investigations (
 			namespace, pod_name, timestamp, reason, metric_proof, cluster_context,
 			historical_pattern, event_timeline, stack_trace, root_cause,
-			ai_confidence, finops_impact, finops_details
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			ai_confidence, finops_impact, finops_details, ai_prompt, ai_response
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id
 	`
 	var id int64
@@ -308,6 +313,7 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 		evidence.Namespace, evidence.PodName, time.Now(), reason, evidence.MetricProof, evidence.ClusterContext,
 		evidence.HistoricalPattern, evidence.EventTimeline, evidence.StackTrace, evidence.RootCause,
 		evidence.AIConfidence, evidence.FinOpsImpact, evidence.FinOpsDetails,
+		security.ScrubPII(evidence.AIPrompt), security.ScrubPII(evidence.AIResponse),
 	).Scan(&id)
 
 	if err != nil {

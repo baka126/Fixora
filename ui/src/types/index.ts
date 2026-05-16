@@ -160,6 +160,25 @@ export interface DashboardAuditEvent {
   timestamp: string;
 }
 
+export interface InvestigationDetail {
+  id: number;
+  namespace: string;
+  podName: string;
+  timestamp: string;
+  reason: string;
+  metricProof: string;
+  clusterContext: string;
+  historicalPattern: string;
+  eventTimeline: string;
+  stackTrace: string;
+  rootCause: string;
+  aiConfidence: number;
+  finopsImpact: string;
+  finopsDetails: string;
+  aiPrompt: string;
+  aiResponse: string;
+}
+
 export interface DashboardPipelineItem {
   id: string;
   label: string;

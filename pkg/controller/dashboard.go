@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"fixora/pkg/security"
 )
 
 type DashboardSnapshot struct {
@@ -275,6 +277,56 @@ type dashboardAlertRow struct {
 	Status     string
 	Source     string
 	ReceivedAt time.Time
+}
+
+func (c *Controller) GetInvestigation(ctx context.Context, id int64) (map[string]interface{}, error) {
+	if c.history == nil || c.history.db == nil {
+		return nil, fmt.Errorf("database not configured")
+	}
+
+	query := `
+		SELECT 
+			namespace, pod_name, timestamp, reason, COALESCE(metric_proof, ''), 
+			COALESCE(cluster_context, ''), COALESCE(historical_pattern, ''), 
+			COALESCE(event_timeline, ''), COALESCE(stack_trace, ''), 
+			COALESCE(root_cause, ''), ai_confidence, 
+			COALESCE(finops_impact, ''), COALESCE(finops_details, ''),
+			COALESCE(ai_prompt, ''), COALESCE(ai_response, '')
+		FROM investigations WHERE id = $1
+	`
+	var inv map[string]interface{} = make(map[string]interface{})
+	var ns, pod, reason, proof, context, pattern, timeline, trace, rootCause, impact, details, prompt, response string
+	var timestamp time.Time
+	var confidence int
+
+	err := c.history.db.QueryRowContext(ctx, query, id).Scan(
+		&ns, &pod, &timestamp, &reason, &proof, &context, &pattern, &timeline, &trace, &rootCause, &confidence, &impact, &details, &prompt, &response,
+	)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("investigation not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	inv["id"] = id
+	inv["namespace"] = ns
+	inv["podName"] = pod
+	inv["timestamp"] = timestamp
+	inv["reason"] = reason
+	inv["metricProof"] = proof
+	inv["clusterContext"] = context
+	inv["historicalPattern"] = pattern
+	inv["eventTimeline"] = timeline
+	inv["stackTrace"] = trace
+	inv["rootCause"] = rootCause
+	inv["aiConfidence"] = confidence
+	inv["finopsImpact"] = impact
+	inv["finopsDetails"] = details
+	inv["aiPrompt"] = security.ScrubPII(prompt)
+	inv["aiResponse"] = security.ScrubPII(response)
+
+	return inv, nil
 }
 
 // DashboardSnapshot returns the live UI model. It intentionally returns empty

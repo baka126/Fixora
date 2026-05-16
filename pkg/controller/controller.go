@@ -479,6 +479,8 @@ func (c *Controller) scanForLeaks() {
 				} else {
 					evidence.RootCause = aiResp.Analysis
 					evidence.AIConfidence = aiResp.Confidence
+					evidence.AIPrompt = aiResp.RawPrompt
+					evidence.AIResponse = aiResp.Analysis
 					// Save the prediction to history
 					c.history.Update(ctx, pod.Namespace, pod.Name, "LeakPrediction", aiResp.Analysis, 0)
 				}
@@ -973,6 +975,8 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		} else {
 			evidence.RootCause = aiResp.Analysis
 			evidence.AIConfidence = aiResp.Confidence
+			evidence.AIPrompt = aiResp.RawPrompt
+			evidence.AIResponse = aiResp.Analysis
 			rootCause = aiResp.Analysis
 			slog.Info("AI analysis complete", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
 		}

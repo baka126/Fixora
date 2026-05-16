@@ -49,6 +49,9 @@ func (o *OpenAIProvider) AnalyzeLog(ctx context.Context, logs string) (string, e
 	if err != nil {
 		return "", err
 	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no analysis generated")
+	}
 
 	return resp.Choices[0].Message.Content, nil
 }
@@ -96,6 +99,10 @@ func (o *OpenAIProvider) AnalyzeRootCause(ctx context.Context, evidence string) 
 }
 
 func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (AIResponse, error) {
+	prompt := fmt.Sprintf(PromptForensics,
+		forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
+		forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)
+
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
@@ -105,10 +112,8 @@ func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 			},
 			Messages: []openai.ChatCompletionMessage{
 				{
-					Role: openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf(PromptForensics,
-						forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
-						forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History),
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
 				},
 			},
 		},
@@ -117,17 +122,24 @@ func (o *OpenAIProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 	if err != nil {
 		return AIResponse{}, err
 	}
+	if len(resp.Choices) == 0 {
+		return AIResponse{Analysis: "No analysis generated", Confidence: 0, RawPrompt: prompt}, nil
+	}
 
 	raw := resp.Choices[0].Message.Content
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Analysis: raw, Confidence: 50}, nil
+		aiResp.Analysis = raw
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	return aiResp, nil
 }
 
 func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (AIResponse, error) {
+	prompt := fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics)
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
@@ -138,7 +150,7 @@ func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespa
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics),
+					Content: prompt,
 				},
 			},
 		},
@@ -147,17 +159,24 @@ func (o *OpenAIProvider) PerformPredictiveForensics(ctx context.Context, namespa
 	if err != nil {
 		return AIResponse{}, err
 	}
+	if len(resp.Choices) == 0 {
+		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0, RawPrompt: prompt}, nil
+	}
 
 	raw := resp.Choices[0].Message.Content
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Analysis: raw, Confidence: 50}, nil
+		aiResp.Analysis = raw
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	return aiResp, nil
 }
 
 func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent string, evidence string) (AIResponse, error) {
+	prompt := fmt.Sprintf(PromptGeneratePatch, currentContent, evidence)
 	resp, err := o.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
@@ -168,7 +187,7 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent strin
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf(PromptGeneratePatch, currentContent, evidence),
+					Content: prompt,
 				},
 			},
 		},
@@ -177,11 +196,17 @@ func (o *OpenAIProvider) GeneratePatch(ctx context.Context, currentContent strin
 	if err != nil {
 		return AIResponse{}, err
 	}
+	if len(resp.Choices) == 0 {
+		return AIResponse{RawPrompt: prompt}, fmt.Errorf("no patch generated")
+	}
 
 	raw := resp.Choices[0].Message.Content
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
+		aiResp.Patch = string(CleanPatch(raw))
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	for i, p := range aiResp.Patches {

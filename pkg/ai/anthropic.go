@@ -109,6 +109,10 @@ func (a *AnthropicProvider) AnalyzeRootCause(ctx context.Context, evidence strin
 }
 
 func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (AIResponse, error) {
+	prompt := fmt.Sprintf(PromptForensics,
+		forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
+		forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)
+
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -117,9 +121,7 @@ func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx Fo
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf(PromptForensics,
-							forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
-							forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)),
+						Text: StringPtr(prompt),
 					},
 				},
 			},
@@ -132,19 +134,23 @@ func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx Fo
 	}
 
 	if len(resp.Content) == 0 {
-		return AIResponse{Analysis: "No content in response", Confidence: 0}, nil
+		return AIResponse{Analysis: "No content in response", Confidence: 0, RawPrompt: prompt}, nil
 	}
 
 	raw := *resp.Content[0].Text
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Analysis: raw, Confidence: 50}, nil
+		aiResp.Analysis = raw
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	return aiResp, nil
 }
 
 func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, namespace, podName, history, metrics string) (AIResponse, error) {
+	prompt := fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics)
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -153,7 +159,7 @@ func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, name
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf(PromptPredictiveForensics, namespace, podName, history, metrics)),
+						Text: StringPtr(prompt),
 					},
 				},
 			},
@@ -166,19 +172,23 @@ func (a *AnthropicProvider) PerformPredictiveForensics(ctx context.Context, name
 	}
 
 	if len(resp.Content) == 0 {
-		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0}, nil
+		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0, RawPrompt: prompt}, nil
 	}
 
 	raw := *resp.Content[0].Text
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Analysis: raw, Confidence: 50}, nil
+		aiResp.Analysis = raw
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	return aiResp, nil
 }
 
 func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent string, evidence string) (AIResponse, error) {
+	prompt := fmt.Sprintf(PromptGeneratePatch, currentContent, evidence)
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,
 		Messages: []anthropic.Message{
@@ -187,7 +197,7 @@ func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent st
 				Content: []anthropic.MessageContent{
 					{
 						Type: anthropic.MessagesContentTypeText,
-						Text: StringPtr(fmt.Sprintf(PromptGeneratePatch, currentContent, evidence)),
+						Text: StringPtr(prompt),
 					},
 				},
 			},
@@ -200,13 +210,16 @@ func (a *AnthropicProvider) GeneratePatch(ctx context.Context, currentContent st
 	}
 
 	if len(resp.Content) == 0 {
-		return AIResponse{}, fmt.Errorf("no patch generated")
+		return AIResponse{RawPrompt: prompt}, fmt.Errorf("no patch generated")
 	}
 
 	raw := *resp.Content[0].Text
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
+		aiResp.Patch = string(CleanPatch(raw))
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	for i, p := range aiResp.Patches {

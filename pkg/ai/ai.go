@@ -37,6 +37,7 @@ type AIResponse struct {
 	Patch      string    `json:"patch"` // Deprecated: use Patches
 	Patches    []AIPatch `json:"patches"`
 	Confidence int       `json:"confidence"`
+	RawPrompt  string    `json:"-"` // Captured for auditing
 }
 
 type Provider interface {

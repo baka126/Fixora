@@ -35,7 +35,7 @@ func NewGeminiProvider(apiKey, modelName string) (*GeminiProvider, error) {
 }
 
 func (g *GeminiProvider) AnalyzeLog(ctx context.Context, logs string) (string, error) {
-	// Simple analysis remains plain text for now or we can update it too. 
+	// Simple analysis remains plain text for now or we can update it too.
 	// For Step 3, we focus on the main flows.
 	prompt := fmt.Sprintf(PromptAnalyzeLog, logs)
 	resp, err := g.model.GenerateContent(ctx, genai.Text(prompt))
@@ -89,13 +89,16 @@ func (g *GeminiProvider) PerformForensics(ctx context.Context, forensicCtx Foren
 	}
 
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return AIResponse{Analysis: "No analysis generated", Confidence: 0}, nil
+		return AIResponse{Analysis: "No analysis generated", Confidence: 0, RawPrompt: prompt}, nil
 	}
 
 	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Analysis: raw, Confidence: 50}, nil // Fallback
+		aiResp.Analysis = raw
+		aiResp.Confidence = 50
+		return aiResp, nil // Fallback
 	}
 
 	return aiResp, nil
@@ -109,13 +112,16 @@ func (g *GeminiProvider) PerformPredictiveForensics(ctx context.Context, namespa
 	}
 
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0}, nil
+		return AIResponse{Analysis: "No predictive analysis generated", Confidence: 0, RawPrompt: prompt}, nil
 	}
 
 	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
-		return AIResponse{Analysis: raw, Confidence: 50}, nil
+		aiResp.Analysis = raw
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	return aiResp, nil
@@ -129,18 +135,24 @@ func (g *GeminiProvider) GeneratePatch(ctx context.Context, currentContent strin
 	if err != nil {
 		return AIResponse{}, err
 	}
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return AIResponse{RawPrompt: prompt}, fmt.Errorf("no patch generated")
+	}
 
 	raw := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
 	var aiResp AIResponse
+	aiResp.RawPrompt = prompt
 	if err := json.Unmarshal([]byte(raw), &aiResp); err != nil {
 		// If unmarshal fails, we might have raw patch content (fallback)
-		return AIResponse{Patch: string(CleanPatch(raw)), Confidence: 50}, nil
+		aiResp.Patch = string(CleanPatch(raw))
+		aiResp.Confidence = 50
+		return aiResp, nil
 	}
 
 	for i, p := range aiResp.Patches {
 		aiResp.Patches[i].Content = string(CleanPatch(p.Content))
 	}
-	
+
 	// Legacy fallback
 	if aiResp.Patch != "" {
 		aiResp.Patch = string(CleanPatch(aiResp.Patch))

@@ -11,7 +11,9 @@ import {
   Settings,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { useState } from 'react';
 import { useStore } from '../store/useStore';
+import { AuditDetailPanel } from '../components/AuditDetailPanel';
 import type {
   DashboardAuditEvent,
   DashboardGitOpsSource,
@@ -54,6 +56,7 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
   const dashboard = useStore((state) => state.dashboard);
   const meta = pageMeta[kind];
   const Icon = meta.icon;
+  const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
 
   return (
     <div className="p-4">
@@ -72,9 +75,16 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
         {kind === 'remediations' && <Remediations rows={dashboard?.remediations || []} />}
         {kind === 'gitops' && <GitOpsSources rows={dashboard?.gitopsSources || []} />}
         {kind === 'predictions' && <Predictions rows={dashboard?.predictions || []} />}
-        {kind === 'audit' && <AuditEvents rows={dashboard?.auditEvents || []} />}
+        {kind === 'audit' && <AuditEvents rows={dashboard?.auditEvents || []} onSelect={setSelectedAuditId} />}
         {kind === 'settings' && <SettingsSections rows={dashboard?.settingsSections || []} />}
       </section>
+
+      {selectedAuditId && (
+        <AuditDetailPanel
+          eventId={selectedAuditId}
+          onClose={() => setSelectedAuditId(null)}
+        />
+      )}
     </div>
   );
 };
@@ -134,19 +144,26 @@ const Predictions = ({ rows }: { rows: DashboardPrediction[] }) => {
   );
 };
 
-const AuditEvents = ({ rows }: { rows: DashboardAuditEvent[] }) => {
+const AuditEvents = ({ rows, onSelect }: { rows: DashboardAuditEvent[]; onSelect: (id: string) => void }) => {
   if (!rows.length) return <Empty title="No audit events recorded yet" message="Investigations, alerts, and remediation decisions will be logged here." />;
   return (
     <Table headers={['Type', 'Status', 'Subject', 'Detail', 'Time']}>
-      {rows.map((row) => (
-        <tr key={row.id} className="border-t border-[#e5e7eb]">
-          <td className="px-4 py-3 font-medium">{row.type}</td>
-          <td className="px-4 py-3"><Status value={row.status} /></td>
-          <td className="px-4 py-3">{row.subject}</td>
-          <td className="px-4 py-3">{row.detail}</td>
-          <td className="px-4 py-3">{formatTime(row.timestamp)}</td>
-        </tr>
-      ))}
+      {rows.map((row) => {
+        const isInvestigation = row.type === 'Investigation';
+        return (
+          <tr
+            key={row.id}
+            onClick={() => isInvestigation && onSelect(row.id)}
+            className={`border-t border-[#e5e7eb] ${isInvestigation ? 'cursor-pointer hover:bg-[#f8fafc]' : ''}`}
+          >
+            <td className="px-4 py-3 font-medium">{row.type}</td>
+            <td className="px-4 py-3"><Status value={row.status} /></td>
+            <td className="px-4 py-3">{row.subject}</td>
+            <td className="px-4 py-3">{row.detail}</td>
+            <td className="px-4 py-3">{formatTime(row.timestamp)}</td>
+          </tr>
+        );
+      })}
     </Table>
   );
 };
