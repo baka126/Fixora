@@ -31,6 +31,8 @@ type DashboardSnapshot struct {
 	AuditEvents      []DashboardAuditEvent    `json:"auditEvents"`
 	Pipeline         []DashboardPipelineStage `json:"pipeline"`
 	SettingsSections []DashboardSettings      `json:"settingsSections"`
+	ClusterCostMo    float64                  `json:"clusterCostMo"`
+	ActiveNodes      int                      `json:"activeNodes"`
 }
 
 type DashboardMetadata struct {
@@ -154,12 +156,14 @@ type DashboardGitOpsSource struct {
 }
 
 type DashboardPrediction struct {
-	ID             string  `json:"id"`
-	Namespace      string  `json:"namespace"`
-	PodName        string  `json:"podName"`
-	LastAlertAge   string  `json:"lastAlertAge"`
-	LastGrowthRate float64 `json:"lastGrowthRate"`
-	Risk           string  `json:"risk"`
+	ID               string  `json:"id"`
+	Namespace        string  `json:"namespace"`
+	PodName          string  `json:"podName"`
+	LastAlertAge     string  `json:"lastAlertAge"`
+	LastGrowthRate   float64 `json:"lastGrowthRate"`
+	Risk             string  `json:"risk"`
+	PreventionCostMo float64 `json:"preventionCostMo"`
+	DowntimeRiskHr   float64 `json:"downtimeRiskHr"`
 }
 
 type DashboardAuditEvent struct {
@@ -263,10 +267,12 @@ type dashboardFileChange struct {
 }
 
 type dashboardPredictionRow struct {
-	Namespace      string
-	PodName        string
-	LastAlertTime  time.Time
-	LastGrowthRate float64
+	Namespace        string
+	PodName          string
+	LastAlertTime    time.Time
+	LastGrowthRate   float64
+	PreventionCostMo float64
+	DowntimeRiskHr   float64
 }
 
 type dashboardAlertRow struct {
@@ -413,6 +419,12 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
 	snapshot.Predictions = dashboardPredictions(predictions)
 	snapshot.AuditEvents = dashboardAuditEvents(investigations, remediations, alerts)
+	
+	// Add FinOps Cluster Cost
+	clusterCost, activeNodes := c.calculateClusterCostSnapshot(ctx)
+	snapshot.ClusterCostMo = clusterCost
+	snapshot.ActiveNodes = activeNodes
+	
 	return snapshot
 }
 
@@ -581,7 +593,7 @@ func queryDashboardRemediations(ctx context.Context, db *sql.DB, limit int) []da
 
 func queryDashboardPredictions(ctx context.Context, db *sql.DB, limit int) []dashboardPredictionRow {
 	rows, err := db.QueryContext(ctx, `
-		SELECT namespace, pod_name, last_alert_time, last_growth_rate
+		SELECT namespace, pod_name, last_alert_time, last_growth_rate, COALESCE(prevention_cost_mo, 0), COALESCE(downtime_risk_hr, 0)
 		FROM predictions
 		ORDER BY last_alert_time DESC
 		LIMIT $1
@@ -593,12 +605,9 @@ func queryDashboardPredictions(ctx context.Context, db *sql.DB, limit int) []das
 
 	var out []dashboardPredictionRow
 	for rows.Next() {
-		var row dashboardPredictionRow
-		if err := rows.Scan(&row.Namespace, &row.PodName, &row.LastAlertTime, &row.LastGrowthRate); err == nil {
-			out = append(out, row)
-		}
-	}
-	return out
+}
+
+	for rows.Next() {
 }
 
 func queryDashboardAlerts(ctx context.Context, db *sql.DB, limit int) []dashboardAlertRow {
@@ -710,12 +719,14 @@ func dashboardPredictions(rows []dashboardPredictionRow) []DashboardPrediction {
 			risk = "medium"
 		}
 		out = append(out, DashboardPrediction{
-			ID:             fmt.Sprintf("prediction-%d", i+1),
-			Namespace:      row.Namespace,
-			PodName:        row.PodName,
-			LastAlertAge:   humanAge(row.LastAlertTime),
-			LastGrowthRate: row.LastGrowthRate,
-			Risk:           risk,
+			ID:               fmt.Sprintf("prediction-%d", i+1),
+			Namespace:        row.Namespace,
+			PodName:          row.PodName,
+			LastAlertAge:     humanAge(row.LastAlertTime),
+			LastGrowthRate:   row.LastGrowthRate,
+			Risk:             risk,
+			PreventionCostMo: row.PreventionCostMo,
+			DowntimeRiskHr:   row.DowntimeRiskHr,
 		})
 	}
 	return out
@@ -1059,4 +1070,33 @@ func humanAge(t time.Time) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+	for rows.Next() {
+		var row dashboardPredictionRow
+		if err := rows.Scan(&row.Namespace, &row.PodName, &row.LastAlertTime, &row.LastGrowthRate, &row.PreventionCostMo, &row.DowntimeRiskHr); err == nil {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64, int) {
+	if c.clientset == nil || c.pricingProvider == nil {
+		return 0, 0
+	}
+	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil || len(nodes.Items) == 0 {
+		return 0, 0
+	}
+
+	var nodeInfos []finops.NodeInfo
+	for _, n := range nodes.Items {
+		nodeInfos = append(nodeInfos, finops.NodeInfo{
+			Name:   n.Name,
+			Labels: n.Labels,
+		})
+	}
+
+	cost, _ := finops.CalculateClusterCost(nodeInfos, c.pricingProvider)
+	return cost, len(nodeInfos)
 }

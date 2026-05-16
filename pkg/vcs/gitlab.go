@@ -170,7 +170,7 @@ func (g *GitLabProvider) GetPullRequestStatus(ctx context.Context, repoOwner, re
 
 func (g *GitLabProvider) AppendCommit(ctx context.Context, repoOwner, repoName, branch string, files []FileChange, message string) error {
 	projectID := fmt.Sprintf("%s/%s", repoOwner, repoName)
-	
+
 	var actions []*gitlab.CommitActionOptions
 	for _, file := range files {
 		action := gitlab.FileUpdate

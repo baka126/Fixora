@@ -149,6 +149,8 @@ export interface DashboardPrediction {
   lastAlertAge: string;
   lastGrowthRate: number;
   risk: string;
+  preventionCostMo?: number;
+  downtimeRiskHr?: number;
 }
 
 export interface DashboardAuditEvent {
@@ -219,4 +221,6 @@ export interface DashboardState {
   auditEvents: DashboardAuditEvent[];
   pipeline: DashboardPipelineStage[];
   settingsSections: DashboardSettingsSection[];
+  clusterCostMo?: number;
+  activeNodes?: number;
 }

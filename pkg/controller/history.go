@@ -30,8 +30,10 @@ type PodHistory struct {
 }
 
 type PredictionState struct {
-	LastAlertTime  time.Time
-	LastGrowthRate float64
+	LastAlertTime     time.Time
+	LastGrowthRate    float64
+	PreventionCostMo  float64
+	DowntimeRiskHr    float64
 }
 
 type historyCache struct {
@@ -134,8 +136,12 @@ func (h *historyCache) initDB() {
 			pod_name VARCHAR(255) NOT NULL,
 			last_alert_time TIMESTAMP NOT NULL,
 			last_growth_rate DOUBLE PRECISION NOT NULL,
+			prevention_cost_mo DOUBLE PRECISION DEFAULT 0,
+			downtime_risk_hr DOUBLE PRECISION DEFAULT 0,
 			UNIQUE(namespace, pod_name)
 		);`,
+		`ALTER TABLE predictions ADD COLUMN IF NOT EXISTS prevention_cost_mo DOUBLE PRECISION DEFAULT 0;`,
+		`ALTER TABLE predictions ADD COLUMN IF NOT EXISTS downtime_risk_hr DOUBLE PRECISION DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS pending_fixes (
 			callback_id VARCHAR(255) PRIMARY KEY,
 			created_at TIMESTAMP NOT NULL,
@@ -421,9 +427,9 @@ func (h *historyCache) GetPredictionState(ctx context.Context, namespace, podNam
 		return nil, false
 	}
 
-	query := `SELECT last_alert_time, last_growth_rate FROM predictions WHERE namespace = $1 AND pod_name = $2`
+	query := `SELECT last_alert_time, last_growth_rate, prevention_cost_mo, downtime_risk_hr FROM predictions WHERE namespace = $1 AND pod_name = $2`
 	var state PredictionState
-	err := h.db.QueryRowContext(ctx, query, namespace, podName).Scan(&state.LastAlertTime, &state.LastGrowthRate)
+	err := h.db.QueryRowContext(ctx, query, namespace, podName).Scan(&state.LastAlertTime, &state.LastGrowthRate, &state.PreventionCostMo, &state.DowntimeRiskHr)
 	if err == sql.ErrNoRows {
 		return nil, false
 	} else if err != nil {
@@ -434,18 +440,19 @@ func (h *historyCache) GetPredictionState(ctx context.Context, namespace, podNam
 	return &state, true
 }
 
-func (h *historyCache) UpdatePredictionState(ctx context.Context, namespace, podName string, alertTime time.Time, growthRate float64) {
+func (h *historyCache) UpdatePredictionState(ctx context.Context, namespace, podName string, alertTime time.Time, growthRate, preventionCost, downtimeRisk float64) {
 	if h.db == nil {
 		return
 	}
 
 	query := `
-		INSERT INTO predictions (namespace, pod_name, last_alert_time, last_growth_rate)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO predictions (namespace, pod_name, last_alert_time, last_growth_rate, prevention_cost_mo, downtime_risk_hr)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (namespace, pod_name)
-		DO UPDATE SET last_alert_time = EXCLUDED.last_alert_time, last_growth_rate = EXCLUDED.last_growth_rate
+		DO UPDATE SET last_alert_time = EXCLUDED.last_alert_time, last_growth_rate = EXCLUDED.last_growth_rate,
+		prevention_cost_mo = EXCLUDED.prevention_cost_mo, downtime_risk_hr = EXCLUDED.downtime_risk_hr
 	`
-	_, err := h.db.ExecContext(ctx, query, namespace, podName, alertTime, growthRate)
+	_, err := h.db.ExecContext(ctx, query, namespace, podName, alertTime, growthRate, preventionCost, downtimeRisk)
 	if err != nil {
 		slog.Error("Failed to update prediction state", "error", err)
 	}

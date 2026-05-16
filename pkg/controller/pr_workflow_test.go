@@ -22,6 +22,10 @@ func (p *duplicateCheckProvider) CreatePullRequest(ctx context.Context, opts vcs
 	return "", nil
 }
 
+func (p *duplicateCheckProvider) AppendCommit(ctx context.Context, repoOwner, repoName, branch string, files []vcs.FileChange, message string) error {
+	return nil
+}
+
 func (p *duplicateCheckProvider) GetFileContent(ctx context.Context, repoOwner, repoName, path, ref string) ([]byte, error) {
 	if p.files != nil {
 		return p.files[path], nil

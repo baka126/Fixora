@@ -39,12 +39,55 @@ func (m *MultiPricingProvider) GetProfileForInstance(vendor, region, instanceTyp
 	return nil, fmt.Errorf("no pricing profile found for %s %s in %s", vendor, instanceType, region)
 }
 
+// ParseNodeLabels extracts cloud provider details from standard Kubernetes node labels.
+func ParseNodeLabels(labels map[string]string) (vendor, region, instanceType string) {
+	// Standard topology labels
+	region = labels["topology.kubernetes.io/region"]
+	if region == "" {
+		region = labels["failure-domain.beta.kubernetes.io/region"]
+	}
+
+	instanceType = labels["node.kubernetes.io/instance-type"]
+	if instanceType == "" {
+		instanceType = labels["beta.kubernetes.io/instance-type"]
+	}
+
+	// Try to determine vendor explicitly
+	providerID := labels["providerID"] // Sometimes exposed directly
+	if providerID != "" {
+		if strings.HasPrefix(providerID, "aws://") {
+			vendor = "aws"
+		} else if strings.HasPrefix(providerID, "gce://") {
+			vendor = "gcp"
+		} else if strings.HasPrefix(providerID, "azure://") {
+			vendor = "azure"
+		}
+	}
+
+	// Vendor specific labels
+	if vendor == "" {
+		if _, ok := labels["eks.amazonaws.com/nodegroup"]; ok {
+			vendor = "aws"
+		} else if _, ok := labels["cloud.google.com/gke-nodepool"]; ok {
+			vendor = "gcp"
+		} else if _, ok := labels["kubernetes.azure.com/cluster"]; ok {
+			vendor = "azure"
+		}
+	}
+
+	if vendor == "" && instanceType != "" {
+		vendor = DetectVendor(instanceType, region)
+	}
+
+	return vendor, region, instanceType
+}
+
+
 // DetectVendor uses heuristics to identify the cloud provider from instance/region metadata.
 func DetectVendor(instanceType, region string) string {
 	if strings.HasPrefix(instanceType, "Standard_") || strings.HasPrefix(instanceType, "Basic_") || !strings.Contains(region, "-") {
 		return "azure"
 	}
-	// Simple heuristic for GCP: regions like us-central1, nodes with machine type like n1-standard-1
 	if strings.Contains(instanceType, "-") && (strings.HasPrefix(instanceType, "n1-") || strings.HasPrefix(instanceType, "e2-") || strings.HasPrefix(instanceType, "c2-")) {
 		return "gcp"
 	}

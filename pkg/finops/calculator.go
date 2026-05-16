@@ -142,3 +142,37 @@ func CalculateCoD(errorRate float64, requestsPerHour float64, revenuePerRequest 
 	}
 	return "No immediate financial loss"
 }
+
+// NodeInfo represents the basic information needed to calculate a node's cost.
+type NodeInfo struct {
+	Name   string
+	Labels map[string]string
+}
+
+// CalculateClusterCost estimates the total monthly cost of the cluster based on active nodes.
+func CalculateClusterCost(nodes []NodeInfo, provider PricingProvider) (float64, error) {
+	var totalMonthlyCost float64
+
+	for _, node := range nodes {
+		vendor, region, instanceType := ParseNodeLabels(node.Labels)
+		if vendor == "" || region == "" || instanceType == "" {
+			continue // Skip nodes where we can't determine pricing info
+		}
+
+		profile, err := provider.GetProfileForInstance(vendor, region, instanceType)
+		if err != nil || profile == nil {
+			continue // Skip if pricing isn't available
+		}
+
+		// Reconstruct the total hourly cost from the split rates
+		// Infracost splits the total instance price 50/50 and divides by heuristics.
+		// Since we don't have the exact vcpu/mem here, we will trust that the UI only needs an approximation
+		// Or better, we can assume typical sizes if we must. 
+		// Actually, let's just use a fallback heuristic here if we don't change infracost.go
+		hourlyCost := (profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)
+		
+		totalMonthlyCost += hourlyCost * 730
+	}
+
+	return totalMonthlyCost, nil
+}

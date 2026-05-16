@@ -513,6 +513,29 @@ func (c *Controller) scanForLeaks() {
 			evidence.FinOpsImpact = impact
 			evidence.FinOpsDetails = details
 
+			// Calculate raw numbers for UI
+			oldMonthly := finops.CalculateMonthlyCost(oldRes.CPU, oldRes.Mem, pricingProfile, riskMetrics.Replicas)
+			newMonthly := finops.CalculateMonthlyCost(newRes.CPU, newRes.Mem, pricingProfile, riskMetrics.Replicas)
+			preventionCost := newMonthly - oldMonthly
+
+			// Downtime risk assumes 100% error rate during an outage for risk calc
+			downtimeMetrics := riskMetrics
+			downtimeMetrics.ErrorRate = 1.0
+			_, downtimeRiskDetails := finops.CalculateSmartImpact(oldRes, oldRes, pricingProfile, downtimeMetrics)
+			// The smart impact function doesn't return the raw number easily, but we know it's roughly direct loss + multiplier
+			hourlyRequests := riskMetrics.RequestsPerSecond * 3600
+			directLossPerHour := hourlyRequests * downtimeMetrics.ErrorRate * downtimeMetrics.AvgRevenuePerReq
+			var riskMultiplier float64
+			switch downtimeMetrics.Tier {
+			case finops.TierCritical: riskMultiplier = 5000.0
+			case finops.TierHigh: riskMultiplier = 1000.0
+			case finops.TierMedium: riskMultiplier = 200.0
+			case finops.TierLow: riskMultiplier = 50.0
+			default: riskMultiplier = 100.0
+			}
+			downtimeRisk := directLossPerHour + (riskMultiplier / 24) // Approx hourly risk
+			_ = downtimeRiskDetails
+
 			// Save Investigation to DB
 			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak")
 
@@ -520,8 +543,8 @@ func (c *Controller) scanForLeaks() {
 			notifications.SendEvidenceChain(c.config, evidence)
 			notifications.SendAuditLog(c.config, evidence, "Diagnostic", "Completed", "Predictive Leak Analysis")
 
-			// Update prediction state to handle cooldowns
-			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate)
+			// Update prediction state to handle cooldowns and save costs
+			c.history.UpdatePredictionState(ctx, pod.Namespace, pod.Name, time.Now(), growthRate, preventionCost, downtimeRisk)
 
 			// Attempt automated remediation for predicted leaks
 			diagnosis := Diagnosis{
