@@ -11,6 +11,8 @@ import {
   Settings,
   Edit2,
   Users,
+  GitBranch,
+  ShieldAlert,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useState } from 'react';
@@ -21,6 +23,7 @@ import { UserManagementPanel } from '../components/UserManagementPanel';
 import type {
   DashboardAuditEvent,
   DashboardGitOpsSource,
+  DashboardNodeCost,
   DashboardPrediction,
   DashboardRemediation,
   DashboardSettingsSection,
@@ -59,12 +62,19 @@ const pageMeta: Record<PageKind, { title: string; subtitle: string; icon: typeof
 export const DataPage = ({ kind }: { kind: PageKind }) => {
   const dashboard = useStore((state) => state.dashboard);
   const currentUser = useStore((state) => state.user);
+  const searchQuery = useStore((state) => state.searchQuery);
+  const timeRange = useStore((state) => state.timeRange);
   const meta = pageMeta[kind];
   const Icon = meta.icon;
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
   const [editingRemediationId, setEditingRemediationId] = useState<number | null>(null);
   const [showUserManagement, setShowUserManagement] = useState(false);
   const hasClusterCost = Boolean((dashboard?.clusterCostMo || 0) > 0 || (dashboard?.activeNodes || 0) > 0);
+  const filteredRemediations = filterRemediations(dashboard?.remediations || [], searchQuery, timeRange);
+  const filteredGitOps = filterGitOpsSources(dashboard?.gitopsSources || [], searchQuery);
+  const filteredPredictions = filterPredictions(dashboard?.predictions || [], searchQuery, timeRange);
+  const filteredAuditEvents = filterAuditEvents(dashboard?.auditEvents || [], searchQuery, timeRange);
+  const filteredSettings = filterSettings(dashboard?.settingsSections || [], searchQuery);
 
   const formatCurrency = (val: number | undefined) => {
     if (val === undefined || isNaN(val)) return '-';
@@ -94,7 +104,7 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
       )}
 
       {kind === 'predictions' && (
-        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(360px,0.8fr)]">
           <div className="rounded-lg border border-[#e5e7eb] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <h3 className="text-[13px] font-medium text-[#647084]">Total Cluster Compute Cost</h3>
             {hasClusterCost ? (
@@ -103,14 +113,7 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
               <p className="mt-2 text-[13px] text-[#647084]">Unavailable until Fixora can identify node pricing.</p>
             )}
           </div>
-          <div className="rounded-lg border border-[#e5e7eb] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-            <h3 className="text-[13px] font-medium text-[#647084]">Active Analyzed Nodes</h3>
-            {hasClusterCost ? (
-              <p className="mt-1 text-2xl font-semibold text-[#111827]">{dashboard?.activeNodes || 0}</p>
-            ) : (
-              <p className="mt-2 text-[13px] text-[#647084]">Node data will appear after the backend can list cluster nodes.</p>
-            )}
-          </div>
+          <NodeCostList nodes={dashboard?.nodeCosts || []} activeNodes={dashboard?.activeNodes || 0} />
         </div>
       )}
 
@@ -126,11 +129,11 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
             </div>
           </div>
         </header>
-        {kind === 'remediations' && <Remediations rows={dashboard?.remediations || []} onEdit={setEditingRemediationId} />}
-        {kind === 'gitops' && <GitOpsSources rows={dashboard?.gitopsSources || []} />}
-        {kind === 'predictions' && <Predictions rows={dashboard?.predictions || []} />}
-        {kind === 'audit' && <AuditEvents rows={dashboard?.auditEvents || []} onSelect={setSelectedAuditId} />}
-        {kind === 'settings' && <SettingsSections rows={dashboard?.settingsSections || []} />}
+        {kind === 'remediations' && <Remediations rows={filteredRemediations} onEdit={setEditingRemediationId} />}
+        {kind === 'gitops' && <GitOpsSources rows={filteredGitOps} />}
+        {kind === 'predictions' && <Predictions rows={filteredPredictions} />}
+        {kind === 'audit' && <AuditEvents rows={filteredAuditEvents} onSelect={setSelectedAuditId} />}
+        {kind === 'settings' && <SettingsSections rows={filteredSettings} />}
       </section>
 
       {selectedAuditId && (
@@ -156,35 +159,71 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
 
 const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: (id: number) => void }) => {
   if (!rows.length) return <Empty title="No remediations recorded yet" message="Generated patches, pending approvals, PR links, and validation outcomes will appear here." />;
+  const open = rows.filter((row) => /generated|pending|pr_opened|observing/.test(row.status)).length;
+  const failed = rows.filter((row) => /failed/.test(row.status)).length;
+  const succeeded = rows.filter((row) => /succeeded|reverted/.test(row.status)).length;
   return (
-    <Table headers={['Status', 'Workload', 'Repository', 'Branch', 'Strategy', 'PR', 'Actions']}>
-      {rows.map((row) => {
-        const canEdit = row.prUrl && row.status !== 'merged' && row.status !== 'closed' && row.status !== 'failed';
-        return (
-          <tr key={row.id} className="border-t border-[#e5e7eb]">
-            <td className="px-4 py-3"><Status value={row.status} /></td>
-            <td className="px-4 py-3 font-medium">{row.workload.kind}/{row.workload.name}</td>
-            <td className="px-4 py-3">{row.repository || 'Not mapped'}</td>
-            <td className="px-4 py-3">{row.headBranch || row.baseBranch || 'Pending'}</td>
-            <td className="px-4 py-3">{row.strategy || 'Pending'}</td>
-            <td className="px-4 py-3">{row.prUrl ? <External href={row.prUrl} label="Open" /> : 'Not opened'}</td>
-            <td className="px-4 py-3">
-              {canEdit && (
-                <button
-                  onClick={() => onEdit(row.id)}
-                  className="flex items-center gap-1.5 rounded text-[12px] font-medium text-[#2563eb] hover:bg-[#eff6ff] px-2 py-1 transition-colors"
-                >
-                  <Edit2 className="h-3.5 w-3.5" />
-                  Edit
-                </button>
-              )}
-            </td>
-          </tr>
-        );
-      })}
-    </Table>
+    <div className="space-y-4 p-4">
+      <div className="grid gap-3 md:grid-cols-3">
+        <RemediationStat icon={<GitBranch className="h-4 w-4" />} label="Active workflow" value={`${open}`} tone="text-[#2563eb]" />
+        <RemediationStat icon={<CheckCircle2 className="h-4 w-4" />} label="Validated or reverted" value={`${succeeded}`} tone="text-[#15803d]" />
+        <RemediationStat icon={<ShieldAlert className="h-4 w-4" />} label="Needs attention" value={`${failed}`} tone="text-[#dc2626]" />
+      </div>
+      <div className="grid gap-3 xl:grid-cols-2">
+        {rows.map((row) => {
+          const canEdit = row.prUrl && !remediationClosed(row.status);
+          return (
+            <article key={row.id} className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Status value={row.status} />
+                    <span className="text-[11px] text-[#647084]">{row.age}</span>
+                  </div>
+                  <h3 className="mt-3 truncate text-[14px] font-semibold text-[#111827]">{row.workload.kind}/{row.workload.name}</h3>
+                  <p className="mt-1 truncate text-[12px] text-[#647084]">{row.repository || 'Repository not mapped'} · {row.strategy || 'strategy pending'}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {canEdit && (
+                    <button
+                      onClick={() => onEdit(row.id)}
+                      className="grid h-8 w-8 place-items-center rounded-md border border-[#bfdbfe] bg-[#eff6ff] text-[#2563eb]"
+                      title="Edit remediation diff"
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </button>
+                  )}
+                  {row.prUrl && <External href={row.prUrl} label="PR" />}
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 border-t border-[#e5e7eb] pt-3 text-[12px]">
+                <MiniKV label="Branch" value={row.headBranch || row.baseBranch || 'Pending'} />
+                <MiniKV label="Namespace" value={row.workload.namespace} />
+                <MiniKV label="Files" value={`${row.files?.length || 0}`} />
+                <MiniKV label="GitOps" value={row.gitops?.manifestType || 'Unknown'} />
+              </div>
+              {row.failureReason && <p className="mt-3 line-clamp-2 rounded-md bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]">{row.failureReason}</p>}
+            </article>
+          );
+        })}
+      </div>
+    </div>
   );
 };
+
+const RemediationStat = ({ icon, label, value, tone }: { icon: ReactNode; label: string; value: string; tone: string }) => (
+  <div className="rounded-lg border border-[#e5e7eb] bg-[#f8fafc] p-3">
+    <div className={`flex items-center gap-2 text-[12px] font-medium ${tone}`}>{icon}{label}</div>
+    <div className="mt-2 text-2xl font-semibold text-[#111827]">{value}</div>
+  </div>
+);
+
+const MiniKV = ({ label, value }: { label: string; value?: string }) => (
+  <div className="min-w-0">
+    <div className="text-[11px] font-semibold uppercase text-[#94a3b8]">{label}</div>
+    <div className="truncate text-[#334155]">{value || 'Unknown'}</div>
+  </div>
+);
 
 const GitOpsSources = ({ rows }: { rows: DashboardGitOpsSource[] }) => {
   if (!rows.length) return <Empty title="No GitOps sources mapped yet" message="ArgoCD and Flux source mappings will appear after Fixora correlates workloads to repositories." />;
@@ -224,6 +263,36 @@ const Predictions = ({ rows }: { rows: DashboardPrediction[] }) => {
     </Table>
   );
 };
+
+const NodeCostList = ({ nodes, activeNodes }: { nodes: DashboardNodeCost[]; activeNodes: number }) => (
+  <div className="rounded-lg border border-[#e5e7eb] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+    <div className="flex items-center justify-between">
+      <h3 className="text-[13px] font-medium text-[#647084]">Node Cost Breakdown</h3>
+      <span className="rounded-md bg-[#eff6ff] px-2 py-1 text-[11px] font-medium text-[#2563eb]">{activeNodes} nodes</span>
+    </div>
+    {nodes.length ? (
+      <div className="mt-3 max-h-56 space-y-2 overflow-y-auto pr-1">
+        {nodes.map((node) => (
+          <div key={node.name} className="rounded-md border border-[#e5e7eb] px-3 py-2">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-[13px] font-semibold text-[#111827]">{node.name}</div>
+                <div className="mt-0.5 truncate text-[11px] text-[#647084]">{node.vendor} · {node.region} · {node.instanceType}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[13px] font-semibold text-[#111827]">{node.monthlyCost > 0 ? formatCurrency(node.monthlyCost) : '-'}</div>
+                <div className={`text-[10px] font-medium ${node.status === 'priced' ? 'text-[#15803d]' : 'text-[#ea580c]'}`}>{node.status}</div>
+              </div>
+            </div>
+            {node.pricingSource && <div className="mt-1 truncate text-[10px] text-[#94a3b8]">{node.pricingSource}</div>}
+          </div>
+        ))}
+      </div>
+    ) : (
+      <p className="mt-2 text-[13px] text-[#647084]">Node pricing rows will appear after Fixora can list cluster nodes and resolve provider metadata.</p>
+    )}
+  </div>
+);
 
 const AuditEvents = ({ rows, onSelect }: { rows: DashboardAuditEvent[]; onSelect: (id: string) => void }) => {
   if (!rows.length) return <Empty title="No audit events recorded yet" message="Investigations, alerts, and remediation decisions will be logged here." />;
@@ -332,3 +401,76 @@ const moneyDeltaClass = (val: number | undefined) => {
   if (val === undefined || Number.isNaN(val) || Math.abs(val) < 0.01) return 'text-[#647084]';
   return val > 0 ? 'text-[#ea580c]' : 'text-[#15803d]';
 };
+
+const filterRemediations = (rows: DashboardRemediation[], query: string, range: string) =>
+  rows.filter((row) => withinAge(row.age, range) && matchesQuery(query, [
+    row.status,
+    row.title,
+    row.repository,
+    row.baseBranch,
+    row.headBranch,
+    row.strategy,
+    row.failureReason,
+    row.workload.kind,
+    row.workload.name,
+    row.workload.namespace,
+    row.gitops?.app,
+    row.gitops?.path,
+    row.gitops?.manifestType,
+  ]));
+
+const filterGitOpsSources = (rows: DashboardGitOpsSource[], query: string) =>
+  rows.filter((row) => matchesQuery(query, [row.controller, row.app, row.namespace, row.repo, row.revision, row.path, row.manifestType, row.overlay]));
+
+const filterPredictions = (rows: DashboardPrediction[], query: string, range: string) =>
+  rows.filter((row) => withinAge(row.lastAlertAge, range) && matchesQuery(query, [row.risk, row.namespace, row.podName]));
+
+const filterAuditEvents = (rows: DashboardAuditEvent[], query: string, range: string) =>
+  rows.filter((row) => withinTimestamp(row.timestamp, range) && matchesQuery(query, [row.type, row.status, row.subject, row.detail]));
+
+const filterSettings = (rows: DashboardSettingsSection[], query: string) =>
+  rows.filter((row) => matchesQuery(query, [row.name, row.description, row.status]));
+
+const matchesQuery = (query: string, values: Array<string | undefined>) => {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return true;
+  return values.filter(Boolean).join(' ').toLowerCase().includes(normalized);
+};
+
+const withinAge = (age: string, range: string) => ageToMinutes(age) <= timeRangeToMinutes(range);
+
+const withinTimestamp = (timestamp: string, range: string) => {
+  if (!timestamp || range === 'All time') return true;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return true;
+  return (Date.now() - date.getTime()) / 60000 <= timeRangeToMinutes(range);
+};
+
+const timeRangeToMinutes = (range: string) => {
+  switch (range) {
+    case 'Last 1h':
+      return 60;
+    case 'Last 6h':
+      return 360;
+    case 'Last 7d':
+      return 10080;
+    case 'Last 30d':
+      return 43200;
+    case 'All time':
+      return Infinity;
+    case 'Last 24h':
+    default:
+      return 1440;
+  }
+};
+
+const ageToMinutes = (age: string) => {
+  const match = (age || '').trim().toLowerCase().match(/^(\d+)\s*(m|h|d)$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (match[2] === 'd') return value * 1440;
+  if (match[2] === 'h') return value * 60;
+  return value;
+};
+
+const remediationClosed = (status: string) => /merged|closed|succeeded|reverted|production_failed|revert_failed/.test(status || '');

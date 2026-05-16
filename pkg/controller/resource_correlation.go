@@ -213,7 +213,41 @@ func (c *Controller) correlateServices(ctx context.Context, pod *v1.Pod, corr *R
 		} else {
 			corr.add(fmt.Sprintf("Service %s selects this pod but endpoints do not include it", svc.Name))
 		}
+		c.correlateIngressesForService(ctx, pod.Namespace, svc.Name, corr)
 	}
+}
+
+func (c *Controller) correlateIngressesForService(ctx context.Context, namespace, serviceName string, corr *ResourceCorrelation) {
+	ingresses, err := c.clientset.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	for _, ingress := range ingresses.Items {
+		if !ingressReferencesService(ingress, serviceName) {
+			continue
+		}
+		corr.relate("Ingress", ingress.Name)
+		corr.add(fmt.Sprintf("Ingress %s routes traffic to Service %s", ingress.Name, serviceName))
+	}
+}
+
+func ingressReferencesService(ingress networkingv1.Ingress, serviceName string) bool {
+	if ingress.Spec.DefaultBackend != nil &&
+		ingress.Spec.DefaultBackend.Service != nil &&
+		ingress.Spec.DefaultBackend.Service.Name == serviceName {
+		return true
+	}
+	for _, rule := range ingress.Spec.Rules {
+		if rule.HTTP == nil {
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			if path.Backend.Service != nil && path.Backend.Service.Name == serviceName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Controller) correlateStorage(ctx context.Context, pod *v1.Pod, corr *ResourceCorrelation) {

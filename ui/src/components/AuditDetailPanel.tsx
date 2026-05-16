@@ -113,8 +113,8 @@ export const AuditDetailPanel: React.FC<Props> = ({ eventId, onClose }) => {
                     <h3 className="font-semibold uppercase tracking-wider text-xs">AI Interaction</h3>
                   </div>
                   <div className="space-y-4">
-                    <DetailBlock label="Input Content (Prompt)" content={data.aiPrompt} isCode />
-                    <DetailBlock label="Raw AI Response" content={data.aiResponse} isCode />
+                    <DetailBlock label="Input Content (Prompt)" content={data.aiPrompt} isCode emptyMessage="No AI prompt was captured for this investigation. This can happen for deterministic diagnoses or records created before audit capture was enabled." />
+                    <DetailBlock label="Raw AI Response" content={data.aiResponse} isCode emptyMessage="No AI response was captured for this investigation." />
                   </div>
                 </section>
               </>
@@ -126,17 +126,17 @@ export const AuditDetailPanel: React.FC<Props> = ({ eventId, onClose }) => {
   );
 };
 
-const DetailBlock = ({ label, content, isCode, isHighlight }: { label: string; content: string; isCode?: boolean; isHighlight?: boolean }) => {
-  if (!content || content === "Pending" || content === "None") return null;
+const DetailBlock = ({ label, content, isCode, isHighlight, emptyMessage }: { label: string; content: string; isCode?: boolean; isHighlight?: boolean; emptyMessage?: string }) => {
+  const empty = !content || content === "Pending" || content === "None";
   return (
     <div>
       <h4 className="text-[11px] font-bold text-[#647084] uppercase mb-1.5">{label}</h4>
-      <div className={`
-        rounded-lg p-3 text-[12px] leading-relaxed whitespace-pre-wrap font-mono
-        ${isHighlight ? 'bg-[#f0fdf4] text-[#166534] border border-[#bbf7d0]' : 'bg-[#f1f5f9] text-[#334155] border border-[#e2e8f0]'}
-        ${isCode ? 'bg-[#0f172a] text-[#f8fafc] border-none overflow-x-auto max-h-64' : ''}
-      `}>
-        {content}
+      <div className={empty ? 'rounded-lg border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-3 text-[12px] leading-relaxed text-[#647084]' : `
+          rounded-lg p-3 text-[12px] leading-relaxed whitespace-pre-wrap font-mono
+          ${isHighlight ? 'bg-[#f0fdf4] text-[#166534] border border-[#bbf7d0]' : 'bg-[#f1f5f9] text-[#334155] border border-[#e2e8f0]'}
+          ${isCode ? 'bg-[#0f172a] text-[#f8fafc] border-none overflow-x-auto max-h-64' : ''}
+        `}>
+        {empty ? emptyMessage || 'No data captured.' : content}
       </div>
     </div>
   );

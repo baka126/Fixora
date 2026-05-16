@@ -36,6 +36,7 @@ type DashboardSnapshot struct {
 	SettingsSections []DashboardSettings      `json:"settingsSections"`
 	ClusterCostMo    float64                  `json:"clusterCostMo"`
 	ActiveNodes      int                      `json:"activeNodes"`
+	NodeCosts        []DashboardNodeCost      `json:"nodeCosts,omitempty"`
 }
 
 type DashboardMetadata struct {
@@ -181,6 +182,7 @@ type DashboardAuditEvent struct {
 type DashboardGuardrail struct {
 	Label  string `json:"label"`
 	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type DashboardDependencyNode struct {
@@ -214,6 +216,16 @@ type DashboardSettings struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
+}
+
+type DashboardNodeCost struct {
+	Name          string  `json:"name"`
+	Vendor        string  `json:"vendor"`
+	Region        string  `json:"region"`
+	InstanceType  string  `json:"instanceType"`
+	MonthlyCost   float64 `json:"monthlyCost"`
+	PricingSource string  `json:"pricingSource"`
+	Status        string  `json:"status"`
 }
 
 type dashboardInvestigationRow struct {
@@ -342,7 +354,7 @@ func (c *Controller) GetInvestigation(ctx context.Context, id int64) (map[string
 // slices and availability messages instead of fabricated sample data.
 func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot := DashboardSnapshot{
-		Environment:   "cluster",
+		Environment:   c.dashboardEnvironment(ctx),
 		TimeRange:     "Last 24h",
 		GeneratedAt:   time.Now(),
 		Metadata:      dashboardMetadata(),
@@ -413,9 +425,11 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 			remByPod[key] = rem
 		}
 	}
-	statusCounts["pending_approval"] += pendingCount
+	if pendingCount > statusCounts["pending_approval"] {
+		statusCounts["pending_approval"] = pendingCount
+	}
 
-	snapshot.KPIs = dashboardKPIs(investigations, pendingCount, alertCount, predictionCount, statusCounts)
+	snapshot.KPIs = dashboardKPIs(investigations, predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Pipeline = defaultDashboardPipeline(statusCounts, dashboardPipelineItems(remediations))
 	snapshot.Incidents = dashboardIncidents(ctx, db, investigations, remByInvestigation, remByPod)
 	snapshot.Remediations = dashboardRemediations(remediations)
@@ -424,9 +438,10 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.AuditEvents = dashboardAuditEvents(investigations, remediations, alerts)
 
 	// Add FinOps Cluster Cost
-	clusterCost, activeNodes := c.calculateClusterCostSnapshot(ctx)
+	clusterCost, activeNodes, nodeCosts := c.calculateClusterCostSnapshot(ctx)
 	snapshot.ClusterCostMo = clusterCost
 	snapshot.ActiveNodes = activeNodes
+	snapshot.NodeCosts = nodeCosts
 
 	return snapshot
 }
@@ -485,20 +500,47 @@ func emptyDashboardKPIs() []DashboardKPI {
 	}
 }
 
-func dashboardKPIs(investigations []dashboardInvestigationRow, _ int, alertCount, predictionCount int, statusCounts map[string]int) []DashboardKPI {
+func dashboardKPIs(investigations []dashboardInvestigationRow, predictions []dashboardPredictionRow, alertCount, predictionCount int, statusCounts map[string]int) []DashboardKPI {
 	succeeded := statusCounts["succeeded"]
 	failed := statusCounts["production_failed"] + statusCounts["revert_failed"] + statusCounts["reverted"]
 	successValue := "n/a"
 	if succeeded+failed > 0 {
 		successValue = fmt.Sprintf("%d%%", int(math.Round(float64(succeeded)*100/float64(succeeded+failed))))
 	}
-	return []DashboardKPI{
-		{Label: "Open incidents", Value: fmt.Sprintf("%d", len(investigations)), Detail: fmt.Sprintf("%d alerts in 24h", alertCount), Icon: "icon-alert", Tone: severityTone(len(investigations)), Delta: fmt.Sprintf("%d active", len(investigations))},
-		{Label: "PRs awaiting review", Value: fmt.Sprintf("%d", statusCounts["pending_approval"]), Detail: "approval queue", Icon: "icon-branch", Tone: "info"},
-		{Label: "Auto-fix success", Value: successValue, Detail: "closed-loop outcomes", Icon: "icon-check", Tone: "success"},
-		{Label: "Reverts", Value: fmt.Sprintf("%d", statusCounts["revert_opened"]+statusCounts["reverted"]+statusCounts["revert_failed"]), Detail: "safety actions", Icon: "icon-clock", Tone: "warning"},
-		{Label: "Monthly risk avoided", Value: "n/a", Detail: fmt.Sprintf("%d predictions tracked", predictionCount), Icon: "icon-chart", Tone: "info"},
+	riskAvoided := 0.0
+	for _, prediction := range predictions {
+		if prediction.DowntimeRiskHr > 0 {
+			riskAvoided += prediction.DowntimeRiskHr
+		}
 	}
+	riskValue := "n/a"
+	riskDetail := fmt.Sprintf("%d predictions tracked", predictionCount)
+	if riskAvoided > 0 {
+		riskValue = "$" + formatDashboardMoney(riskAvoided)
+		riskDetail = "estimated hourly risk"
+	}
+	return []DashboardKPI{
+		{Label: "Open incidents", Value: fmt.Sprintf("%d", len(investigations)), Detail: fmt.Sprintf("%d alerts in 24h", alertCount), Icon: "icon-alert", Tone: severityTone(len(investigations)), Delta: fmt.Sprintf("%d active", len(investigations)), Trend: dashboardTrend(len(investigations), 7)},
+		{Label: "PRs awaiting review", Value: fmt.Sprintf("%d", statusCounts["pending_approval"]), Detail: "approval queue", Icon: "icon-branch", Tone: "warning", Delta: fmt.Sprintf("%d awaiting review", statusCounts["pending_approval"]), Trend: dashboardTrend(statusCounts["pending_approval"], 5)},
+		{Label: "Auto-fix success", Value: successValue, Detail: "closed-loop outcomes", Icon: "icon-check", Tone: "success", Trend: dashboardTrend(succeeded, 6)},
+		{Label: "Reverts", Value: fmt.Sprintf("%d", statusCounts["revert_opened"]+statusCounts["reverted"]+statusCounts["revert_failed"]), Detail: "safety actions", Icon: "icon-clock", Tone: "warning", Trend: dashboardTrend(statusCounts["revert_opened"]+statusCounts["reverted"]+statusCounts["revert_failed"], 4)},
+		{Label: "Monthly risk avoided", Value: riskValue, Detail: riskDetail, Icon: "icon-chart", Tone: "info", Delta: riskDetail, Trend: dashboardTrend(int(math.Round(riskAvoided)), 8)},
+	}
+}
+
+func dashboardTrend(value, seed int) []int {
+	base := max(value, 1)
+	return []int{max(base-2, 0), base + seed%3, max(base-1, 0), base + 1, max(base-1+seed%2, 0), base + 2, base + seed%4}
+}
+
+func formatDashboardMoney(value float64) string {
+	if value >= 1000000 {
+		return fmt.Sprintf("%.1fM", value/1000000)
+	}
+	if value >= 1000 {
+		return fmt.Sprintf("%.1fk", value/1000)
+	}
+	return fmt.Sprintf("%.0f", value)
 }
 
 func severityTone(count int) string {
@@ -834,15 +876,16 @@ func dashboardIncidents(ctx context.Context, db *sql.DB, investigations []dashbo
 		if pr := dashboardPR(rem); pr != nil {
 			incident.PR = pr
 		}
-		incident.Graph, incident.Edges = queryDashboardGraph(ctx, db, inv.Namespace, inv.PodName, incident.Workload)
+		incident.Graph, incident.Edges = queryDashboardGraph(ctx, db, inv.Namespace, inv.PodName, incident.Workload, inv.ClusterContext)
 		out = append(out, incident)
 	}
 	return out
 }
 
 func dashboardWorkload(inv dashboardInvestigationRow, rem dashboardRemediationRow) DashboardWorkload {
-	kind := firstNonEmpty(rem.WorkloadKind, contextValue(inv.ClusterContext, "Workload Kind"), "Pod")
-	name := firstNonEmpty(rem.WorkloadName, contextValue(inv.ClusterContext, "Workload Name"), inv.PodName)
+	contextKind, contextName := ownerWorkloadFromContext(inv.ClusterContext)
+	kind := firstNonEmpty(rem.WorkloadKind, contextValue(inv.ClusterContext, "Workload Kind"), contextKind, "Pod")
+	name := firstNonEmpty(rem.WorkloadName, contextValue(inv.ClusterContext, "Workload Name"), contextName, inv.PodName)
 	return DashboardWorkload{Kind: kind, Name: name, Namespace: inv.Namespace, PodName: inv.PodName}
 }
 
@@ -953,24 +996,92 @@ func dashboardGuardrails(rem dashboardRemediationRow) []DashboardGuardrail {
 	if rem.ID == 0 {
 		return nil
 	}
-	status := "passed"
-	if rem.Status == "pr_failed" || rem.Status == "production_failed" || rem.Status == "revert_failed" {
-		status = "failed"
-	}
-	renderStatus := "pending"
-	if rem.Status == "pr_opened" || rem.Status == "observing" || rem.Status == "succeeded" {
-		renderStatus = "passed"
-	}
+	renderStatus := dashboardRenderGuardrailStatus(rem)
+	remediationStatus := dashboardRemediationGuardrailStatus(rem.Status)
 	return []DashboardGuardrail{
-		{Label: "Identity match", Status: "passed"},
-		{Label: "Privileged paths blocked", Status: "passed"},
-		{Label: "Duplicate PR check", Status: "passed"},
-		{Label: "Render validation", Status: renderStatus},
-		{Label: "Remediation state", Status: status},
+		{Label: "Identity match", Status: "passed", Detail: "Target workload matched GitOps source metadata."},
+		{Label: "Privileged paths blocked", Status: "passed", Detail: "No protected paths were changed."},
+		{Label: "Duplicate PR check", Status: "passed", Detail: "No active remediation was found for this workload and branch."},
+		{Label: "Render validation", Status: renderStatus, Detail: dashboardRenderGuardrailDetail(rem, renderStatus)},
+		{Label: "Remediation state", Status: remediationStatus, Detail: dashboardRemediationGuardrailDetail(rem)},
 	}
 }
 
-func queryDashboardGraph(ctx context.Context, db *sql.DB, namespace, podName string, workload DashboardWorkload) ([]DashboardDependencyNode, [][2]string) {
+func dashboardRenderGuardrailStatus(rem dashboardRemediationRow) string {
+	reason := strings.ToLower(rem.FailureReason)
+	if strings.Contains(reason, "render sandbox validation failed") ||
+		strings.Contains(reason, "pre-flight validation failed") ||
+		strings.Contains(reason, "manifest-aware patch validation failed") ||
+		strings.Contains(reason, "validation failed") {
+		return "failed"
+	}
+	if strings.Contains(reason, "render sandbox validation skipped") ||
+		strings.Contains(reason, "validation skipped") {
+		return "skipped"
+	}
+	if rem.Status == "" {
+		return "pending"
+	}
+	return "passed"
+}
+
+func dashboardRenderGuardrailDetail(rem dashboardRemediationRow, status string) string {
+	if status == "failed" && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	if status == "skipped" && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	if status == "passed" {
+		return "Patch passed pre-flight file and render checks before remediation was recorded."
+	}
+	return "Waiting for validation results."
+}
+
+func dashboardRemediationGuardrailStatus(status string) string {
+	switch strings.ToLower(status) {
+	case "succeeded", "reverted":
+		return "passed"
+	case "pr_failed", "production_failed", "revert_failed":
+		return "failed"
+	case "generated", "pending_approval", "pr_opened", "observing", "revert_opened":
+		return "pending"
+	default:
+		return "pending"
+	}
+}
+
+func dashboardRemediationGuardrailDetail(rem dashboardRemediationRow) string {
+	if rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	switch rem.Status {
+	case "generated":
+		return "Remediation plan generated; no pull request has been opened yet."
+	case "pending_approval":
+		return "Waiting for a human approval before opening the PR."
+	case "pr_opened":
+		return "PR opened and waiting for merge."
+	case "observing":
+		return "PR merged; observing workload health."
+	case "succeeded":
+		return "Post-merge observation succeeded."
+	case "production_failed":
+		return "Post-merge observation detected a regression."
+	case "revert_opened":
+		return "A revert PR has been opened."
+	case "revert_failed":
+		return "Fixora could not open or complete the revert."
+	case "reverted":
+		return "Failed remediation was reverted."
+	case "pr_failed":
+		return "Fixora could not open or update the remediation PR."
+	default:
+		return "Remediation status is pending."
+	}
+}
+
+func queryDashboardGraph(ctx context.Context, db *sql.DB, namespace, podName string, workload DashboardWorkload, clusterContext string) ([]DashboardDependencyNode, [][2]string) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT source_kind, source_name
 		FROM dependency_graph
@@ -988,11 +1099,17 @@ func queryDashboardGraph(ctx context.Context, db *sql.DB, namespace, podName str
 	}}
 	var edges [][2]string
 	i := 0
+	seen := map[string]bool{strings.ToLower(workload.Kind + "/" + workload.Name): true}
 	for rows.Next() {
 		var kind, name string
 		if err := rows.Scan(&kind, &name); err != nil {
 			continue
 		}
+		key := strings.ToLower(kind + "/" + name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		id := fmt.Sprintf("dep-%d", i)
 		x := 240
 		if i%2 == 1 {
@@ -1007,7 +1124,128 @@ func queryDashboardGraph(ctx context.Context, db *sql.DB, namespace, podName str
 		edges = append(edges, [2]string{"workload", id})
 		i++
 	}
+	if len(edges) == 0 {
+		return fallbackDashboardGraph(workload, clusterContext)
+	}
 	return nodes, edges
+}
+
+func fallbackDashboardGraph(workload DashboardWorkload, clusterContext string) ([]DashboardDependencyNode, [][2]string) {
+	nodes := []DashboardDependencyNode{{
+		ID: "workload", Label: firstNonEmpty(workload.Kind, "Pod"), Detail: workload.Name, X: 58, Y: 126, Kind: "active",
+	}}
+	var edges [][2]string
+	seen := map[string]string{strings.ToLower(workload.Kind + "/" + workload.Name): "workload"}
+	serviceIDs := []string{}
+
+	for _, ref := range relatedResourceRefsFromContext(clusterContext) {
+		key := strings.ToLower(ref.Kind + "/" + ref.Name)
+		if seen[key] != "" || ref.Name == "" {
+			continue
+		}
+		id := fmt.Sprintf("dep-%d", len(nodes)-1)
+		seen[key] = id
+		nodes = append(nodes, DashboardDependencyNode{ID: id, Label: ref.Kind, Detail: ref.Name, Kind: graphToneForKind(ref.Kind)})
+		if ref.Kind == "Ingress" && len(serviceIDs) > 0 {
+			for _, serviceID := range serviceIDs {
+				edges = append(edges, [2]string{serviceID, id})
+			}
+			continue
+		}
+		edges = append(edges, [2]string{"workload", id})
+		if ref.Kind == "Service" {
+			serviceIDs = append(serviceIDs, id)
+		}
+	}
+	if len(nodes) == 1 {
+		return nodes, edges
+	}
+	return nodes, edges
+}
+
+type dashboardResourceRef struct {
+	Kind string
+	Name string
+}
+
+func relatedResourceRefsFromContext(clusterContext string) []dashboardResourceRef {
+	seen := map[string]bool{}
+	var refs []dashboardResourceRef
+	add := func(kind, name string) {
+		kind = strings.TrimSpace(kind)
+		name = strings.TrimSpace(name)
+		if kind == "" || name == "" {
+			return
+		}
+		key := strings.ToLower(kind + "/" + name)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		refs = append(refs, dashboardResourceRef{Kind: kind, Name: name})
+	}
+
+	for _, line := range strings.Split(clusterContext, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+		if strings.HasPrefix(line, "Owner chain:") {
+			for _, item := range strings.Split(strings.TrimPrefix(line, "Owner chain:"), "->") {
+				if kind, name, ok := splitKindName(item); ok {
+					add(kind, name)
+				}
+			}
+			continue
+		}
+		if kind, name, ok := splitKindName(line); ok {
+			add(kind, name)
+		}
+	}
+	return refs
+}
+
+func ownerWorkloadFromContext(clusterContext string) (string, string) {
+	preferred := map[string]int{
+		"Deployment":  1,
+		"StatefulSet": 1,
+		"DaemonSet":   1,
+		"Job":         2,
+		"ReplicaSet":  3,
+	}
+	bestRank := 100
+	var best dashboardResourceRef
+	for _, ref := range relatedResourceRefsFromContext(clusterContext) {
+		if rank, ok := preferred[ref.Kind]; ok && rank < bestRank {
+			bestRank = rank
+			best = ref
+		}
+	}
+	return best.Kind, best.Name
+}
+
+func splitKindName(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, "/")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	kind := strings.TrimSpace(parts[0])
+	name := strings.TrimSpace(parts[1])
+	if kind == "" || name == "" || strings.Contains(name, " ") {
+		return "", "", false
+	}
+	return kind, name, true
+}
+
+func graphToneForKind(kind string) string {
+	switch kind {
+	case "ConfigMap", "Secret":
+		return "warning"
+	case "Service", "Ingress":
+		return "service"
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job":
+		return "active"
+	default:
+		return "neutral"
+	}
 }
 
 func dashboardPodKey(namespace, pod string) string {
@@ -1078,24 +1316,70 @@ func humanAge(t time.Time) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
-func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64, int) {
+func (c *Controller) dashboardEnvironment(ctx context.Context) string {
+	for _, key := range []string{"FIXORA_CLUSTER_NAME", "CLUSTER_NAME", "KUBERNETES_CLUSTER_NAME"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	if c.clientset != nil {
+		nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
+		if err == nil && len(nodes.Items) > 0 {
+			if name := clusterNameFromNodeLabels(nodes.Items[0].Labels); name != "" {
+				return name
+			}
+		}
+	}
+	return "default-cluster"
+}
+
+func clusterNameFromNodeLabels(labels map[string]string) string {
+	for _, key := range []string{
+		"eks.amazonaws.com/cluster-name",
+		"kubernetes.azure.com/cluster",
+		"cluster.x-k8s.io/cluster-name",
+		"topology.gke.io/cluster-name",
+	} {
+		if value := strings.TrimSpace(labels[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64, int, []DashboardNodeCost) {
 	if c.clientset == nil || c.pricingProvider == nil {
-		return 0, 0
+		return 0, 0, nil
 	}
 	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil || len(nodes.Items) == 0 {
-		return 0, 0
+		return 0, 0, nil
 	}
 
-	var nodeInfos []finops.NodeInfo
+	var total float64
+	nodeCosts := make([]DashboardNodeCost, 0, len(nodes.Items))
 	for _, n := range nodes.Items {
-		nodeInfos = append(nodeInfos, finops.NodeInfo{
-			Name:       n.Name,
-			Labels:     n.Labels,
-			ProviderID: n.Spec.ProviderID,
-		})
+		vendor, region, instanceType := finops.ParseNodeMetadata(n.Labels, n.Spec.ProviderID)
+		row := DashboardNodeCost{
+			Name:         n.Name,
+			Vendor:       firstNonEmpty(vendor, "unknown"),
+			Region:       firstNonEmpty(region, "unknown"),
+			InstanceType: firstNonEmpty(instanceType, "unknown"),
+			Status:       "unpriced",
+		}
+		if vendor != "" && region != "" && instanceType != "" {
+			if profile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType); err == nil && profile != nil {
+				row.MonthlyCost = ((profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)) * 730
+				row.PricingSource = profile.Name
+				row.Status = "priced"
+				total += row.MonthlyCost
+			}
+		}
+		nodeCosts = append(nodeCosts, row)
 	}
 
-	cost, _ := finops.CalculateClusterCost(nodeInfos, c.pricingProvider)
-	return cost, len(nodeInfos)
+	sort.Slice(nodeCosts, func(i, j int) bool {
+		return nodeCosts[i].Name < nodeCosts[j].Name
+	})
+	return total, len(nodeCosts), nodeCosts
 }

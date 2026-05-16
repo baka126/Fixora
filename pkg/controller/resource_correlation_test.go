@@ -74,6 +74,22 @@ func TestCorrelatePodResourcesIncludesOwnersServiceAndConfig(t *testing.T) {
 				Addresses: []v1.EndpointAddress{{TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "other-pod"}}},
 			}},
 		},
+		&networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Name: "api-ing", Namespace: "payments"},
+			Spec: networkingv1.IngressSpec{
+				Rules: []networkingv1.IngressRule{{
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{{
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{Name: "api"},
+								},
+							}},
+						},
+					},
+				}},
+			},
+		},
 		&v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "api-secret", Namespace: "payments"},
 			Data:       map[string][]byte{},
@@ -100,6 +116,7 @@ func TestCorrelatePodResourcesIncludesOwnersServiceAndConfig(t *testing.T) {
 		"Owner chain: Pod/api-abc -> ReplicaSet/api-rs -> Deployment/api",
 		"Deployment api rollout: desired=2 updated=1 available=1 unavailable=1",
 		"Service api selects this pod but endpoints do not include it",
+		"Ingress api-ing routes traffic to Service api",
 		"Secret api-secret is missing referenced key database-url",
 		"ConfigMap api-config is referenced but missing",
 		"Node node-a has MemoryPressure",

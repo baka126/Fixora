@@ -80,6 +80,7 @@ export interface DashboardRecommendedPR {
 export interface DashboardGuardrail {
   label: string;
   status: string;
+  detail?: string;
 }
 
 export interface DashboardDependencyNode {
@@ -168,6 +169,16 @@ export interface DashboardPrediction {
   downtimeRiskHr?: number;
 }
 
+export interface DashboardNodeCost {
+  name: string;
+  vendor: string;
+  region: string;
+  instanceType: string;
+  monthlyCost: number;
+  pricingSource?: string;
+  status: string;
+}
+
 export interface DashboardAuditEvent {
   id: string;
   type: string;
@@ -238,4 +249,5 @@ export interface DashboardState {
   settingsSections: DashboardSettingsSection[];
   clusterCostMo?: number;
   activeNodes?: number;
+  nodeCosts?: DashboardNodeCost[];
 }

@@ -486,7 +486,12 @@ const IncidentTable = ({
                       <td className="px-3 py-4">
                         <div className="flex items-center gap-2 font-medium text-[#111827]">
                           <WorkloadIcon workload={incident.workload} />
-                          {incident.workload.kind}/{incident.workload.name}
+                          <div className="min-w-0">
+                            <div className="truncate">{incident.workload.kind}/{incident.workload.name}</div>
+                            {incident.workload.podName && incident.workload.podName !== incident.workload.name && (
+                              <div className="truncate text-[11px] font-normal text-[#647084]">Pod/{incident.workload.podName}</div>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td className="px-3 py-4 text-[#111827]">{incident.workload.namespace}</td>
@@ -540,6 +545,9 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
             </div>
             <div className="mt-2 text-[12px] text-[#4b5563]">
               {incident.workload.namespace} <span className="mx-2">•</span> {incident.age || 'recent'} ago <span className="mx-2">•</span> {incident.priority || 'P2'}
+              {incident.workload.podName && incident.workload.podName !== incident.workload.name && (
+                <><span className="mx-2">•</span> logs from Pod/{incident.workload.podName}</>
+              )}
             </div>
           </div>
           <button className="grid h-8 w-8 place-items-center rounded-md hover:bg-[#f3f4f6]" title="Close">
@@ -662,37 +670,53 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
     {stages.length === 0 ? (
       <MiniEmpty message="No remediation workflow state has been recorded yet." />
     ) : (
-      <div className="grid grid-cols-7 overflow-hidden rounded-md border border-[#e5e7eb]">
-        {stages.map((stage) => {
-          const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
-          return (
-            <div key={stage.id} className="min-h-[176px] border-r border-[#e5e7eb] last:border-r-0">
-              <div className="h-1" style={{ background: stageTone }} />
-              <div className="border-b border-[#e5e7eb] bg-[#f8fafc] px-2 py-2">
-                <div className="text-[12px] font-semibold text-[#111827]">{stage.label}</div>
-                <div className="mt-1 text-[11px] text-[#6b7280]">{stage.count} {stage.note}</div>
+      <div className="overflow-hidden rounded-md border border-[#e5e7eb] bg-white">
+        <div className="relative grid grid-cols-7 border-b border-[#e5e7eb] px-2 pb-2 pt-5">
+          <div className="absolute left-3 right-3 top-[30px] h-0.5 bg-[#d1d5db]" />
+          {stages.map((stage) => {
+            const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
+            return (
+              <div key={stage.id} className="relative z-[1] flex flex-col items-center gap-1">
+                <div className="text-[11px] font-semibold" style={{ color: stageTone }}>{stage.count}</div>
+                <span className="h-3 w-3 rounded-full border-2 border-white shadow-sm" style={{ background: stageTone }} />
               </div>
-              <div className="space-y-2 p-2">
-                {stage.items?.length ? (
-                  stage.items.map((item) => (
-                    <a
-                      key={item.id}
-                      href={item.url || undefined}
-                      target={item.url ? '_blank' : undefined}
-                      rel="noreferrer"
-                      className="block rounded border border-transparent p-1 text-[11px] hover:border-[#e5e7eb] hover:bg-white"
-                    >
-                      <div className="truncate font-medium text-[#111827]">{item.label}</div>
-                      <div className="truncate text-[#6b7280]">{item.repository || item.age}</div>
-                    </a>
-                  ))
-                ) : (
-                  <div className="text-[11px] text-[#9ca3af]">No items</div>
-                )}
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-7">
+          {stages.map((stage) => {
+            const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
+            const visibleItems = stage.items?.slice(0, 2) || [];
+            const hidden = Math.max((stage.items?.length || 0) - visibleItems.length, 0);
+            return (
+              <div key={stage.id} className="min-h-[198px] border-r border-[#e5e7eb] last:border-r-0">
+                <div className="h-1" style={{ background: stageTone }} />
+                <div className="m-2 rounded-md border border-[#eef2f7] bg-[#f8fafc] px-2 py-3 text-center">
+                  <div className="text-[12px] font-semibold leading-4 text-[#111827]">{stage.label}</div>
+                </div>
+                <div className="space-y-2 px-2 pb-2">
+                  {visibleItems.length ? (
+                    visibleItems.map((item) => (
+                      <a
+                        key={item.id}
+                        href={item.url || undefined}
+                        target={item.url ? '_blank' : undefined}
+                        rel="noreferrer"
+                        className="block rounded border border-transparent p-1 text-[11px] hover:border-[#e5e7eb] hover:bg-[#f8fafc]"
+                      >
+                        <div className="truncate font-semibold text-[#111827]">{item.label}</div>
+                        <div className="mt-0.5 truncate text-[#6b7280]">{item.age || item.repository}</div>
+                      </a>
+                    ))
+                  ) : (
+                    <div className="px-1 text-[11px] text-[#9ca3af]">No items</div>
+                  )}
+                  {hidden > 0 && <div className="px-1 pt-2 text-[11px] font-medium text-[#647084]">+{hidden} more</div>}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
     )}
     <div className="mt-3 text-center">
@@ -759,7 +783,12 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
             onSelect={(id) => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { selectedNodeId: id }))}
             expanded={expanded}
           />
-          <div className={expanded ? 'block' : 'mt-2'}>
+          {!expanded && (
+            <GraphFooter
+              onExpand={() => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { expanded: true }))}
+            />
+          )}
+          <div className={expanded ? 'block min-h-0 overflow-y-auto' : 'hidden'}>
             <ResourceDetailPanel
               node={selectedNode}
               nodes={nodes}
@@ -780,6 +809,38 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
   );
 };
 
+const GraphFooter = ({ onExpand }: { onExpand: () => void }) => (
+  <div className="flex items-center justify-between px-1 pt-1">
+    <div className="flex items-center gap-2 text-[12px] text-[#647084]">
+      <span className="h-2 w-2 rounded-full bg-[#16a34a]" />
+      Live view
+    </div>
+    <div className="flex items-center gap-2">
+      <button
+        onClick={onExpand}
+        className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151] hover:bg-[#f8fafc]"
+        title="Expand graph"
+      >
+        <Maximize2 className="h-4 w-4" />
+      </button>
+      <button
+        className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151]"
+        title="Zoom controls are available in expanded view"
+        type="button"
+      >
+        +
+      </button>
+      <button
+        className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151]"
+        title="Zoom controls are available in expanded view"
+        type="button"
+      >
+        -
+      </button>
+    </div>
+  </div>
+);
+
 const GraphCanvas = ({
   nodes,
   edges,
@@ -799,7 +860,7 @@ const GraphCanvas = ({
     type: 'default',
     position: { x: node.x, y: node.y },
     data: { label: <FlowNodeLabel node={node} /> },
-    style: flowNodeStyle(node, node.id === selectedNodeId),
+    style: flowNodeStyle(node, node.id === selectedNodeId, expanded),
     sourcePosition: Position.Bottom,
     targetPosition: Position.Top,
   }));
@@ -814,32 +875,43 @@ const GraphCanvas = ({
   }));
 
   return (
-    <div className={`${expanded ? 'h-full min-h-[420px]' : 'h-[260px]'} overflow-hidden rounded-md border border-[#e5e7eb] bg-[#fbfdff]`}>
+    <div className={`${expanded ? 'h-full min-h-[420px]' : 'h-[270px]'} overflow-hidden rounded-md border border-[#e5e7eb] bg-[#fbfdff]`}>
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges}
         onNodeClick={(_, node) => onSelect(node.id)}
         fitView
-        fitViewOptions={{ padding: 0.25 }}
-        minZoom={0.4}
-        maxZoom={1.8}
+        fitViewOptions={{ padding: expanded ? 0.18 : 0.38, maxZoom: expanded ? 1.2 : 0.82 }}
+        minZoom={0.2}
+        maxZoom={expanded ? 1.8 : 0.95}
         nodesDraggable={false}
+        panOnDrag={expanded}
+        panOnScroll={expanded}
+        zoomOnScroll={expanded}
+        zoomOnPinch={expanded}
+        zoomOnDoubleClick={expanded}
+        preventScrolling={expanded}
+        proOptions={{ hideAttribution: true }}
       >
         <Background color="#dbe3ef" gap={18} />
-        <Controls position="bottom-right" showInteractive={false} />
-        <MiniMap
-          position="bottom-left"
-          pannable
-          zoomable
-          nodeColor={(node) => {
-            const original = nodes.find((item) => item.id === node.id);
-            return graphNodeColor(original?.kind || original?.label || '');
-          }}
-          maskColor="rgba(241,245,249,0.72)"
-        />
-        <Panel position="top-left" className="rounded-md border border-[#e5e7eb] bg-white/90 px-2 py-1 text-[11px] font-medium text-[#475569] shadow-sm">
-          Auto-layout · pan · zoom
-        </Panel>
+        {expanded && (
+          <>
+            <Controls position="bottom-right" showInteractive={false} />
+            <MiniMap
+              position="bottom-left"
+              pannable
+              zoomable
+              nodeColor={(node) => {
+                const original = nodes.find((item) => item.id === node.id);
+                return graphNodeColor(original?.kind || original?.label || '');
+              }}
+              maskColor="rgba(241,245,249,0.72)"
+            />
+            <Panel position="top-left" className="rounded-md border border-[#e5e7eb] bg-white/90 px-2 py-1 text-[11px] font-medium text-[#475569] shadow-sm">
+              Auto-layout · pan · zoom · select resources
+            </Panel>
+          </>
+        )}
       </ReactFlow>
     </div>
   );
@@ -1046,10 +1118,10 @@ const visibleGraphNodeIds = (nodes: DashboardDependencyNode[], edges: DashboardD
   return visible;
 };
 
-const flowNodeStyle = (node: DashboardDependencyNode, selected: boolean) => ({
-  width: 150,
-  minHeight: 54,
-  padding: '8px',
+const flowNodeStyle = (node: DashboardDependencyNode, selected: boolean, expanded: boolean) => ({
+  width: expanded ? 150 : 142,
+  minHeight: expanded ? 54 : 52,
+  padding: expanded ? '8px' : '7px',
   borderRadius: 8,
   border: selected ? '2px solid #2563eb' : '1px solid #dbe3ef',
   boxShadow: selected ? '0 8px 24px rgba(37,99,235,0.16)' : '0 1px 2px rgba(15,23,42,0.04)',
@@ -1077,15 +1149,33 @@ const KeyValueRows = ({ rows }: { rows: [string, string | undefined][] }) => (
 );
 
 const GuardrailRow = ({ guardrail }: { guardrail: DashboardGuardrail }) => {
-  const passed = guardrail.status === 'passed';
+  const tone = guardrailTone(guardrail.status);
   return (
-    <div className="flex items-center justify-between px-3 py-2 text-[12px]">
-      <span className="text-[#374151]">{guardrail.label}</span>
-      <span className={`rounded-md px-2 py-1 text-[11px] font-medium ${passed ? 'bg-[#dcfce7] text-[#15803d]' : 'bg-[#fee2e2] text-[#dc2626]'}`}>
+    <div className="flex items-start justify-between gap-3 px-3 py-2 text-[12px]" title={guardrail.detail || undefined}>
+      <div className="min-w-0">
+        <span className="block text-[#374151]">{guardrail.label}</span>
+        {guardrail.detail && <span className="mt-0.5 block truncate text-[11px] text-[#647084]">{guardrail.detail}</span>}
+      </div>
+      <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-medium ${tone}`}>
         {guardrail.status}
       </span>
     </div>
   );
+};
+
+const guardrailTone = (status: string) => {
+  switch ((status || '').toLowerCase()) {
+    case 'passed':
+      return 'bg-[#dcfce7] text-[#15803d]';
+    case 'failed':
+      return 'bg-[#fee2e2] text-[#dc2626]';
+    case 'pending':
+      return 'bg-[#ffedd5] text-[#ea580c]';
+    case 'skipped':
+      return 'bg-[#f1f5f9] text-[#475569]';
+    default:
+      return 'bg-[#f1f5f9] text-[#475569]';
+  }
 };
 
 const WorkloadIcon = ({ workload }: { workload: DashboardWorkload }) => {

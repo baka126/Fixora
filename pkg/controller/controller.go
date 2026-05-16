@@ -1079,14 +1079,8 @@ func (c *Controller) getPricingProfile(ctx context.Context, pod *v1.Pod) finops.
 	if pod.Spec.NodeName != "" {
 		node, err := c.clientset.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
 		if err == nil {
-			instanceType := node.Labels["node.kubernetes.io/instance-type"]
-			region := node.Labels["topology.kubernetes.io/region"]
-			if instanceType != "" {
-				if region == "" {
-					region = "us-east-1"
-				}
-
-				vendor := finops.DetectVendor(instanceType, region)
+			vendor, region, instanceType := finops.ParseNodeMetadata(node.Labels, node.Spec.ProviderID)
+			if vendor != "" && region != "" && instanceType != "" {
 				liveProfile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType)
 				if err == nil && liveProfile != nil {
 					profile = *liveProfile
