@@ -61,10 +61,33 @@ const toneStyles: Record<string, { text: string; border: string; bg: string; lin
 };
 
 export const Dashboard = () => {
-  const { dashboard, setDashboard } = useStore();
+  const { dashboard, selectedCluster, searchQuery, timeRange, setDashboard } = useStore();
   const [loading, setLoading] = useState(!dashboard);
   const [error, setError] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(dashboard?.incidents?.[0]?.id || null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [severityFilter, setSeverityFilter] = useState('all');
+  const [kindFilter, setKindFilter] = useState('all');
+  const [highConfidenceOnly, setHighConfidenceOnly] = useState(false);
+  const [incidentPage, setIncidentPage] = useState(1);
+
+  const refreshDashboard = (showRefresh = true) => {
+    if (showRefresh) setRefreshing(true);
+    return apiClient
+      .get('/dashboard')
+      .then(({ data }: { data: DashboardState }) => {
+        setDashboard(data);
+        setSelectedId((current) => current || data.incidents?.[0]?.id || null);
+        setError('');
+      })
+      .catch(() => {
+        setError('Failed to load dashboard data.');
+      })
+      .finally(() => {
+        setLoading(false);
+        setRefreshing(false);
+      });
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -88,7 +111,15 @@ export const Dashboard = () => {
   }, [setDashboard]);
 
   const incidents = dashboard?.incidents || [];
-  const selectedIncident = incidents.find((incident) => incident.id === selectedId) || incidents[0] || null;
+  const filteredIncidents = filterIncidents(incidents, {
+    cluster: selectedCluster || dashboard?.environment || 'cluster',
+    query: searchQuery,
+    timeRange,
+    severity: severityFilter,
+    kind: kindFilter,
+    highConfidenceOnly,
+  });
+  const selectedIncident = filteredIncidents.find((incident) => incident.id === selectedId) || filteredIncidents[0] || null;
 
   if (loading && !dashboard) {
     return (
@@ -127,12 +158,23 @@ export const Dashboard = () => {
         </div>
 
         <IncidentTable
-          incidents={incidents}
+          incidents={filteredIncidents}
+          totalIncidents={incidents.length}
           selectedId={selectedIncident?.id || null}
           onSelect={setSelectedId}
+          page={incidentPage}
+          onPageChange={setIncidentPage}
+          severityFilter={severityFilter}
+          onSeverityFilterChange={setSeverityFilter}
+          kindFilter={kindFilter}
+          onKindFilterChange={setKindFilter}
+          highConfidenceOnly={highConfidenceOnly}
+          onHighConfidenceOnlyChange={setHighConfidenceOnly}
+          refreshing={refreshing}
+          onRefresh={() => refreshDashboard(true)}
         />
 
-        <div className="grid grid-cols-[minmax(0,1fr)_250px] gap-3">
+        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-3">
           <RemediationPipeline stages={dashboard?.pipeline || []} />
           <DependencyGraph incident={selectedIncident} />
         </div>
@@ -148,6 +190,88 @@ const AvailabilityBanner = ({ availability }: { availability: DashboardState['av
     <strong className="font-semibold">{availability[0].name}:</strong> {availability[0].message}
   </div>
 );
+
+const filterIncidents = (
+  incidents: DashboardIncident[],
+  filters: {
+    cluster: string;
+    query: string;
+    timeRange: string;
+    severity: string;
+    kind: string;
+    highConfidenceOnly: boolean;
+  },
+) => {
+  const normalizedQuery = filters.query.trim().toLowerCase();
+  const maxAgeMinutes = timeRangeToMinutes(filters.timeRange);
+
+  return incidents.filter((incident) => {
+    if (incident.cluster && filters.cluster && incident.cluster !== filters.cluster) {
+      return false;
+    }
+    if (filters.severity !== 'all' && (incident.severity || '').toLowerCase() !== filters.severity) {
+      return false;
+    }
+    if (filters.kind !== 'all' && incident.workload.kind !== filters.kind) {
+      return false;
+    }
+    if (filters.highConfidenceOnly && (incident.confidence || 0) < 80) {
+      return false;
+    }
+    if (maxAgeMinutes !== Infinity && ageToMinutes(incident.age) > maxAgeMinutes) {
+      return false;
+    }
+    if (!normalizedQuery) {
+      return true;
+    }
+    const haystack = [
+      incident.cluster,
+      incident.workload.kind,
+      incident.workload.name,
+      incident.workload.namespace,
+      incident.workload.podName,
+      incident.status,
+      incident.cause,
+      incident.source,
+      incident.severity,
+      incident.priority,
+      incident.gitops?.app,
+      incident.gitops?.repo,
+      incident.gitops?.path,
+      incident.pr?.branch,
+    ].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(normalizedQuery);
+  });
+};
+
+const timeRangeToMinutes = (range: string) => {
+  switch (range) {
+    case 'Last 1h':
+      return 60;
+    case 'Last 6h':
+      return 6 * 60;
+    case 'Last 7d':
+      return 7 * 24 * 60;
+    case 'Last 30d':
+      return 30 * 24 * 60;
+    case 'All time':
+      return Infinity;
+    case 'Last 24h':
+    default:
+      return 24 * 60;
+  }
+};
+
+const ageToMinutes = (age: string) => {
+  const trimmed = age.trim().toLowerCase();
+  if (!trimmed || trimmed === 'now') return 0;
+  const match = trimmed.match(/^(\d+)\s*(m|h|d)$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (match[2] === 'd') return value * 24 * 60;
+  if (match[2] === 'h') return value * 60;
+  return value;
+};
 
 const KpiCard = ({ kpi }: { kpi: DashboardKPI }) => {
   const tone = toneStyles[kpi.tone || 'info'] || toneStyles.info;
@@ -191,104 +315,211 @@ const Sparkline = ({ values, color }: { values?: number[]; color: string }) => {
 
 const IncidentTable = ({
   incidents,
+  totalIncidents,
   selectedId,
   onSelect,
+  page,
+  onPageChange,
+  severityFilter,
+  onSeverityFilterChange,
+  kindFilter,
+  onKindFilterChange,
+  highConfidenceOnly,
+  onHighConfidenceOnlyChange,
+  refreshing,
+  onRefresh,
 }: {
   incidents: DashboardIncident[];
+  totalIncidents: number;
   selectedId: string | null;
   onSelect: (id: string) => void;
-}) => (
-  <div className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-    <div className="flex h-[60px] items-center justify-between border-b border-[#e5e7eb] px-4">
-      <div className="flex items-center gap-2">
-        <h2 className="text-[16px] font-semibold text-[#111827]">Active Incidents</h2>
-        <span className="rounded-full bg-[#fee2e2] px-2 py-0.5 text-[11px] font-semibold text-[#ef4444]">{incidents.length}</span>
-      </div>
-      <div className="flex items-center gap-2">
-        <button className="flex h-9 items-center gap-2 rounded-md border border-[#e5e7eb] bg-white px-3 text-[12px] font-medium">
-          <Filter className="h-4 w-4" />
-          Filter
-        </button>
-        <button className="flex h-9 items-center gap-2 rounded-md border border-[#e5e7eb] bg-white px-3 text-[12px] font-medium">
-          All Severities
-          <ChevronDown className="h-4 w-4" />
-        </button>
-        <button className="grid h-9 w-9 place-items-center rounded-md border border-[#e5e7eb] bg-white" title="Refresh">
-          <RefreshCw className="h-4 w-4" />
-        </button>
-      </div>
-    </div>
+  page: number;
+  onPageChange: (page: number) => void;
+  severityFilter: string;
+  onSeverityFilterChange: (severity: string) => void;
+  kindFilter: string;
+  onKindFilterChange: (kind: string) => void;
+  highConfidenceOnly: boolean;
+  onHighConfidenceOnlyChange: (value: boolean) => void;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) => {
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [severityOpen, setSeverityOpen] = useState(false);
+  const pageSize = 4;
+  const pageCount = Math.max(1, Math.ceil(incidents.length / pageSize));
+  const safePage = Math.min(Math.max(page, 1), pageCount);
+  const start = (safePage - 1) * pageSize;
+  const pageIncidents = incidents.slice(start, start + pageSize);
+  const workloadKinds = Array.from(new Set(incidents.map((incident) => incident.workload.kind).filter(Boolean))).sort();
+  const severityOptions = [
+    { label: 'All Severities', value: 'all' },
+    { label: 'Critical', value: 'critical' },
+    { label: 'Warning', value: 'warning' },
+    { label: 'Info', value: 'info' },
+  ];
 
-    {incidents.length === 0 ? (
-      <EmptyState
-        icon={<TriangleAlert className="h-8 w-8" />}
-        title="No active incidents recorded yet"
-        message="Fixora will populate this table as Kubernetes events, Alertmanager alerts, Prometheus metrics, and investigations are stored."
-      />
-    ) : (
-      <>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[850px] border-collapse text-left text-[12px]">
-            <thead className="bg-[#f8fafc] text-[#111827]">
-              <tr>
-                <th className="w-8 px-3 py-3" />
-                <th className="px-3 py-3 font-semibold">Workload</th>
-                <th className="px-3 py-3 font-semibold">Namespace</th>
-                <th className="px-3 py-3 font-semibold">Status</th>
-                <th className="px-3 py-3 font-semibold">Root Cause</th>
-                <th className="px-3 py-3 font-semibold">Confidence</th>
-                <th className="px-3 py-3 font-semibold">Source</th>
-                <th className="px-3 py-3 font-semibold">Age</th>
-              </tr>
-            </thead>
-            <tbody>
-              {incidents.map((incident) => {
-                const selected = incident.id === selectedId;
-                return (
-                  <tr
-                    key={incident.id}
-                    onClick={() => onSelect(incident.id)}
-                    className={`cursor-pointer border-t border-[#e5e7eb] transition ${selected ? 'bg-[#fff1f2] shadow-[inset_3px_0_0_#ef4444]' : 'hover:bg-[#f9fafb]'}`}
+  return (
+    <div className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+      <div className="flex h-[60px] items-center justify-between border-b border-[#e5e7eb] px-4">
+        <div className="flex items-center gap-2">
+          <h2 className="text-[16px] font-semibold text-[#111827]">Active Incidents</h2>
+          <span className="rounded-full bg-[#fee2e2] px-2 py-0.5 text-[11px] font-semibold text-[#ef4444]">{incidents.length}</span>
+          {incidents.length !== totalIncidents && <span className="text-[11px] text-[#647084]">filtered from {totalIncidents}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setFiltersOpen((open) => !open)}
+            className={`flex h-9 items-center gap-2 rounded-md border px-3 text-[12px] font-medium ${filtersOpen ? 'border-[#bfdbfe] bg-[#eff6ff] text-[#2563eb]' : 'border-[#e5e7eb] bg-white'}`}
+          >
+            <Filter className="h-4 w-4" />
+            Filter
+          </button>
+          <div className="relative">
+            <button
+              onClick={() => setSeverityOpen((open) => !open)}
+              className="flex h-9 min-w-[136px] items-center justify-between gap-2 rounded-md border border-[#e5e7eb] bg-white px-3 text-[12px] font-medium"
+            >
+              {severityOptions.find((option) => option.value === severityFilter)?.label || 'All Severities'}
+              <ChevronDown className="h-4 w-4" />
+            </button>
+            {severityOpen && (
+              <div className="absolute right-0 top-10 z-20 w-40 overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
+                {severityOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => {
+                      onSeverityFilterChange(option.value);
+                      onPageChange(1);
+                      setSeverityOpen(false);
+                    }}
+                    className={`block w-full px-3 py-2 text-left text-[12px] hover:bg-[#f8fafc] ${option.value === severityFilter ? 'font-semibold text-[#2563eb]' : 'text-[#111827]'}`}
                   >
-                    <td className="px-3 py-4">
-                      {selected ? <Circle className="h-3.5 w-3.5 fill-white text-[#94a3b8]" /> : <Circle className="h-3.5 w-3.5 text-[#94a3b8]" />}
-                    </td>
-                    <td className="px-3 py-4">
-                      <div className="flex items-center gap-2 font-medium text-[#111827]">
-                        <WorkloadIcon workload={incident.workload} />
-                        {incident.workload.kind}/{incident.workload.name}
-                      </div>
-                    </td>
-                    <td className="px-3 py-4 text-[#111827]">{incident.workload.namespace}</td>
-                    <td className="px-3 py-4">
-                      <StatusChip value={incident.status} severity={incident.severity} />
-                    </td>
-                    <td className="max-w-[220px] px-3 py-4 text-[#111827]">{incident.cause || 'Pending root cause'}</td>
-                    <td className="px-3 py-4">
-                      <Confidence value={incident.confidence} />
-                    </td>
-                    <td className="px-3 py-4 text-[#111827]">{incident.source}</td>
-                    <td className={`px-3 py-4 font-medium ${incident.severity === 'critical' ? 'text-[#dc2626]' : 'text-[#f97316]'}`}>{incident.age}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <div className="flex h-14 items-center justify-between border-t border-[#e5e7eb] px-4 text-[12px] text-[#4b5563]">
-          <span>Showing 1 to {Math.min(incidents.length, 4)} of {incidents.length} incidents</span>
-          <div className="flex items-center gap-1">
-            <PagerButton disabled icon={<ChevronLeft className="h-4 w-4" />} />
-            <PagerButton label="1" active />
-            <PagerButton label="2" disabled={incidents.length <= 10} />
-            <PagerButton label="3" disabled={incidents.length <= 20} />
-            <PagerButton disabled={incidents.length <= 10} icon={<ChevronRight className="h-4 w-4" />} />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
+          <button onClick={onRefresh} className="grid h-9 w-9 place-items-center rounded-md border border-[#e5e7eb] bg-white" title="Refresh">
+            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
         </div>
-      </>
-    )}
-  </div>
-);
+      </div>
+
+      {filtersOpen && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-[#e5e7eb] bg-[#f8fafc] px-4 py-3 text-[12px]">
+          <label className="flex items-center gap-2">
+            <span className="font-medium text-[#374151]">Kind</span>
+            <select
+              value={kindFilter}
+              onChange={(event) => {
+                onKindFilterChange(event.target.value);
+                onPageChange(1);
+              }}
+              className="h-8 rounded-md border border-[#e5e7eb] bg-white px-2 outline-none"
+            >
+              <option value="all">All workload types</option>
+              {workloadKinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2 font-medium text-[#374151]">
+            <input
+              type="checkbox"
+              checked={highConfidenceOnly}
+              onChange={(event) => {
+                onHighConfidenceOnlyChange(event.target.checked);
+                onPageChange(1);
+              }}
+              className="h-4 w-4 rounded border-[#cbd5e1]"
+            />
+            Confidence ≥ 80%
+          </label>
+          <button
+            onClick={() => {
+              onKindFilterChange('all');
+              onHighConfidenceOnlyChange(false);
+              onSeverityFilterChange('all');
+              onPageChange(1);
+            }}
+            className="ml-auto rounded-md border border-[#e5e7eb] bg-white px-3 py-1.5 font-medium text-[#374151] hover:bg-[#f8fafc]"
+          >
+            Reset filters
+          </button>
+        </div>
+      )}
+
+      {incidents.length === 0 ? (
+        <EmptyState
+          icon={<TriangleAlert className="h-8 w-8" />}
+          title="No matching incidents"
+          message="No incidents match the current cluster, search, date, severity, or table filters."
+        />
+      ) : (
+        <>
+          <div className="max-h-[348px] overflow-auto">
+            <table className="w-full min-w-[850px] border-collapse text-left text-[12px]">
+              <thead className="sticky top-0 z-[1] bg-[#f8fafc] text-[#111827]">
+                <tr>
+                  <th className="w-8 px-3 py-3" />
+                  <th className="px-3 py-3 font-semibold">Workload</th>
+                  <th className="px-3 py-3 font-semibold">Namespace</th>
+                  <th className="px-3 py-3 font-semibold">Status</th>
+                  <th className="px-3 py-3 font-semibold">Root Cause</th>
+                  <th className="px-3 py-3 font-semibold">Confidence</th>
+                  <th className="px-3 py-3 font-semibold">Source</th>
+                  <th className="px-3 py-3 font-semibold">Age</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageIncidents.map((incident) => {
+                  const selected = incident.id === selectedId;
+                  return (
+                    <tr
+                      key={incident.id}
+                      onClick={() => onSelect(incident.id)}
+                      className={`cursor-pointer border-t border-[#e5e7eb] transition ${selected ? 'bg-[#fff1f2] shadow-[inset_3px_0_0_#ef4444]' : 'hover:bg-[#f9fafb]'}`}
+                    >
+                      <td className="px-3 py-4">
+                        {selected ? <Circle className="h-3.5 w-3.5 fill-white text-[#94a3b8]" /> : <Circle className="h-3.5 w-3.5 text-[#94a3b8]" />}
+                      </td>
+                      <td className="px-3 py-4">
+                        <div className="flex items-center gap-2 font-medium text-[#111827]">
+                          <WorkloadIcon workload={incident.workload} />
+                          {incident.workload.kind}/{incident.workload.name}
+                        </div>
+                      </td>
+                      <td className="px-3 py-4 text-[#111827]">{incident.workload.namespace}</td>
+                      <td className="px-3 py-4">
+                        <StatusChip value={incident.status} severity={incident.severity} />
+                      </td>
+                      <td className="max-w-[220px] px-3 py-4 text-[#111827]">{incident.cause || 'Pending root cause'}</td>
+                      <td className="px-3 py-4">
+                        <Confidence value={incident.confidence} />
+                      </td>
+                      <td className="px-3 py-4 text-[#111827]">{incident.source}</td>
+                      <td className={`px-3 py-4 font-medium ${incident.severity === 'critical' ? 'text-[#dc2626]' : 'text-[#f97316]'}`}>{incident.age}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex h-14 items-center justify-between border-t border-[#e5e7eb] px-4 text-[12px] text-[#4b5563]">
+            <span>Showing {start + 1} to {Math.min(start + pageSize, incidents.length)} of {incidents.length} incidents</span>
+            <div className="flex items-center gap-1">
+              <PagerButton disabled={safePage === 1} onClick={() => onPageChange(safePage - 1)} icon={<ChevronLeft className="h-4 w-4" />} />
+              {Array.from({ length: pageCount }, (_, index) => index + 1).map((pageNumber) => (
+                <PagerButton key={pageNumber} label={`${pageNumber}`} active={pageNumber === safePage} onClick={() => onPageChange(pageNumber)} />
+              ))}
+              <PagerButton disabled={safePage === pageCount} onClick={() => onPageChange(safePage + 1)} icon={<ChevronRight className="h-4 w-4" />} />
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
 
 const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) => (
   <aside className="border-l border-[#e5e7eb] bg-white p-3">
@@ -531,6 +762,8 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
           <div className={expanded ? 'block' : 'mt-2'}>
             <ResourceDetailPanel
               node={selectedNode}
+              nodes={nodes}
+              edges={edges}
               incident={incident}
               isCollapsed={!!selectedNode && collapsedNodeIds.has(selectedNode.id)}
               hasChildren={hasChildren}
@@ -649,6 +882,8 @@ const FlowNodeLabel = ({ node }: { node: DashboardDependencyNode }) => {
 
 const ResourceDetailPanel = ({
   node,
+  nodes,
+  edges,
   incident,
   isCollapsed,
   hasChildren,
@@ -657,6 +892,8 @@ const ResourceDetailPanel = ({
   onExpandAll,
 }: {
   node: DashboardDependencyNode | null;
+  nodes: DashboardDependencyNode[];
+  edges: DashboardDependencyEdge[];
   incident: DashboardIncident;
   isCollapsed: boolean;
   hasChildren: boolean;
@@ -667,6 +904,12 @@ const ResourceDetailPanel = ({
   if (!node) {
     return <MiniEmpty message="Select a graph node to inspect its Kubernetes resource context." />;
   }
+  const relatedIds = edges
+    .filter(([from, to]) => from === node.id || to === node.id)
+    .map(([from, to]) => (from === node.id ? to : from));
+  const relatedNodes = relatedIds
+    .map((id) => nodes.find((candidate) => candidate.id === id))
+    .filter((candidate): candidate is DashboardDependencyNode => !!candidate);
 
   return (
     <div className="rounded-md border border-[#e5e7eb] bg-white p-3 text-[12px]">
@@ -680,10 +923,32 @@ const ResourceDetailPanel = ({
         </div>
       </div>
       <div className="mt-3 space-y-2 border-t border-[#e5e7eb] pt-3">
+        <DetailLine label="Resource" value={`${node.label}/${node.detail}`} />
         <DetailLine label="Namespace" value={incident.workload.namespace} />
-        <DetailLine label="Incident" value={`${incident.workload.kind}/${incident.workload.name}`} />
         <DetailLine label="Status" value={incident.status} />
-        <DetailLine label="Graph ID" value={node.id} />
+        <DetailLine label="Root cause" value={incident.cause || 'Pending'} />
+        <DetailLine label="Confidence" value={`${incident.confidence || 0}%`} />
+        <DetailLine label="Signal" value={incident.source || 'Unknown'} />
+        <DetailLine label="Risk" value={incident.risk || 'Unknown'} />
+        {incident.gitops && <DetailLine label="GitOps" value={`${incident.gitops.controller} · ${incident.gitops.path || incident.gitops.repo}`} />}
+        {incident.pr && <DetailLine label="PR" value={incident.pr.branch || incident.pr.title} />}
+      </div>
+      <div className="mt-3 border-t border-[#e5e7eb] pt-3">
+        <div className="mb-2 font-semibold text-[#111827]">Related resources</div>
+        {relatedNodes.length ? (
+          <div className="space-y-1.5">
+            {relatedNodes.map((related) => (
+              <div key={related.id} className="flex items-center gap-2 rounded-md bg-[#f8fafc] px-2 py-1.5">
+                <span className="grid h-5 w-5 place-items-center rounded text-white" style={{ backgroundColor: graphNodeColor(related.kind || related.label) }}>
+                  {renderWorkloadGlyph(related.label, 'h-3 w-3')}
+                </span>
+                <span className="min-w-0 truncate text-[#475569]">{related.label}/{related.detail}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-[#647084]">No direct dependencies recorded.</div>
+        )}
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         {hasChildren && (
@@ -873,9 +1138,10 @@ const Confidence = ({ value }: { value: number }) => (
   </div>
 );
 
-const PagerButton = ({ label, icon, active, disabled }: { label?: string; icon?: ReactNode; active?: boolean; disabled?: boolean }) => (
+const PagerButton = ({ label, icon, active, disabled, onClick }: { label?: string; icon?: ReactNode; active?: boolean; disabled?: boolean; onClick?: () => void }) => (
   <button
     disabled={disabled}
+    onClick={onClick}
     className={`grid h-8 min-w-8 place-items-center rounded-md border px-2 text-[12px] ${
       active ? 'border-[#94a3b8] bg-white text-[#111827]' : 'border-[#e5e7eb] bg-white text-[#4b5563] disabled:text-[#cbd5e1]'
     }`}

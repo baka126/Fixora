@@ -95,6 +95,7 @@ export type DashboardDependencyEdge = [string, string];
 
 export interface DashboardIncident {
   id: string;
+  cluster?: string;
   workload: DashboardWorkload;
   status: string;
   cause: string;
