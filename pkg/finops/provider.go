@@ -41,6 +41,11 @@ func (m *MultiPricingProvider) GetProfileForInstance(vendor, region, instanceTyp
 
 // ParseNodeLabels extracts cloud provider details from standard Kubernetes node labels.
 func ParseNodeLabels(labels map[string]string) (vendor, region, instanceType string) {
+	return ParseNodeMetadata(labels, "")
+}
+
+// ParseNodeMetadata extracts cloud provider details from standard Kubernetes node labels and providerID.
+func ParseNodeMetadata(labels map[string]string, providerID string) (vendor, region, instanceType string) {
 	// Standard topology labels
 	region = labels["topology.kubernetes.io/region"]
 	if region == "" {
@@ -53,7 +58,6 @@ func ParseNodeLabels(labels map[string]string) (vendor, region, instanceType str
 	}
 
 	// Try to determine vendor explicitly
-	providerID := labels["providerID"] // Sometimes exposed directly
 	if providerID != "" {
 		if strings.HasPrefix(providerID, "aws://") {
 			vendor = "aws"
@@ -81,7 +85,6 @@ func ParseNodeLabels(labels map[string]string) (vendor, region, instanceType str
 
 	return vendor, region, instanceType
 }
-
 
 // DetectVendor uses heuristics to identify the cloud provider from instance/region metadata.
 func DetectVendor(instanceType, region string) string {

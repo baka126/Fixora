@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"fixora/pkg/auth"
 	"fixora/pkg/db"
@@ -163,54 +162,3 @@ type CreateUserRequest struct {
 	Role     models.Role `json:"role"`
 }
 
-func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-	claims, err := auth.ValidateToken(tokenStr)
-	if err != nil || claims.Role != models.RoleAdmin {
-		http.Error(w, "forbidden: admin role required", http.StatusForbidden)
-		return
-	}
-
-	var req CreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid payload", http.StatusBadRequest)
-		return
-	}
-
-	if req.Username == "" || req.Password == "" || req.Role == "" {
-		http.Error(w, "username, password, and role required", http.StatusBadRequest)
-		return
-	}
-
-	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	var user models.User
-	err = db.Pool.QueryRow(
-		context.Background(),
-		"INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, created_at",
-		req.Username, string(hashed), req.Role,
-	).Scan(&user.ID, &user.Username, &user.Role, &user.CreatedAt)
-
-	if err != nil {
-		slog.Error("Failed to create user", "error", err)
-		http.Error(w, "failed to create user, username may exist", http.StatusConflict)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
-}

@@ -527,11 +527,16 @@ func (c *Controller) scanForLeaks() {
 			directLossPerHour := hourlyRequests * downtimeMetrics.ErrorRate * downtimeMetrics.AvgRevenuePerReq
 			var riskMultiplier float64
 			switch downtimeMetrics.Tier {
-			case finops.TierCritical: riskMultiplier = 5000.0
-			case finops.TierHigh: riskMultiplier = 1000.0
-			case finops.TierMedium: riskMultiplier = 200.0
-			case finops.TierLow: riskMultiplier = 50.0
-			default: riskMultiplier = 100.0
+			case finops.TierCritical:
+				riskMultiplier = 5000.0
+			case finops.TierHigh:
+				riskMultiplier = 1000.0
+			case finops.TierMedium:
+				riskMultiplier = 200.0
+			case finops.TierLow:
+				riskMultiplier = 50.0
+			default:
+				riskMultiplier = 100.0
 			}
 			downtimeRisk := directLossPerHour + (riskMultiplier / 24) // Approx hourly risk
 			_ = downtimeRiskDetails

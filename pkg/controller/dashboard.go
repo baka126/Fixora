@@ -12,7 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"fixora/pkg/finops"
 	"fixora/pkg/security"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type DashboardSnapshot struct {
@@ -419,12 +422,12 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
 	snapshot.Predictions = dashboardPredictions(predictions)
 	snapshot.AuditEvents = dashboardAuditEvents(investigations, remediations, alerts)
-	
+
 	// Add FinOps Cluster Cost
 	clusterCost, activeNodes := c.calculateClusterCostSnapshot(ctx)
 	snapshot.ClusterCostMo = clusterCost
 	snapshot.ActiveNodes = activeNodes
-	
+
 	return snapshot
 }
 
@@ -605,9 +608,12 @@ func queryDashboardPredictions(ctx context.Context, db *sql.DB, limit int) []das
 
 	var out []dashboardPredictionRow
 	for rows.Next() {
-}
-
-	for rows.Next() {
+		var row dashboardPredictionRow
+		if err := rows.Scan(&row.Namespace, &row.PodName, &row.LastAlertTime, &row.LastGrowthRate, &row.PreventionCostMo, &row.DowntimeRiskHr); err == nil {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 func queryDashboardAlerts(ctx context.Context, db *sql.DB, limit int) []dashboardAlertRow {
@@ -1071,14 +1077,6 @@ func humanAge(t time.Time) string {
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
-	for rows.Next() {
-		var row dashboardPredictionRow
-		if err := rows.Scan(&row.Namespace, &row.PodName, &row.LastAlertTime, &row.LastGrowthRate, &row.PreventionCostMo, &row.DowntimeRiskHr); err == nil {
-			out = append(out, row)
-		}
-	}
-	return out
-}
 
 func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64, int) {
 	if c.clientset == nil || c.pricingProvider == nil {
@@ -1092,8 +1090,9 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64,
 	var nodeInfos []finops.NodeInfo
 	for _, n := range nodes.Items {
 		nodeInfos = append(nodeInfos, finops.NodeInfo{
-			Name:   n.Name,
-			Labels: n.Labels,
+			Name:       n.Name,
+			Labels:     n.Labels,
+			ProviderID: n.Spec.ProviderID,
 		})
 	}
 

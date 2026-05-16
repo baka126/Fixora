@@ -30,10 +30,10 @@ type PodHistory struct {
 }
 
 type PredictionState struct {
-	LastAlertTime     time.Time
-	LastGrowthRate    float64
-	PreventionCostMo  float64
-	DowntimeRiskHr    float64
+	LastAlertTime    time.Time
+	LastGrowthRate   float64
+	PreventionCostMo float64
+	DowntimeRiskHr   float64
 }
 
 type historyCache struct {

@@ -142,6 +142,21 @@ export interface DashboardGitOpsSource {
   workloads: number;
 }
 
+export interface Group {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+}
+
+export interface User {
+  id: string;
+  username: string;
+  role: 'admin' | 'operator' | 'viewer';
+  groups?: Group[];
+  created_at: string;
+}
+
 export interface DashboardPrediction {
   id: string;
   namespace: string;

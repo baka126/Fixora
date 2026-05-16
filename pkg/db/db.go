@@ -60,6 +60,17 @@ func initSchema(ctx context.Context) error {
 		role VARCHAR(50) NOT NULL,
 		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 	);
+	CREATE TABLE IF NOT EXISTS groups (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		name VARCHAR(255) UNIQUE NOT NULL,
+		description TEXT,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE TABLE IF NOT EXISTS user_groups (
+		user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+		group_id UUID REFERENCES groups(id) ON DELETE CASCADE,
+		PRIMARY KEY (user_id, group_id)
+	);
 	`
 	if _, err := Pool.Exec(ctx, query); err != nil {
 		return err

@@ -10,12 +10,14 @@ import {
   LineChart,
   Settings,
   Edit2,
+  Users,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { useStore } from '../store/useStore';
 import { AuditDetailPanel } from '../components/AuditDetailPanel';
 import { DiffEditorPanel } from '../components/DiffEditorPanel';
+import { UserManagementPanel } from '../components/UserManagementPanel';
 import type {
   DashboardAuditEvent,
   DashboardGitOpsSource,
@@ -56,10 +58,13 @@ const pageMeta: Record<PageKind, { title: string; subtitle: string; icon: typeof
 
 export const DataPage = ({ kind }: { kind: PageKind }) => {
   const dashboard = useStore((state) => state.dashboard);
+  const currentUser = useStore((state) => state.user);
   const meta = pageMeta[kind];
   const Icon = meta.icon;
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
   const [editingRemediationId, setEditingRemediationId] = useState<number | null>(null);
+  const [showUserManagement, setShowUserManagement] = useState(false);
+  const hasClusterCost = Boolean((dashboard?.clusterCostMo || 0) > 0 || (dashboard?.activeNodes || 0) > 0);
 
   const formatCurrency = (val: number | undefined) => {
     if (val === undefined || isNaN(val)) return '-';
@@ -68,15 +73,43 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
 
   return (
     <div className="p-4">
-      {kind === 'predictions' && dashboard?.clusterCostMo !== undefined && (
+      {kind === 'settings' && currentUser?.role === 'admin' && (
+        <div className="mb-4">
+          <button
+            onClick={() => setShowUserManagement(true)}
+            className="flex w-full items-center justify-between rounded-lg border border-[#e5e7eb] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:bg-[#f8fafc] transition-colors"
+          >
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-[#eff6ff] p-2 text-[#2563eb]">
+                <Users className="h-5 w-5" />
+              </div>
+              <div className="text-left">
+                <h3 className="text-[14px] font-semibold text-[#111827]">User & Access Management</h3>
+                <p className="mt-1 text-[12px] text-[#647084]">Manage users, roles, and group memberships</p>
+              </div>
+            </div>
+            <span className="text-sm font-medium text-[#2563eb]">Manage &rarr;</span>
+          </button>
+        </div>
+      )}
+
+      {kind === 'predictions' && (
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="rounded-lg border border-[#e5e7eb] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <h3 className="text-[13px] font-medium text-[#647084]">Total Cluster Compute Cost</h3>
-            <p className="mt-1 text-2xl font-semibold text-[#111827]">{formatCurrency(dashboard.clusterCostMo)}<span className="text-sm text-[#647084] font-normal"> /mo</span></p>
+            {hasClusterCost ? (
+              <p className="mt-1 text-2xl font-semibold text-[#111827]">{formatCurrency(dashboard?.clusterCostMo)}<span className="text-sm text-[#647084] font-normal"> /mo</span></p>
+            ) : (
+              <p className="mt-2 text-[13px] text-[#647084]">Unavailable until Fixora can identify node pricing.</p>
+            )}
           </div>
           <div className="rounded-lg border border-[#e5e7eb] bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <h3 className="text-[13px] font-medium text-[#647084]">Active Analyzed Nodes</h3>
-            <p className="mt-1 text-2xl font-semibold text-[#111827]">{dashboard.activeNodes || 0}</p>
+            {hasClusterCost ? (
+              <p className="mt-1 text-2xl font-semibold text-[#111827]">{dashboard?.activeNodes || 0}</p>
+            ) : (
+              <p className="mt-2 text-[13px] text-[#647084]">Node data will appear after the backend can list cluster nodes.</p>
+            )}
           </div>
         </div>
       )}
@@ -112,6 +145,10 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
           remediationId={editingRemediationId}
           onClose={() => setEditingRemediationId(null)}
         />
+      )}
+
+      {showUserManagement && (
+        <UserManagementPanel onClose={() => setShowUserManagement(false)} />
       )}
     </div>
   );
@@ -171,20 +208,15 @@ const GitOpsSources = ({ rows }: { rows: DashboardGitOpsSource[] }) => {
 const Predictions = ({ rows }: { rows: DashboardPrediction[] }) => {
   if (!rows.length) return <Empty title="No predictions available yet" message="Predictive signals will populate after enough metrics have been stored." />;
 
-  const formatCurrency = (val: number | undefined) => {
-    if (val === undefined || isNaN(val) || val === 0) return '-';
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
-  };
-
   return (
-    <Table headers={['Risk', 'Namespace', 'Pod', 'Growth Rate', 'Prevention Cost', 'Downtime Risk', 'Last Alert']}>
+    <Table headers={['Risk', 'Namespace', 'Pod', 'Growth Rate', 'Prevention Δ Cost', 'Downtime Risk', 'Last Alert']}>
       {rows.map((row) => (
         <tr key={row.id} className="border-t border-[#e5e7eb]">
           <td className="px-4 py-3"><Status value={row.risk} /></td>
           <td className="px-4 py-3">{row.namespace}</td>
           <td className="px-4 py-3 font-medium">{row.podName}</td>
           <td className="px-4 py-3">{Math.round(row.lastGrowthRate * 100)}%</td>
-          <td className="px-4 py-3 text-[#15803d] font-medium">{formatCurrency(row.preventionCostMo)}<span className="text-[10px] text-[#647084] font-normal ml-1">/mo</span></td>
+          <td className={`px-4 py-3 font-medium ${moneyDeltaClass(row.preventionCostMo)}`}>{formatCurrency(row.preventionCostMo)}<span className="text-[10px] text-[#647084] font-normal ml-1">/mo</span></td>
           <td className="px-4 py-3 text-[#dc2626] font-medium">{formatCurrency(row.downtimeRiskHr)}<span className="text-[10px] text-[#647084] font-normal ml-1">/hr</span></td>
           <td className="px-4 py-3">{row.lastAlertAge}</td>
         </tr>
@@ -289,4 +321,14 @@ const formatTime = (timestamp: string) => {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return timestamp;
   return date.toLocaleString();
+};
+
+const formatCurrency = (val: number | undefined) => {
+  if (val === undefined || Number.isNaN(val)) return '-';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
+};
+
+const moneyDeltaClass = (val: number | undefined) => {
+  if (val === undefined || Number.isNaN(val) || Math.abs(val) < 0.01) return 'text-[#647084]';
+  return val > 0 ? 'text-[#ea580c]' : 'text-[#15803d]';
 };

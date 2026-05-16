@@ -47,7 +47,10 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/v1/auth/setup-status", s.handleSetupStatus)
 	mux.HandleFunc("/api/v1/auth/setup", s.handleSetup)
-	mux.HandleFunc("/api/v1/auth/users", s.handleCreateUser)
+	mux.HandleFunc("/api/v1/auth/users", s.handleUsers) // GET, POST
+	mux.HandleFunc("/api/v1/auth/users/", s.handleUserByID) // PUT (role), DELETE
+	mux.HandleFunc("/api/v1/auth/groups", s.handleGroups) // GET, POST
+	mux.HandleFunc("/api/v1/auth/groups/", s.handleGroupByID) // DELETE group, POST/DELETE user from group
 	mux.HandleFunc("/api/v1/audit/investigations/", s.handleInvestigationDetail)
 	mux.HandleFunc("/api/v1/remediations/", s.handleRemediations)
 	mux.HandleFunc("/api/v1/ws", s.handleWebSocket)
