@@ -117,11 +117,11 @@ func selectedIncidentAnalyzers(primary Diagnosis, triggerReason string, identity
 	haystack := strings.ToLower(triggerReason + " " + primary.Symptom + " " + primary.LikelyCause + " " + strings.Join(primary.Evidence, " "))
 	switch primary.Category {
 	case CategoryNetwork:
-		add("service", "ingress", "networkpolicy", "gateway", "httproute")
+		add("service", "endpoints", "ingress", "networkpolicy", "gateway", "httproute")
 	case CategoryStorage:
-		add("storage")
+		add("storage", "quota")
 	case CategoryScheduling:
-		add("storage", "hpa", "node")
+		add("storage", "quota", "hpa", "node")
 	case CategoryConfig:
 		add("policy", "webhook")
 	case CategoryRollout:
@@ -131,7 +131,7 @@ func selectedIncidentAnalyzers(primary Diagnosis, triggerReason string, identity
 	}
 
 	if containsAny(haystack, "service", "endpoint", "ingress", "network", "gateway", "httproute", "dns") {
-		add("service", "ingress", "networkpolicy", "gateway", "httproute")
+		add("service", "endpoints", "ingress", "networkpolicy", "gateway", "httproute")
 	}
 	if containsAny(haystack, "pvc", "persistentvolume", "volume", "mount", "storage") {
 		add("storage")
@@ -140,7 +140,7 @@ func selectedIncidentAnalyzers(primary Diagnosis, triggerReason string, identity
 		add("hpa")
 	}
 	if containsAny(haystack, "node", "taint", "affinity", "selector", "unschedulable") {
-		add("node")
+		add("node", "quota")
 	}
 
 	delete(selected, "pod")

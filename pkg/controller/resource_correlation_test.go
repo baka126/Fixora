@@ -167,6 +167,46 @@ func TestWorkloadIdentityForPodUsesDeploymentSelector(t *testing.T) {
 	}
 }
 
+func TestWorkloadIdentityInfersDeploymentWhenReplicaSetReadRaces(t *testing.T) {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-api-7f9c9d6b6f-k2p4x",
+			Namespace: "payments",
+			Labels:    map[string]string{"app": "checkout-api", "pod-template-hash": "7f9c9d6b6f"},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet",
+				Name: "checkout-api-7f9c9d6b6f",
+			}},
+		},
+	}
+	ctrl := &Controller{clientset: fake.NewSimpleClientset(pod)}
+
+	got := ctrl.workloadIdentityForPod(context.Background(), pod)
+	if got.Kind != "Deployment" || got.Name != "checkout-api" {
+		t.Fatalf("expected inferred Deployment/checkout-api, got %#v", got)
+	}
+}
+
+func TestWorkloadIdentityKeepsDirectReplicaSetWithoutDeploymentHash(t *testing.T) {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "direct-rs-pod",
+			Namespace: "payments",
+			Labels:    map[string]string{"app": "direct-rs"},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet",
+				Name: "direct-rs",
+			}},
+		},
+	}
+	ctrl := &Controller{clientset: fake.NewSimpleClientset(pod)}
+
+	got := ctrl.workloadIdentityForPod(context.Background(), pod)
+	if got.Kind != "ReplicaSet" || got.Name != "direct-rs" {
+		t.Fatalf("expected direct ReplicaSet identity, got %#v", got)
+	}
+}
+
 func TestWorkloadRegressionReasonUsesStoredSelectorForReplacementPods(t *testing.T) {
 	replacement := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

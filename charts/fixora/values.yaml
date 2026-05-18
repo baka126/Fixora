@@ -7,7 +7,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "v0.4.10"
+  tag: "v0.4.11"
 
 _UI: false
 
@@ -18,7 +18,7 @@ ui:
   image:
     repository: ghcr.io/baka126/fixora-ui
     pullPolicy: IfNotPresent
-    tag: "v0.4.10"
+    tag: "v0.4.11"
   service:
     type: ClusterIP
     port: 80
@@ -106,6 +106,13 @@ modePolicy:
   approvalTTL: "24h"
   autoFixMaxPRPerHour: 20
   dryRunIncludePatch: true
+
+investigation:
+  # Suppress repeat AI investigations for the same workload and failure scenario.
+  cooldown: "12h"
+  # Suppress repeat Alertmanager-driven diagnostics for the same namespace/pod/alert.
+  alertmanagerDedupWindow: "12h"
+
 ha:
   enabled: true
   leaseName: "fixora-leader-election"
@@ -123,6 +130,7 @@ auditWebhook:
   token: ""
 
 rbac:
+  clusterScoped: true
   allowDeploymentMutations: false
 
 # Privacy Config
@@ -161,6 +169,11 @@ features:
     thresholds:
       errorRate: 0.05    # 5% threshold
       latency: 2.0      # 2 second P99 threshold
+    slo:
+      availabilityObjective: 0.99
+      burnRateThreshold: 14.4
+      shortWindow: 5m
+      longWindow: 1h
   
   # Scan for memory leak trajectories via Prometheus
   leakScanner:

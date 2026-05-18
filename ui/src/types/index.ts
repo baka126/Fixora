@@ -189,8 +189,13 @@ export interface DashboardNodeCost {
   name: string;
   vendor: string;
   region: string;
+  zone?: string;
   instanceType: string;
   monthlyCost: number;
+  requestedMonthlyCost?: number;
+  cpuRequestedCores?: number;
+  memoryRequestedMiB?: number;
+  pods?: number;
   pricingSource?: string;
   status: string;
 }

@@ -128,7 +128,7 @@ func (c *Controller) saveRemediationPlan(ctx context.Context, pod *v1.Pod, diagn
 		return 0
 	}
 	identity := c.workloadIdentityForPod(ctx, pod)
-	return c.history.SaveRemediation(ctx, RemediationRecord{
+	id := c.history.SaveRemediation(ctx, RemediationRecord{
 		InvestigationID:   investigationID,
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
@@ -142,6 +142,47 @@ func (c *Controller) saveRemediationPlan(ctx context.Context, pod *v1.Pod, diagn
 		WorkloadKind:      identity.Kind,
 		WorkloadName:      identity.Name,
 		WorkloadSelector:  identity.Selector,
+	})
+	c.saveRemediationWorkloadSnapshot(ctx, id, "pre_pr", pod.Namespace, identity.Kind, identity.Name)
+	return id
+}
+
+func (c *Controller) saveRemediationWorkloadSnapshot(ctx context.Context, remediationID int64, stage, namespace, kind, name string) {
+	if c == nil || c.history == nil || !c.history.HasDB() || remediationID <= 0 {
+		return
+	}
+	snapshot, ok := c.captureWorkloadSnapshot(ctx, namespace, kind, name)
+	if !ok {
+		return
+	}
+	c.history.SaveRemediationSnapshot(ctx, remediationID, stage, snapshot)
+}
+
+func (c *Controller) recordValidationFailure(ctx context.Context, pod *v1.Pod, diagnosis Diagnosis, investigationID int64, vcsType string, repo discoveredRepo, changes []vcs.FileChange, failureReason string) int64 {
+	if c == nil || c.history == nil || pod == nil {
+		return 0
+	}
+	identity := c.workloadIdentityForPod(ctx, pod)
+	return c.history.SaveRemediation(ctx, RemediationRecord{
+		InvestigationID:   investigationID,
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
+		DiagnosisCategory: string(diagnosis.Category),
+		PatchStrategy:     string(diagnosis.PatchStrategy),
+		Status:            RemediationPRFailed,
+		VCSType:           vcsType,
+		Options: vcs.PullRequestOptions{
+			RepoOwner: repo.Owner,
+			RepoName:  repo.Name,
+			Base:      repo.BaseBranch,
+			Title:     fmt.Sprintf("Fixora: validation blocked remediation for %s/%s", pod.Namespace, pod.Name),
+			Files:     changes,
+		},
+		Source:           repo.Source,
+		FailureReason:    failureReason,
+		WorkloadKind:     identity.Kind,
+		WorkloadName:     identity.Name,
+		WorkloadSelector: identity.Selector,
 	})
 }
 

@@ -393,7 +393,7 @@ func (c *Controller) scanForLeaks() {
 			}
 
 			// Global Investigation Lock check for Leaks
-			if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, 30*time.Minute) {
+			if !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, pod.Name, c.investigationCooldown()) {
 				slog.Debug("Skipping leak investigation: already in progress", "ns", pod.Namespace, "pod", pod.Name)
 				continue
 			}
@@ -589,7 +589,7 @@ func (c *Controller) scanForAppFailures() {
 			}
 
 			// Deduplication check
-			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
+			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, metricInvestigationLockName(p.PodName, "high-error-rate"), c.investigationCooldown()) {
 				slog.Debug("Skipping high error investigation: already in progress", "ns", p.Namespace, "pod", p.PodName)
 				continue
 			}
@@ -614,7 +614,7 @@ func (c *Controller) scanForAppFailures() {
 			}
 
 			// Deduplication check
-			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, p.PodName, 30*time.Minute) {
+			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, metricInvestigationLockName(p.PodName, "high-latency"), c.investigationCooldown()) {
 				slog.Debug("Skipping latency investigation: already in progress", "ns", p.Namespace, "pod", p.PodName)
 				continue
 			}
@@ -629,7 +629,33 @@ func (c *Controller) scanForAppFailures() {
 	} else {
 		slog.Error("Failed bulk query for high latency", "error", err)
 	}
+
+	if slo, ok := c.promClient.(metrics.SLOBurnRateProvider); ok && c.config.SLOAvailabilityObjective > 0 {
+		results, err := slo.GetHighSLOBurnRatePods(c.config.SLOAvailabilityObjective, c.config.SLOShortWindow, c.config.SLOLongWindow, c.config.SLOBurnRateThreshold)
+		if err != nil {
+			slog.Debug("SLO burn-rate query unavailable", "error", err)
+		}
+		for _, p := range results {
+			if !c.isNamespaceScoped(p.Namespace) {
+				continue
+			}
+			if !c.history.CheckAndLockInvestigation(ctx, p.Namespace, metricInvestigationLockName(p.PodName, "slo-burn-rate"), c.investigationCooldown()) {
+				slog.Debug("Skipping SLO burn-rate investigation: already in cooldown", "ns", p.Namespace, "pod", p.PodName)
+				continue
+			}
+			slog.Warn("SLO burn rate exceeded", "ns", p.Namespace, "pod", p.PodName, "short_burn", p.ShortBurnRate, "long_burn", p.LongBurnRate)
+			c.queue.Add(podWorkItem{
+				namespace: p.Namespace,
+				name:      p.PodName,
+				reason:    fmt.Sprintf("SLO Burn Rate (%.1fx short, %.1fx long)", p.ShortBurnRate, p.LongBurnRate),
+			})
+		}
+	}
 	slog.Debug("Bulk performance scan finished")
+}
+
+func metricInvestigationLockName(podName, scenario string) string {
+	return strings.TrimSpace(podName) + "/" + diagnosticLockReason(scenario)
 }
 
 func (c *Controller) isNamespaceScoped(ns string) bool {
@@ -747,7 +773,7 @@ func (c *Controller) pullAlertsFromAlertmanager() {
 
 		ctx := context.Background()
 		// Double-check recent alert processing specifically for Alertmanager source
-		if c.history.IsAlertRecentlyProcessed(ctx, ns, pod, reason, 30*time.Minute) {
+		if c.history.IsAlertRecentlyProcessed(ctx, ns, pod, reason, c.alertmanagerDedupWindow()) {
 			continue
 		}
 
@@ -778,81 +804,7 @@ func (c *Controller) enqueuePod(obj interface{}) {
 
 	slog.Debug("Watcher evaluating pod status", "ns", pod.Namespace, "pod", pod.Name, "phase", pod.Status.Phase)
 
-	reason := ""
-
-	// 1. Check Pod Phase-level failures
-	if pod.Status.Phase == v1.PodFailed {
-		reason = "PodFailed: " + pod.Status.Reason
-		slog.Debug("Pod in Failed phase", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
-	}
-
-	// 2. Check for infrastructure/scheduling failures
-	if reason == "" && pod.Status.Phase == v1.PodPending {
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == v1.PodScheduled && cond.Status == v1.ConditionFalse && cond.Reason == "Unschedulable" {
-				reason = "Pending (Unschedulable)"
-				break
-			}
-		}
-	}
-
-	// 3. Check for node issues reflected on the pod
-	if reason == "" {
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
-				if cond.Reason == "NodeNotReady" {
-					reason = "NodeNotReady"
-					break
-				}
-			}
-		}
-	}
-
-	// 4. Check container states for application and configuration errors
-	checkContainers := func(statuses []v1.ContainerStatus, prefix string) {
-		for _, status := range statuses {
-			if status.State.Waiting != nil {
-				r := status.State.Waiting.Reason
-				slog.Debug("Container waiting", "ns", pod.Namespace, "pod", pod.Name, "container", status.Name, "reason", r)
-				if r == "CrashLoopBackOff" || r == "CreateContainerConfigError" || r == "ImagePullBackOff" || r == "ErrImagePull" || r == "CreateContainerError" {
-					reason = prefix + r
-					return
-				}
-			} else if status.State.Terminated != nil {
-				r := status.State.Terminated.Reason
-				slog.Debug("Container terminated", "ns", pod.Namespace, "pod", pod.Name, "container", status.Name, "reason", r, "exitCode", status.State.Terminated.ExitCode)
-				if r == "OOMKilled" || r == "ContainerCannotRun" || r == "DeadlineExceeded" {
-					reason = prefix + r
-					return
-				}
-				if status.State.Terminated.ExitCode != 0 {
-					reason = fmt.Sprintf("%sExitCode:%d", prefix, status.State.Terminated.ExitCode)
-					return
-				}
-			}
-		}
-	}
-
-	if reason == "" {
-		checkContainers(pod.Status.InitContainerStatuses, "Init:")
-	}
-	if reason == "" {
-		checkContainers(pod.Status.ContainerStatuses, "")
-	}
-
-	// 5. Check for Running but Unready (Health Check Failures)
-	if reason == "" && pod.Status.Phase == v1.PodRunning {
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
-				// Only enqueue if it's been unready for a bit (avoid noise during startup)
-				if time.Since(cond.LastTransitionTime.Time) > 30*time.Second {
-					reason = "Unready (Health Check Failure?)"
-					break
-				}
-			}
-		}
-	}
-
+	reason := podDiagnosticReason(pod)
 	if reason != "" {
 		slog.Info("K8s Watcher detected pod failure, enqueuing diagnostic", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 		c.queue.Add(podWorkItem{
@@ -861,6 +813,76 @@ func (c *Controller) enqueuePod(obj interface{}) {
 			reason:    reason,
 		})
 	}
+}
+
+func podDiagnosticReason(pod *v1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	// 1. Check Pod Phase-level failures
+	if pod.Status.Phase == v1.PodFailed {
+		return "PodFailed: " + pod.Status.Reason
+	}
+
+	// 2. Check for infrastructure/scheduling failures
+	if pod.Status.Phase == v1.PodPending {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == v1.PodScheduled && cond.Status == v1.ConditionFalse && cond.Reason == "Unschedulable" {
+				return "Pending (Unschedulable)"
+			}
+		}
+	}
+
+	// 3. Check for node issues reflected on the pod
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
+			if cond.Reason == "NodeNotReady" {
+				return "NodeNotReady"
+			}
+		}
+	}
+
+	// 4. Check container states for application and configuration errors
+	checkContainers := func(statuses []v1.ContainerStatus, prefix string) string {
+		for _, status := range statuses {
+			if status.State.Waiting != nil {
+				r := status.State.Waiting.Reason
+				if r == "CrashLoopBackOff" || r == "CreateContainerConfigError" || r == "ImagePullBackOff" || r == "ErrImagePull" || r == "CreateContainerError" {
+					return prefix + r
+				}
+			} else if status.State.Terminated != nil {
+				r := status.State.Terminated.Reason
+				if r == "OOMKilled" || r == "ContainerCannotRun" || r == "DeadlineExceeded" {
+					return prefix + r
+				}
+				if status.State.Terminated.ExitCode != 0 {
+					return fmt.Sprintf("%sExitCode:%d", prefix, status.State.Terminated.ExitCode)
+				}
+			}
+		}
+		return ""
+	}
+
+	if reason := checkContainers(pod.Status.InitContainerStatuses, "Init:"); reason != "" {
+		return reason
+	}
+	if reason := checkContainers(pod.Status.ContainerStatuses, ""); reason != "" {
+		return reason
+	}
+
+	// 5. Check for Running but Unready (Health Check Failures)
+	if pod.Status.Phase == v1.PodRunning {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == v1.PodReady && cond.Status == v1.ConditionFalse {
+				// Only enqueue if it's been unready for a bit (avoid noise during startup)
+				if time.Since(cond.LastTransitionTime.Time) > 30*time.Second {
+					return "Unready (Health Check Failure?)"
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 func (c *Controller) runWorker() {
@@ -896,12 +918,13 @@ func (c *Controller) processDiagnostic(work podWorkItem) error {
 		return err
 	}
 	identity := c.workloadIdentityForPod(ctx, pod)
-	lockName := diagnosticLockName(pod, identity, work.reason)
-	if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockName, 30*time.Minute) {
-		slog.Debug("Skipping diagnostic trigger: workload already under investigation", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", work.reason)
+	reason := firstNonEmpty(podDiagnosticReason(pod), work.reason)
+	lockName := diagnosticLockName(pod, identity, reason)
+	if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockName, c.investigationCooldown()) {
+		slog.Debug("Skipping diagnostic trigger: workload scenario is inside investigation cooldown", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", reason, "original_reason", work.reason, "cooldown", c.investigationCooldown())
 		return nil
 	}
-	c.diagnosePod(ctx, pod, work.reason)
+	c.diagnosePod(ctx, pod, reason)
 	return nil
 }
 
@@ -909,6 +932,36 @@ func diagnosticLockName(pod *v1.Pod, identity workloadIdentity, reason string) s
 	subject := slugify(remediationBranchSubject(pod, identity))
 	lockReason := diagnosticLockReason(reason)
 	return subject + "/" + lockReason
+}
+
+func (c *Controller) investigationCooldown() time.Duration {
+	if c != nil && c.config != nil && c.config.InvestigationCooldown > 0 {
+		return c.config.InvestigationCooldown
+	}
+	return 12 * time.Hour
+}
+
+func (c *Controller) alertmanagerDedupWindow() time.Duration {
+	if c != nil && c.config != nil && c.config.AlertmanagerDedupWindow > 0 {
+		return c.config.AlertmanagerDedupWindow
+	}
+	return c.investigationCooldown()
+}
+
+func compactDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d%time.Second == 0:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	default:
+		return d.String()
+	}
 }
 
 func diagnosticLockReason(reason string) string {
@@ -923,16 +976,18 @@ func diagnosticLockReason(reason string) string {
 		return "image-architecture"
 	case strings.Contains(normalized, "imagepullbackoff"), strings.Contains(normalized, "errimagepull"), strings.Contains(normalized, "pull image"):
 		return "image-pull"
-	case strings.Contains(normalized, "createcontainerconfigerror"):
+	case strings.Contains(normalized, "createcontainerconfigerror"), strings.Contains(normalized, "containerconfig"):
 		return "container-config"
-	case strings.Contains(normalized, "createcontainererror"):
+	case strings.Contains(normalized, "createcontainererror"), strings.Contains(normalized, "containercreate"):
 		return "container-create"
-	case strings.Contains(normalized, "unschedulable"), strings.Contains(normalized, "pending"):
+	case strings.Contains(normalized, "unschedulable"), strings.Contains(normalized, "pending"), strings.Contains(normalized, "replicasmismatch"):
 		return "scheduling"
-	case strings.Contains(normalized, "crashloopbackoff"):
+	case strings.Contains(normalized, "crashloopbackoff"), strings.Contains(normalized, "crashloop"):
 		return "crashloop"
 	case strings.Contains(normalized, "podfailed"):
 		return "podfailed"
+	case strings.Contains(normalized, "notready"), strings.Contains(normalized, "unready"):
+		return "not-ready"
 	default:
 		return slugify(normalized)
 	}
@@ -957,6 +1012,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	diagnosis := c.classifyPodIssue(ctx, pod, reason)
 	correlation := c.correlatePodResources(ctx, pod)
+	workload := c.workloadIdentityForPod(ctx, pod)
 	orchestration := c.runIncidentAnalyzers(ctx, pod, reason, diagnosis, correlation)
 	diagnosis = mergeAnalyzerFindings(diagnosis, orchestration.Findings)
 	diagnosis.Related = uniqueSorted(append(append(diagnosis.Related, correlation.Related...), orchestration.Related...))
@@ -980,7 +1036,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	evidence := notifications.EvidenceChain{
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
-		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s\n%s\n%s\n%s", pod.Namespace, pod.Name, reason, diagnosis.Summary(), correlation.Summary(), orchestration.Summary()),
+		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Workload Kind: %s, Workload Name: %s, Reason: %s\n%s\n%s\n%s", pod.Namespace, pod.Name, workload.Kind, workload.Name, reason, diagnosis.Summary(), correlation.Summary(), orchestration.Summary()),
 		HistoricalPattern: historySummary,
 		ShowEventButton:   true,
 	}
@@ -1035,6 +1091,9 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		logs, err = c.getPodLogs(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			slog.Warn("Error fetching logs during investigation", "ns", pod.Namespace, "pod", pod.Name, "error", err)
+		}
+		if patterns := ClusterLogPatterns(logs, 5); len(patterns) > 0 {
+			evidence.ClusterContext += "\n" + formatLogPatterns(patterns)
 		}
 
 		// Calculate Evidence Hash for caching
@@ -1457,6 +1516,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			source = repoInfo.Source
 			if err := validateManifestAwarePatchSet(repoInfo.Source, changes); err != nil {
 				telemetry.IncValidation("manifest-aware", "failed")
+				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "manifest-aware patch validation failed: "+err.Error())
 				slog.Error("Manifest-aware patch validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Manifest-aware patch validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
 				return
@@ -1465,12 +1525,14 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			if c.config.PolicyGuardrailsEnabled {
 				if err := enforceArchitectureImageGuardrail(diagnosis, changes, c.config.AllowedReplacementImages); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
+					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "policy guardrail rejected architecture image remediation patch: "+err.Error())
 					slog.Error("Policy guardrail rejected architecture image remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
 					return
 				}
 				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, c.config.AllowedReplacementImages, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
+					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "policy guardrail rejected remediation patch: "+err.Error())
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
 					return
@@ -1483,6 +1545,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			})
 			if !renderResult.Valid {
 				telemetry.IncValidation("render-sandbox", "failed")
+				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "render sandbox validation failed: "+validationMessage(renderResult))
 				slog.Error("Render sandbox validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", renderResult.Output)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Render sandbox validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, validationMessage(renderResult)))
 				return
@@ -1493,12 +1556,39 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			} else {
 				telemetry.IncValidation("render-sandbox", "passed")
 			}
+			semanticResult := validation.ValidateSemanticRender(repoInfo.Source, repoInfo.SourceFiles, changes, validation.SemanticTarget{
+				Kind:          identity.Kind,
+				Name:          identity.Name,
+				Namespace:     pod.Namespace,
+				ContainerName: targetContainerName(pod, failingContainerNameForPod(pod)),
+				PatchStrategy: string(diagnosis.PatchStrategy),
+			}, validation.SandboxOptions{
+				Enabled:       c.config.ValidationSandboxEnabled,
+				RequireRender: c.config.ValidationRequireRender,
+				Timeout:       c.config.ValidationToolTimeout,
+			})
+			if !semanticResult.Valid {
+				telemetry.IncValidation("semantic-render", "failed")
+				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "semantic render validation failed: "+validationMessage(semanticResult))
+				slog.Error("Semantic render validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", semanticResult.Output)
+				notifications.SendNotification(c.config, fmt.Sprintf("❌ Semantic render validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, validationMessage(semanticResult)))
+				return
+			}
+			if semanticResult.Skipped {
+				telemetry.IncValidation("semantic-render", "skipped")
+				slog.Info("Semantic render validation skipped", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "reason", semanticResult.Output)
+			} else {
+				telemetry.IncValidation("semantic-render", "passed")
+			}
 		}
 		for _, change := range changes {
 			vResult := validateRemediationFileChange(source, change)
 
 			if !vResult.Valid {
 				telemetry.IncValidation("file", "failed")
+				if repoInfo, ok := repoMap[repoKey]; ok {
+					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "pre-flight validation failed: "+validationMessage(vResult))
+				}
 				slog.Error("Pre-flight validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "file", change.FilePath, "error", vResult.Output)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Pre-flight validation failed for %s in %s. Fixora will not open PRs.\nError: %s", change.FilePath, repoKey, vResult.Output))
 				return

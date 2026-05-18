@@ -28,6 +28,11 @@ func TestDashboardGuardrailsShowRenderPassedForRecordedPendingApproval(t *testin
 	if got != "pending" {
 		t.Fatalf("Remediation state status = %q, want pending", got)
 	}
+
+	got = guardrailStatus(guardrails, "Semantic target check")
+	if got != "passed" {
+		t.Fatalf("Semantic target check status = %q, want passed", got)
+	}
 }
 
 func TestDashboardGuardrailsSurfaceValidationFailure(t *testing.T) {
@@ -40,6 +45,32 @@ func TestDashboardGuardrailsSurfaceValidationFailure(t *testing.T) {
 	got := guardrailStatus(guardrails, "Render validation")
 	if got != "failed" {
 		t.Fatalf("Render validation status = %q, want failed", got)
+	}
+}
+
+func TestDashboardGuardrailsSurfaceSemanticValidationFailure(t *testing.T) {
+	guardrails := dashboardGuardrails(dashboardRemediationRow{
+		ID:            42,
+		Status:        "pr_failed",
+		FailureReason: "semantic render validation failed: rendered Deployment/api did not change expected image fields",
+	})
+
+	got := guardrailStatus(guardrails, "Semantic target check")
+	if got != "failed" {
+		t.Fatalf("Semantic target check status = %q, want failed", got)
+	}
+}
+
+func TestDashboardGuardrailsSurfacePolicyFailure(t *testing.T) {
+	guardrails := dashboardGuardrails(dashboardRemediationRow{
+		ID:            42,
+		Status:        "pr_failed",
+		FailureReason: "policy guardrail rejected remediation patch: touches RBAC manifests",
+	})
+
+	got := guardrailStatus(guardrails, "Privileged paths blocked")
+	if got != "failed" {
+		t.Fatalf("Privileged paths blocked status = %q, want failed", got)
 	}
 }
 

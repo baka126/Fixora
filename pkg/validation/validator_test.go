@@ -88,3 +88,125 @@ func TestHelmValueFileOrderIncludesChangedValuesWhenNoConfiguredFiles(t *testing
 		t.Fatalf("helm value files = %#v, want %#v", got, want)
 	}
 }
+
+func TestValidateSemanticRenderRawImageChangePasses(t *testing.T) {
+	original := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: example/api:v1
+`)
+	changed := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: example/api:v2
+`)
+
+	got := ValidateSemanticRender(
+		gitops.WorkloadSource{ManifestType: gitops.ManifestRaw},
+		map[string][]byte{"deploy.yaml": original},
+		[]vcs.FileChange{{FilePath: "deploy.yaml", NewContent: changed}},
+		SemanticTarget{Kind: "Deployment", Name: "api", Namespace: "prod", ContainerName: "api", PatchStrategy: "image"},
+		SandboxOptions{Enabled: true, Timeout: time.Second},
+	)
+
+	if !got.Valid || got.Skipped {
+		t.Fatalf("expected semantic image validation to pass, got %#v", got)
+	}
+}
+
+func TestValidateSemanticRenderRejectsUnrelatedRawChange(t *testing.T) {
+	original := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+  labels:
+    app: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: example/api:v1
+`)
+	changed := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+  labels:
+    app: api
+    owner: platform
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: example/api:v1
+`)
+
+	got := ValidateSemanticRender(
+		gitops.WorkloadSource{ManifestType: gitops.ManifestRaw},
+		map[string][]byte{"deploy.yaml": original},
+		[]vcs.FileChange{{FilePath: "deploy.yaml", NewContent: changed}},
+		SemanticTarget{Kind: "Deployment", Name: "api", Namespace: "prod", ContainerName: "api", PatchStrategy: "image"},
+		SandboxOptions{Enabled: true, Timeout: time.Second},
+	)
+
+	if got.Valid || !strings.Contains(got.Output, "did not change expected image fields") {
+		t.Fatalf("expected unrelated change to fail semantic image validation, got %#v", got)
+	}
+}
+
+func TestValidateSemanticRenderSchedulingChangePasses(t *testing.T) {
+	original := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: example/api:v1
+`)
+	changed := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+      - name: api
+        image: example/api:v1
+`)
+
+	got := ValidateSemanticRender(
+		gitops.WorkloadSource{ManifestType: gitops.ManifestRaw},
+		map[string][]byte{"deploy.yaml": original},
+		[]vcs.FileChange{{FilePath: "deploy.yaml", NewContent: changed}},
+		SemanticTarget{Kind: "Deployment", Name: "api", PatchStrategy: "scheduling-policy"},
+		SandboxOptions{Enabled: true, Timeout: time.Second},
+	)
+
+	if !got.Valid || got.Skipped {
+		t.Fatalf("expected semantic scheduling validation to pass, got %#v", got)
+	}
+}

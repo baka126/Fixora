@@ -157,6 +157,10 @@ spec:
               value: {{ .Values.modePolicy.autoFixMaxPRPerHour | quote }}
             - name: MODE_DRY_RUN_INCLUDE_PATCH
               value: {{ .Values.modePolicy.dryRunIncludePatch | quote }}
+            - name: INVESTIGATION_COOLDOWN
+              value: {{ .Values.investigation.cooldown | quote }}
+            - name: ALERTMANAGER_DEDUP_WINDOW
+              value: {{ .Values.investigation.alertmanagerDedupWindow | quote }}
             - name: HA_ENABLED
               value: {{ if and .Values.ha.enabled (include "fixora.databaseEnabled" .) }}"true"{{ else }}"false"{{ end }}
             - name: HA_LEASE_NAME
@@ -218,6 +222,14 @@ spec:
               value: {{ .Values.features.performanceScanner.thresholds.errorRate | quote }}
             - name: PROMETHEUS_HIGH_LATENCY_THRESHOLD
               value: {{ .Values.features.performanceScanner.thresholds.latency | quote }}
+            - name: SLO_AVAILABILITY_OBJECTIVE
+              value: {{ .Values.features.performanceScanner.slo.availabilityObjective | quote }}
+            - name: SLO_BURN_RATE_THRESHOLD
+              value: {{ .Values.features.performanceScanner.slo.burnRateThreshold | quote }}
+            - name: SLO_SHORT_WINDOW
+              value: {{ .Values.features.performanceScanner.slo.shortWindow | quote }}
+            - name: SLO_LONG_WINDOW
+              value: {{ .Values.features.performanceScanner.slo.longWindow | quote }}
 
             # Scoping
             - name: INCLUDED_NAMESPACES

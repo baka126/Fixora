@@ -34,6 +34,7 @@ func (c *Controller) monitorRemediationOutcomes() {
 			if !ok || !status.Merged {
 				continue
 			}
+			c.saveRemediationWorkloadSnapshot(ctx, rec.ID, "post_merge", rec.Namespace, firstNonEmpty(rec.WorkloadKind, "Pod"), firstNonEmpty(rec.WorkloadName, rec.PodName))
 			c.markRemediationStatus(ctx, rec.ID, RemediationObserving, firstNonEmpty(status.URL, rec.PRURL), "PR merged; observing GitOps sync and workload health")
 			continue
 		}
@@ -180,6 +181,9 @@ func fluxObjectReady(obj *unstructured.Unstructured, name string) (bool, string)
 }
 
 func (c *Controller) workloadRegressionReason(ctx context.Context, rec RemediationRecord) string {
+	if reason := c.workloadSnapshotRegressionReason(ctx, rec); reason != "" {
+		return reason
+	}
 	if reason := c.workloadRolloutRegressionReason(ctx, rec); reason != "" {
 		return reason
 	}
@@ -222,6 +226,22 @@ func (c *Controller) workloadRegressionReason(ctx context.Context, rec Remediati
 		}
 	}
 	return ""
+}
+
+func (c *Controller) workloadSnapshotRegressionReason(ctx context.Context, rec RemediationRecord) string {
+	if c == nil || c.history == nil || !c.history.HasDB() {
+		return ""
+	}
+	before, ok := c.history.LatestRemediationSnapshot(ctx, rec.ID, "pre_pr")
+	if !ok {
+		return ""
+	}
+	after, ok := c.captureWorkloadSnapshot(ctx, rec.Namespace, firstNonEmpty(rec.WorkloadKind, "Pod"), firstNonEmpty(rec.WorkloadName, rec.PodName))
+	if !ok {
+		return ""
+	}
+	c.history.SaveRemediationSnapshot(ctx, rec.ID, "observation", after)
+	return workloadSnapshotRegressionReason(before, after)
 }
 
 func (c *Controller) workloadRolloutRegressionReason(ctx context.Context, rec RemediationRecord) string {

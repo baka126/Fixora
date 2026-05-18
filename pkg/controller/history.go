@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -272,6 +273,14 @@ func (h *historyCache) initDB() {
 			locked_at TIMESTAMP NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_investigation_locks_timestamp ON investigation_locks (locked_at);`,
+		`CREATE TABLE IF NOT EXISTS remediation_snapshots (
+			id SERIAL PRIMARY KEY,
+			remediation_id INTEGER NOT NULL,
+			stage TEXT NOT NULL,
+			snapshot JSONB NOT NULL,
+			created_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_remediation_snapshots_remediation ON remediation_snapshots (remediation_id, stage, created_at);`,
 	}
 	for _, q := range queries {
 		_, err := h.db.Exec(q)
@@ -673,7 +682,7 @@ func (h *historyCache) AllowAutoFixPR(ctx context.Context, maxPerHour int) (bool
 }
 
 func (h *historyCache) IsAlertRecentlyProcessed(ctx context.Context, ns, pod, alertname string, window time.Duration) bool {
-	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	key := h.scopeKey(ns, pod, alertname)
 	if h.db != nil {
 		var lastProcessed time.Time
 		err := h.db.QueryRowContext(ctx, `SELECT last_processed_at FROM processed_alerts WHERE alert_key = $1`, key).Scan(&lastProcessed)
@@ -705,7 +714,7 @@ func (h *historyCache) IsAlertRecentlyProcessed(ctx context.Context, ns, pod, al
 }
 
 func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertname string) {
-	key := fmt.Sprintf("%s/%s/%s", ns, pod, alertname)
+	key := h.scopeKey(ns, pod, alertname)
 	slog.Debug("Marking alert as processed", "key", key)
 	if h.db != nil {
 		query := `
@@ -724,6 +733,46 @@ func (h *historyCache) MarkAlertProcessed(ctx context.Context, ns, pod, alertnam
 	h.alertMu.Lock()
 	defer h.alertMu.Unlock()
 	h.recentAlerts[key] = time.Now()
+}
+
+func (h *historyCache) SaveRemediationSnapshot(ctx context.Context, remediationID int64, stage string, snapshot WorkloadRolloutSnapshot) {
+	if h == nil || h.db == nil || remediationID <= 0 || stage == "" {
+		return
+	}
+	_, err := h.db.ExecContext(ctx, `
+		INSERT INTO remediation_snapshots (remediation_id, stage, snapshot, created_at)
+		VALUES ($1, $2, $3, $4)
+	`, remediationID, stage, encodeWorkloadSnapshot(snapshot), time.Now())
+	if err != nil {
+		slog.Error("Failed to save remediation snapshot", "remediation_id", remediationID, "stage", stage, "error", err)
+	}
+}
+
+func (h *historyCache) LatestRemediationSnapshot(ctx context.Context, remediationID int64, stage string) (WorkloadRolloutSnapshot, bool) {
+	if h == nil || h.db == nil || remediationID <= 0 || stage == "" {
+		return WorkloadRolloutSnapshot{}, false
+	}
+	var data []byte
+	err := h.db.QueryRowContext(ctx, `
+		SELECT snapshot
+		FROM remediation_snapshots
+		WHERE remediation_id = $1 AND stage = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, remediationID, stage).Scan(&data)
+	if err == sql.ErrNoRows {
+		return WorkloadRolloutSnapshot{}, false
+	}
+	if err != nil {
+		slog.Error("Failed to load remediation snapshot", "remediation_id", remediationID, "stage", stage, "error", err)
+		return WorkloadRolloutSnapshot{}, false
+	}
+	snapshot, err := decodeWorkloadSnapshot(data)
+	if err != nil {
+		slog.Error("Failed to decode remediation snapshot", "remediation_id", remediationID, "stage", stage, "error", err)
+		return WorkloadRolloutSnapshot{}, false
+	}
+	return snapshot, true
 }
 
 func (h *historyCache) SaveAlertWatch(ctx context.Context, alert alertmanager.Alert) {
@@ -764,7 +813,7 @@ func (h *historyCache) LoadAlertWatchKeys(ctx context.Context) map[string]time.T
 }
 
 func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod string, window time.Duration) bool {
-	key := fmt.Sprintf("%s/%s", ns, pod)
+	key := h.scopeKey(ns, pod)
 	if h.db != nil {
 		tx, err := h.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -816,6 +865,20 @@ func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod st
 	slog.Debug("Creating/Renewing in-memory investigation lock", "key", key)
 	h.investigationLocks[key] = time.Now()
 	return true
+}
+
+func (h *historyCache) scopeKey(parts ...string) string {
+	cluster := ""
+	if h != nil && h.config != nil {
+		cluster = h.config.ClusterName
+	}
+	if cluster == "" {
+		cluster = "default-cluster"
+	}
+	values := make([]string, 0, len(parts)+1)
+	values = append(values, cluster)
+	values = append(values, parts...)
+	return fmt.Sprintf("%s", strings.Join(values, "/"))
 }
 
 type CategoryTrend struct {

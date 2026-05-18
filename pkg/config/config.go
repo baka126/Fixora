@@ -28,6 +28,8 @@ type Config struct {
 	ModeApprovalTTL         time.Duration
 	ModeAutoFixMaxPRPerHour int
 	ModeDryRunIncludePatch  bool
+	InvestigationCooldown   time.Duration
+	AlertmanagerDedupWindow time.Duration
 	HAEnabled               bool
 	HALeaseName             string
 	HALeaseNamespace        string
@@ -35,6 +37,7 @@ type Config struct {
 	HARenewDeadline         time.Duration
 	HARetryPeriod           time.Duration
 	PrometheusURL           string
+	ClusterName             string
 	AlertmanagerURL         string
 	AlertmanagerEnabled     bool
 	AIProvider              string // "gemini", "openai", "anthropic"
@@ -73,6 +76,10 @@ type Config struct {
 	// Performance Scanner Thresholds
 	PrometheusHighErrorRateThreshold float64
 	PrometheusHighLatencyThreshold   float64
+	SLOAvailabilityObjective         float64
+	SLOBurnRateThreshold             float64
+	SLOShortWindow                   time.Duration
+	SLOLongWindow                    time.Duration
 
 	// Scoping
 	IncludedNamespaces []string
@@ -125,6 +132,8 @@ func Load() *Config {
 		ModeApprovalTTL:         getEnvDuration("MODE_APPROVAL_TTL", 24*time.Hour),
 		ModeAutoFixMaxPRPerHour: getEnvInt("MODE_AUTOFIX_MAX_PR_PER_HOUR", 20),
 		ModeDryRunIncludePatch:  getEnvBool("MODE_DRY_RUN_INCLUDE_PATCH", true),
+		InvestigationCooldown:   getEnvDuration("INVESTIGATION_COOLDOWN", 12*time.Hour),
+		AlertmanagerDedupWindow: getEnvDuration("ALERTMANAGER_DEDUP_WINDOW", 12*time.Hour),
 		HAEnabled:               getEnvBool("HA_ENABLED", true),
 		HALeaseName:             getEnv("HA_LEASE_NAME", "fixora-leader-election"),
 		HALeaseNamespace:        getEnv("HA_LEASE_NAMESPACE", getEnv("POD_NAMESPACE", "default")),
@@ -132,6 +141,7 @@ func Load() *Config {
 		HARenewDeadline:         getEnvDuration("HA_RENEW_DEADLINE", 10*time.Second),
 		HARetryPeriod:           getEnvDuration("HA_RETRY_PERIOD", 2*time.Second),
 		PrometheusURL:           os.Getenv("PROMETHEUS_URL"),
+		ClusterName:             getEnv("FIXORA_CLUSTER_NAME", ""),
 		AlertmanagerURL:         os.Getenv("ALERTMANAGER_URL"),
 		AlertmanagerEnabled:     getEnvBool("ALERTMANAGER_ENABLED", true),
 		AIProvider:              os.Getenv("AI_PROVIDER"),
@@ -168,6 +178,10 @@ func Load() *Config {
 		// Thresholds
 		PrometheusHighErrorRateThreshold: getEnvFloat("PROMETHEUS_HIGH_ERROR_RATE_THRESHOLD", 0.05),
 		PrometheusHighLatencyThreshold:   getEnvFloat("PROMETHEUS_HIGH_LATENCY_THRESHOLD", 2.0),
+		SLOAvailabilityObjective:         getEnvFloat("SLO_AVAILABILITY_OBJECTIVE", 0.99),
+		SLOBurnRateThreshold:             getEnvFloat("SLO_BURN_RATE_THRESHOLD", 14.4),
+		SLOShortWindow:                   getEnvDuration("SLO_SHORT_WINDOW", 5*time.Minute),
+		SLOLongWindow:                    getEnvDuration("SLO_LONG_WINDOW", time.Hour),
 
 		// Scoping
 		IncludedNamespaces: getEnvSlice("INCLUDED_NAMESPACES", []string{}),

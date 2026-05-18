@@ -272,3 +272,141 @@ func (c *Client) GetHighLatencyPods(threshold float64) ([]metrics.PodMetricResul
 	}
 	return results, nil
 }
+
+// GetHighSLOBurnRatePods detects pods consuming error budget quickly across
+// both a short and long window. It uses generic http_requests_total metrics.
+func (c *Client) GetHighSLOBurnRatePods(objective float64, shortWindow, longWindow time.Duration, threshold float64) ([]metrics.SLOBurnRateResult, error) {
+	errorBudget := 1 - objective
+	if errorBudget <= 0 || errorBudget >= 1 {
+		errorBudget = 0.01
+	}
+	if shortWindow <= 0 {
+		shortWindow = 5 * time.Minute
+	}
+	if longWindow <= 0 {
+		longWindow = time.Hour
+	}
+	if threshold <= 0 {
+		threshold = 14.4
+	}
+
+	shortRates, err := c.queryHTTPErrorRatiosByPod(shortWindow)
+	if err != nil {
+		return nil, err
+	}
+	longRates, err := c.queryHTTPErrorRatiosByPod(longWindow)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []metrics.SLOBurnRateResult
+	longThreshold := threshold / 2
+	for key, shortRatio := range shortRates {
+		longRatio := longRates[key]
+		shortBurn := shortRatio / errorBudget
+		longBurn := longRatio / errorBudget
+		if shortBurn < threshold || longBurn < longThreshold {
+			continue
+		}
+		ns, pod := splitMetricKey(key)
+		out = append(out, metrics.SLOBurnRateResult{
+			Namespace:     ns,
+			PodName:       pod,
+			ShortBurnRate: shortBurn,
+			LongBurnRate:  longBurn,
+			ErrorBudget:   errorBudget,
+		})
+	}
+	return out, nil
+}
+
+func (c *Client) queryHTTPErrorRatiosByPod(window time.Duration) (map[string]float64, error) {
+	query := fmt.Sprintf(`
+		sum by (namespace, pod) (rate(http_requests_total{status=~"5.."}[%s]))
+		/
+		sum by (namespace, pod) (rate(http_requests_total[%s]))
+	`, promDuration(window), promDuration(window))
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	vector, ok := result.(model.Vector)
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+	}
+	out := make(map[string]float64, len(vector))
+	for _, sample := range vector {
+		ns := string(sample.Metric["namespace"])
+		pod := string(sample.Metric["pod"])
+		if ns == "" || pod == "" {
+			continue
+		}
+		out[metricKey(ns, pod)] = float64(sample.Value)
+	}
+	return out, nil
+}
+
+// GetTrafficEdges returns service-mesh workload traffic edges when common
+// Istio request metrics are available. Missing metrics simply produce no edges.
+func (c *Client) GetTrafficEdges(window time.Duration, minRPS float64) ([]metrics.TrafficEdge, error) {
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	query := fmt.Sprintf(`
+		sum by (source_workload_namespace, source_workload, destination_workload_namespace, destination_workload) (
+			rate(istio_requests_total{source_workload!="",destination_workload!=""}[%s])
+		) > %f
+	`, promDuration(window), minRPS)
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	vector, ok := result.(model.Vector)
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+	}
+	out := make([]metrics.TrafficEdge, 0, len(vector))
+	for _, sample := range vector {
+		edge := metrics.TrafficEdge{
+			SourceNamespace:      string(sample.Metric["source_workload_namespace"]),
+			SourceWorkload:       string(sample.Metric["source_workload"]),
+			DestinationNamespace: string(sample.Metric["destination_workload_namespace"]),
+			DestinationWorkload:  string(sample.Metric["destination_workload"]),
+			RequestsPerSecond:    float64(sample.Value),
+		}
+		if edge.SourceWorkload == "" || edge.DestinationWorkload == "" {
+			continue
+		}
+		out = append(out, edge)
+	}
+	return out, nil
+}
+
+func promDuration(d time.Duration) string {
+	if d <= 0 {
+		return "5m"
+	}
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	if d%time.Second == 0 {
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	return fmt.Sprintf("%ds", int(d.Seconds()))
+}
+
+func metricKey(namespace, pod string) string {
+	return namespace + "\x00" + pod
+}
+
+func splitMetricKey(key string) (string, string) {
+	for i := range key {
+		if key[i] == 0 {
+			return key[:i], key[i+1:]
+		}
+	}
+	return "", key
+}

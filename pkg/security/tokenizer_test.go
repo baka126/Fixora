@@ -7,8 +7,8 @@ import (
 
 func TestTokenizerRedactsAndRestoresCloudAndPrivateKeys(t *testing.T) {
 	input := strings.Join([]string{
-		"access_key: AKIA_EXAMPLE_DUMMY_KEY",
-		"aws_secret_access_key=EXAMPLE_DUMMY_SECRET_KEY_WITH_LONG_STRING",
+		"access_key: AKIAABCDEFGHIJKLMNOP",
+		"aws_secret_access_key=EXAMPLEDUMMYSECRETKEYWITHLONGSTRING1234567890",
 		"-----BEGIN PRIVATE KEY-----",
 		"abc123",
 		"-----END PRIVATE KEY-----",
@@ -17,7 +17,7 @@ func TestTokenizerRedactsAndRestoresCloudAndPrivateKeys(t *testing.T) {
 	tokenizer := NewTokenizer()
 	tokenized := tokenizer.Tokenize(input)
 
-	for _, sensitive := range []string{"AKIA_EXAMPLE_DUMMY_KEY", "EXAMPLE_DUMMY_SECRET_KEY_WITH_LONG_STRING", "abc123"} {
+	for _, sensitive := range []string{"AKIAABCDEFGHIJKLMNOP", "EXAMPLEDUMMYSECRETKEYWITHLONGSTRING1234567890", "abc123"} {
 		if strings.Contains(tokenized, sensitive) {
 			t.Fatalf("expected tokenized content to hide %q, got:\n%s", sensitive, tokenized)
 		}

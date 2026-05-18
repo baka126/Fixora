@@ -12,6 +12,22 @@ type PodMetricResult struct {
 	Value     float64
 }
 
+type SLOBurnRateResult struct {
+	Namespace     string
+	PodName       string
+	ShortBurnRate float64
+	LongBurnRate  float64
+	ErrorBudget   float64
+}
+
+type TrafficEdge struct {
+	SourceNamespace      string
+	SourceWorkload       string
+	DestinationNamespace string
+	DestinationWorkload  string
+	RequestsPerSecond    float64
+}
+
 // MetricsProvider is the unified interface for gathering K8s resource metrics.
 type MetricsProvider interface {
 	// GetPodUsage returns the current memory usage for a pod.
@@ -49,4 +65,12 @@ type BulkMetricsProvider interface {
 	GetHighErrorRatePods(threshold float64) ([]PodMetricResult, error)
 	// GetHighLatencyPods finds all pods exceeding the latency threshold.
 	GetHighLatencyPods(threshold float64) ([]PodMetricResult, error)
+}
+
+type SLOBurnRateProvider interface {
+	GetHighSLOBurnRatePods(objective float64, shortWindow, longWindow time.Duration, threshold float64) ([]SLOBurnRateResult, error)
+}
+
+type TrafficGraphProvider interface {
+	GetTrafficEdges(window time.Duration, minRPS float64) ([]TrafficEdge, error)
 }

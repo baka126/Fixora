@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNormalizeMode(t *testing.T) {
 	tests := []struct {
@@ -22,5 +25,33 @@ func TestNormalizeMode(t *testing.T) {
 				t.Fatalf("normalizeMode(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadInvestigationCooldowns(t *testing.T) {
+	t.Setenv("INVESTIGATION_COOLDOWN", "6h")
+	t.Setenv("ALERTMANAGER_DEDUP_WINDOW", "90m")
+
+	cfg := Load()
+
+	if cfg.InvestigationCooldown != 6*time.Hour {
+		t.Fatalf("InvestigationCooldown = %s, want 6h", cfg.InvestigationCooldown)
+	}
+	if cfg.AlertmanagerDedupWindow != 90*time.Minute {
+		t.Fatalf("AlertmanagerDedupWindow = %s, want 90m", cfg.AlertmanagerDedupWindow)
+	}
+}
+
+func TestLoadInvestigationCooldownDefaults(t *testing.T) {
+	t.Setenv("INVESTIGATION_COOLDOWN", "")
+	t.Setenv("ALERTMANAGER_DEDUP_WINDOW", "")
+
+	cfg := Load()
+
+	if cfg.InvestigationCooldown != 12*time.Hour {
+		t.Fatalf("InvestigationCooldown = %s, want 12h", cfg.InvestigationCooldown)
+	}
+	if cfg.AlertmanagerDedupWindow != 12*time.Hour {
+		t.Fatalf("AlertmanagerDedupWindow = %s, want 12h", cfg.AlertmanagerDedupWindow)
 	}
 }

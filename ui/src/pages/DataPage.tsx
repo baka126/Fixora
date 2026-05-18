@@ -293,10 +293,14 @@ const NodeCostList = ({ nodes, activeNodes }: { nodes: DashboardNodeCost[]; acti
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate text-[13px] font-semibold text-[#111827]">{node.name}</div>
-                <div className="mt-0.5 truncate text-[11px] text-[#647084]">{node.vendor} · {node.region} · {node.instanceType}</div>
+                <div className="mt-0.5 truncate text-[11px] text-[#647084]">{node.vendor} · {node.region}{node.zone ? `/${node.zone}` : ''} · {node.instanceType}</div>
+                <div className="mt-1 text-[10px] text-[#647084]">
+                  {node.pods || 0} pods · {formatCores(node.cpuRequestedCores || 0)} requested · {formatMemory(node.memoryRequestedMiB || 0)}
+                </div>
               </div>
               <div className="text-right">
                 <div className="text-[13px] font-semibold text-[#111827]">{node.monthlyCost > 0 ? formatCurrency(node.monthlyCost) : '-'}</div>
+                {node.requestedMonthlyCost ? <div className="text-[10px] text-[#647084]">{formatCurrency(node.requestedMonthlyCost)} requested</div> : null}
                 <div className={`text-[10px] font-medium ${node.status === 'priced' ? 'text-[#15803d]' : 'text-[#ea580c]'}`}>{node.status}</div>
               </div>
             </div>
@@ -411,6 +415,13 @@ const formatTime = (timestamp: string) => {
 const formatCurrency = (val: number | undefined) => {
   if (val === undefined || Number.isNaN(val)) return '-';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
+};
+
+const formatCores = (val: number) => `${val.toFixed(val >= 1 ? 1 : 2)} CPU`;
+
+const formatMemory = (mib: number) => {
+  if (mib >= 1024) return `${(mib / 1024).toFixed(1)} GiB`;
+  return `${Math.round(mib)} MiB`;
 };
 
 const moneyDeltaClass = (val: number | undefined) => {

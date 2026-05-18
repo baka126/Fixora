@@ -596,10 +596,10 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
         <DrawerCard icon={<ShieldCheck className="h-4 w-4 text-[#16a34a]" />} title="Guardrails">
           {incident.guardrails?.length ? (
             <div className="divide-y divide-[#e5e7eb]">
-              {renderValidationGuardrail(incident.guardrails) && (
-                <RenderValidationBadge guardrail={renderValidationGuardrail(incident.guardrails)!} helm={isHelmGitOps(incident.gitops?.manifestType)} />
-              )}
-              {incident.guardrails.map((guardrail) => (
+              {primarySafetyGuardrails(incident.guardrails).map((guardrail) => (
+                <ValidationBadge key={guardrail.label} guardrail={guardrail} helm={isHelmGitOps(incident.gitops?.manifestType)} />
+              ))}
+              {incident.guardrails.filter((guardrail) => !isPrimarySafetyGuardrail(guardrail)).map((guardrail) => (
                 <GuardrailRow key={guardrail.label} guardrail={guardrail} />
               ))}
             </div>
@@ -1226,13 +1226,13 @@ const KeyValueRows = ({ rows, compact = false }: { rows: [string, string | undef
   </div>
 );
 
-const RenderValidationBadge = ({ guardrail, helm }: { guardrail: DashboardGuardrail; helm?: boolean }) => {
+const ValidationBadge = ({ guardrail, helm }: { guardrail: DashboardGuardrail; helm?: boolean }) => {
   const tone = guardrailTone(guardrail.status);
   return (
     <div className="border-b border-[#e5e7eb] px-3 py-3">
       <div className="flex items-center justify-between gap-3 rounded-md border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2 text-[12px]">
         <div className="min-w-0">
-          <div className="font-semibold text-[#111827]">{renderValidationTitle(guardrail.status, helm)}</div>
+          <div className="font-semibold text-[#111827]">{validationBadgeTitle(guardrail, helm)}</div>
           {guardrail.detail && <div className="mt-0.5 truncate text-[11px] text-[#647084]">{guardrail.detail}</div>}
         </div>
         <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-medium ${tone}`}>{guardrail.status}</span>
@@ -1256,12 +1256,16 @@ const GuardrailRow = ({ guardrail }: { guardrail: DashboardGuardrail }) => {
   );
 };
 
-const renderValidationGuardrail = (guardrails: DashboardGuardrail[]) =>
-  guardrails.find((guardrail) => /render/i.test(guardrail.label));
+const primarySafetyGuardrails = (guardrails: DashboardGuardrail[]) =>
+  guardrails.filter((guardrail) => isPrimarySafetyGuardrail(guardrail));
 
-const renderValidationTitle = (status: string, helm?: boolean) => {
-  const prefix = helm ? 'Helm render' : 'Render validation';
-  switch ((status || '').toLowerCase()) {
+const isPrimarySafetyGuardrail = (guardrail: DashboardGuardrail) =>
+  /render validation/i.test(guardrail.label) || /semantic target/i.test(guardrail.label);
+
+const validationBadgeTitle = (guardrail: DashboardGuardrail, helm?: boolean) => {
+  const isSemantic = /semantic target/i.test(guardrail.label);
+  const prefix = isSemantic ? 'Semantic target check' : helm ? 'Helm render' : 'Render validation';
+  switch ((guardrail.status || '').toLowerCase()) {
     case 'passed':
       return `${prefix} passed`;
     case 'failed':

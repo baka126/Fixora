@@ -48,8 +48,12 @@ Fixora requires permissions to watch the K8s Event stream and inspect resources.
 | `privacy.customLogScrubbingPatterns`| `CUSTOM_LOG_SCRUBBING_PATTERNS` | `list` | Custom regex patterns to scrub from logs before AI transmission. |
 | `features.database.host`| `DB_HOST` | `string` | Postgres Database Host (Mandatory for stateful analysis). |
 | `finops.infracostAPIKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
+| `investigation.cooldown` | `INVESTIGATION_COOLDOWN` | `duration` | Suppresses repeat AI investigations for the same workload and failure scenario. Defaults to `12h`. |
+| `investigation.alertmanagerDedupWindow` | `ALERTMANAGER_DEDUP_WINDOW` | `duration` | Suppresses repeat Alertmanager-triggered diagnostics for the same namespace, pod, and alert. Defaults to `12h`. |
 
 ---
+
+When `validation.sandboxEnabled` is enabled, Fixora performs two checks before a remediation PR is opened. First, it renders Helm or Kustomize sources when the required tooling and chart/overlay files are available. Second, it compares the original and patched manifests to confirm the intended workload, container, or related Service/PVC field changed for the selected patch strategy. Failed validation attempts are stored in the remediation history so the dashboard and audit views show why the PR was blocked.
 
 ## 4. Enterprise Security Configuration
 

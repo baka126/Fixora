@@ -193,5 +193,72 @@ func (f *FallbackProvider) GetHTTPRequestsPerSecond(ns, pod string) (float64, er
 	return f.Secondary.GetHTTPRequestsPerSecond(ns, pod)
 }
 
+func (f *FallbackProvider) GetHighErrorRatePods(threshold float64) ([]PodMetricResult, error) {
+	if provider, ok := f.Primary.(BulkMetricsProvider); ok {
+		results, err := provider.GetHighErrorRatePods(threshold)
+		if err == nil {
+			return results, nil
+		}
+		if f.Secondary == nil {
+			return nil, err
+		}
+	}
+	if provider, ok := f.Secondary.(BulkMetricsProvider); ok {
+		return provider.GetHighErrorRatePods(threshold)
+	}
+	return nil, fmt.Errorf("bulk error-rate metrics are not supported by configured providers")
+}
+
+func (f *FallbackProvider) GetHighLatencyPods(threshold float64) ([]PodMetricResult, error) {
+	if provider, ok := f.Primary.(BulkMetricsProvider); ok {
+		results, err := provider.GetHighLatencyPods(threshold)
+		if err == nil {
+			return results, nil
+		}
+		if f.Secondary == nil {
+			return nil, err
+		}
+	}
+	if provider, ok := f.Secondary.(BulkMetricsProvider); ok {
+		return provider.GetHighLatencyPods(threshold)
+	}
+	return nil, fmt.Errorf("bulk latency metrics are not supported by configured providers")
+}
+
+func (f *FallbackProvider) GetHighSLOBurnRatePods(objective float64, shortWindow, longWindow time.Duration, threshold float64) ([]SLOBurnRateResult, error) {
+	if provider, ok := f.Primary.(SLOBurnRateProvider); ok {
+		results, err := provider.GetHighSLOBurnRatePods(objective, shortWindow, longWindow, threshold)
+		if err == nil {
+			return results, nil
+		}
+		if f.Secondary == nil {
+			return nil, err
+		}
+	}
+	if provider, ok := f.Secondary.(SLOBurnRateProvider); ok {
+		return provider.GetHighSLOBurnRatePods(objective, shortWindow, longWindow, threshold)
+	}
+	return nil, fmt.Errorf("SLO burn-rate metrics are not supported by configured providers")
+}
+
+func (f *FallbackProvider) GetTrafficEdges(window time.Duration, minRPS float64) ([]TrafficEdge, error) {
+	if provider, ok := f.Primary.(TrafficGraphProvider); ok {
+		results, err := provider.GetTrafficEdges(window, minRPS)
+		if err == nil {
+			return results, nil
+		}
+		if f.Secondary == nil {
+			return nil, err
+		}
+	}
+	if provider, ok := f.Secondary.(TrafficGraphProvider); ok {
+		return provider.GetTrafficEdges(window, minRPS)
+	}
+	return nil, fmt.Errorf("traffic graph metrics are not supported by configured providers")
+}
+
 // Ensure FallbackProvider implements MetricsProvider
 var _ MetricsProvider = (*FallbackProvider)(nil)
+var _ BulkMetricsProvider = (*FallbackProvider)(nil)
+var _ SLOBurnRateProvider = (*FallbackProvider)(nil)
+var _ TrafficGraphProvider = (*FallbackProvider)(nil)

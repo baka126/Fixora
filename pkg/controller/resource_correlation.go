@@ -68,6 +68,9 @@ func (c *Controller) workloadIdentityForPod(ctx context.Context, pod *v1.Pod) wo
 		case "ReplicaSet":
 			rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 			if err != nil {
+				if deploymentName, ok := deploymentNameFromReplicaSetFallback(owner.Name, pod); ok {
+					return workloadIdentity{Kind: "Deployment", Name: deploymentName, Selector: fallback.Selector}
+				}
 				return workloadIdentity{Kind: "ReplicaSet", Name: owner.Name, Selector: fallback.Selector}
 			}
 			for _, rsOwner := range rs.OwnerReferences {
@@ -107,6 +110,25 @@ func (c *Controller) workloadIdentityForPod(ctx context.Context, pod *v1.Pod) wo
 		}
 	}
 	return fallback
+}
+
+func deploymentNameFromReplicaSetFallback(replicaSetName string, pod *v1.Pod) (string, bool) {
+	replicaSetName = strings.TrimSpace(replicaSetName)
+	if replicaSetName == "" || pod == nil {
+		return "", false
+	}
+	if _, ok := pod.Labels["pod-template-hash"]; !ok {
+		return "", false
+	}
+	index := strings.LastIndex(replicaSetName, "-")
+	if index <= 0 {
+		return "", false
+	}
+	deploymentName := strings.TrimSpace(replicaSetName[:index])
+	if deploymentName == "" {
+		return "", false
+	}
+	return deploymentName, true
 }
 
 func labelSelectorString(selector *metav1.LabelSelector, fallback string) string {

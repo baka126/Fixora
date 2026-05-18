@@ -242,13 +242,18 @@ type DashboardSettings struct {
 }
 
 type DashboardNodeCost struct {
-	Name          string  `json:"name"`
-	Vendor        string  `json:"vendor"`
-	Region        string  `json:"region"`
-	InstanceType  string  `json:"instanceType"`
-	MonthlyCost   float64 `json:"monthlyCost"`
-	PricingSource string  `json:"pricingSource"`
-	Status        string  `json:"status"`
+	Name                 string  `json:"name"`
+	Vendor               string  `json:"vendor"`
+	Region               string  `json:"region"`
+	Zone                 string  `json:"zone,omitempty"`
+	InstanceType         string  `json:"instanceType"`
+	MonthlyCost          float64 `json:"monthlyCost"`
+	RequestedMonthlyCost float64 `json:"requestedMonthlyCost,omitempty"`
+	CPURequestedCores    float64 `json:"cpuRequestedCores,omitempty"`
+	MemoryRequestedMiB   float64 `json:"memoryRequestedMiB,omitempty"`
+	Pods                 int     `json:"pods,omitempty"`
+	PricingSource        string  `json:"pricingSource"`
+	Status               string  `json:"status"`
 }
 
 type DashboardActiveAlert struct {
@@ -484,9 +489,11 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 		statusCounts["pending_approval"] = pendingCount
 	}
 
+	world := c.BuildWorldSnapshot(ctx)
+
 	snapshot.KPIs = dashboardKPIs(investigations, predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Pipeline = defaultDashboardPipeline(statusCounts, dashboardPipelineItems(remediations))
-	snapshot.Incidents = dashboardIncidents(ctx, db, investigations, remByInvestigation, remByPod)
+	snapshot.Incidents = dashboardIncidents(ctx, db, world, investigations, remByInvestigation, remByPod)
 	snapshot.Remediations = dashboardRemediations(remediations)
 	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
 	snapshot.Predictions = dashboardPredictions(predictions)
@@ -612,9 +619,9 @@ func (c *Controller) dashboardActiveAlertDecision(ctx context.Context, alert ale
 		decision.Reason = "Alert labels do not match Fixora Alertmanager include/exclude filters."
 		decision.CanInclude = true
 		decision.IncludeReason = "Add this active alert to Fixora's runtime watch list."
-	case c.history != nil && c.history.IsAlertRecentlyProcessed(ctx, ns, pod, alertName, 30*time.Minute):
+	case c.history != nil && c.history.IsAlertRecentlyProcessed(ctx, ns, pod, alertName, c.alertmanagerDedupWindow()):
 		decision.Decision = "deduplicated"
-		decision.Reason = "Recently processed; Fixora suppresses repeat diagnostics for 30 minutes to avoid duplicate PRs."
+		decision.Reason = fmt.Sprintf("Recently processed; Fixora suppresses repeat diagnostics for %s to avoid duplicate PRs.", compactDuration(c.alertmanagerDedupWindow()))
 		decision.IncludeReason = "Already watched recently; wait for the duplicate suppression window to expire."
 	default:
 		decision.Used = true
@@ -1051,7 +1058,7 @@ func dashboardStringList(raw []byte) []string {
 	return nonEmptyDashboard(values...)
 }
 
-func dashboardIncidents(ctx context.Context, db *sql.DB, investigations []dashboardInvestigationRow, remByInvestigation map[int64]dashboardRemediationRow, remByPod map[string]dashboardRemediationRow) []DashboardIncident {
+func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, investigations []dashboardInvestigationRow, remByInvestigation map[int64]dashboardRemediationRow, remByPod map[string]dashboardRemediationRow) []DashboardIncident {
 	out := make([]DashboardIncident, 0, len(investigations))
 	for _, inv := range investigations {
 		rem, ok := remByInvestigation[inv.ID]
@@ -1078,7 +1085,7 @@ func dashboardIncidents(ctx context.Context, db *sql.DB, investigations []dashbo
 		if pr := dashboardPR(rem); pr != nil {
 			incident.PR = pr
 		}
-		incident.Graph, incident.Edges = queryDashboardGraph(ctx, db, inv.Namespace, inv.PodName, incident.Workload, inv.ClusterContext)
+		incident.Graph, incident.Edges = queryDashboardGraph(ctx, db, world, inv.Namespace, inv.PodName, incident.Workload, inv.ClusterContext)
 		if incident.GitOps != nil && dashboardManifestIsHelm(incident.GitOps.ManifestType) {
 			incident.Graph, incident.Edges = dashboardHelmGraph(incident.GitOps, incident.PR, incident.Graph, incident.Edges)
 		}
@@ -1309,9 +1316,9 @@ func dashboardGuardrails(rem dashboardRemediationRow) []DashboardGuardrail {
 	renderStatus := dashboardRenderGuardrailStatus(rem)
 	remediationStatus := dashboardRemediationGuardrailStatus(rem.Status)
 	guardrails := []DashboardGuardrail{
-		{Label: "Identity match", Status: "passed", Detail: "Target workload matched GitOps source metadata."},
-		{Label: "Privileged paths blocked", Status: "passed", Detail: "No protected paths were changed."},
-		{Label: "Duplicate PR check", Status: "passed", Detail: "No active remediation was found for this workload and branch."},
+		{Label: "Identity match", Status: dashboardIdentityGuardrailStatus(rem), Detail: dashboardIdentityGuardrailDetail(rem)},
+		{Label: "Privileged paths blocked", Status: dashboardPolicyGuardrailStatus(rem), Detail: dashboardPolicyGuardrailDetail(rem)},
+		{Label: "Duplicate PR check", Status: dashboardDuplicateGuardrailStatus(rem), Detail: dashboardDuplicateGuardrailDetail(rem)},
 	}
 	if dashboardManifestIsHelm(rem.ManifestType) {
 		guardrails = append(guardrails,
@@ -1323,9 +1330,65 @@ func dashboardGuardrails(rem dashboardRemediationRow) []DashboardGuardrail {
 	}
 	guardrails = append(guardrails,
 		DashboardGuardrail{Label: "Render validation", Status: renderStatus, Detail: dashboardRenderGuardrailDetail(rem, renderStatus)},
+		DashboardGuardrail{Label: "Semantic target check", Status: dashboardSemanticGuardrailStatus(rem), Detail: dashboardSemanticGuardrailDetail(rem)},
 		DashboardGuardrail{Label: "Remediation state", Status: remediationStatus, Detail: dashboardRemediationGuardrailDetail(rem)},
 	)
 	return guardrails
+}
+
+func dashboardIdentityGuardrailStatus(rem dashboardRemediationRow) string {
+	reason := strings.ToLower(rem.FailureReason)
+	if strings.Contains(reason, "identity mismatch") ||
+		strings.Contains(reason, "kind mismatch") ||
+		strings.Contains(reason, "namespace mismatch") ||
+		strings.Contains(reason, "outside the remediation allowlist") ||
+		strings.Contains(reason, "undiscovered repository") {
+		return "failed"
+	}
+	return "passed"
+}
+
+func dashboardIdentityGuardrailDetail(rem dashboardRemediationRow) string {
+	if dashboardIdentityGuardrailStatus(rem) == "failed" && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	return "Target workload matched GitOps source metadata."
+}
+
+func dashboardPolicyGuardrailStatus(rem dashboardRemediationRow) string {
+	reason := strings.ToLower(rem.FailureReason)
+	if strings.Contains(reason, "policy guardrail rejected") ||
+		strings.Contains(reason, "privileged") ||
+		strings.Contains(reason, "rbac") ||
+		strings.Contains(reason, "secret manifest") ||
+		strings.Contains(reason, "ci workflow") {
+		return "failed"
+	}
+	return "passed"
+}
+
+func dashboardPolicyGuardrailDetail(rem dashboardRemediationRow) string {
+	if dashboardPolicyGuardrailStatus(rem) == "failed" && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	return "No protected paths were changed."
+}
+
+func dashboardDuplicateGuardrailStatus(rem dashboardRemediationRow) string {
+	reason := strings.ToLower(rem.FailureReason)
+	if strings.Contains(reason, "active remediation") ||
+		strings.Contains(reason, "pending approval already exists") ||
+		strings.Contains(reason, "active pr") {
+		return "failed"
+	}
+	return "passed"
+}
+
+func dashboardDuplicateGuardrailDetail(rem dashboardRemediationRow) string {
+	if dashboardDuplicateGuardrailStatus(rem) == "failed" && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	return "No active remediation was found for this workload and branch."
 }
 
 func dashboardHelmSourceDetail(rem dashboardRemediationRow) string {
@@ -1419,6 +1482,49 @@ func dashboardRenderGuardrailDetail(rem dashboardRemediationRow, status string) 
 	return "Waiting for validation results."
 }
 
+func dashboardSemanticGuardrailStatus(rem dashboardRemediationRow) string {
+	reason := strings.ToLower(rem.FailureReason)
+	if strings.Contains(reason, "semantic render validation failed") {
+		return "failed"
+	}
+	if strings.Contains(reason, "semantic render validation skipped") {
+		return "skipped"
+	}
+	if dashboardRenderGuardrailStatus(rem) == "failed" {
+		return "pending"
+	}
+	if rem.Status == "" {
+		return "pending"
+	}
+	return "passed"
+}
+
+func dashboardSemanticGuardrailDetail(rem dashboardRemediationRow) string {
+	status := dashboardSemanticGuardrailStatus(rem)
+	if (status == "failed" || status == "skipped") && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	if status == "passed" {
+		switch rem.PatchStrategy {
+		case "image":
+			return "Rendered target container image changed as intended."
+		case "resources":
+			return "Rendered target container resources changed as intended."
+		case "probe":
+			return "Rendered target container probe changed as intended."
+		case "scheduling-policy":
+			return "Rendered pod scheduling policy changed as intended."
+		case "service-selector":
+			return "Rendered Service selector or workload labels changed as intended."
+		case "pvc-or-volume":
+			return "Rendered PVC or volume fields changed as intended."
+		default:
+			return "Rendered target manifest changed as intended."
+		}
+	}
+	return "Waiting for semantic validation of the rendered target."
+}
+
 func dashboardRemediationGuardrailStatus(status string) string {
 	switch strings.ToLower(status) {
 	case "succeeded", "reverted":
@@ -1462,7 +1568,10 @@ func dashboardRemediationGuardrailDetail(rem dashboardRemediationRow) string {
 	}
 }
 
-func queryDashboardGraph(ctx context.Context, db *sql.DB, namespace, podName string, workload DashboardWorkload, clusterContext string) ([]DashboardDependencyNode, [][2]string) {
+func queryDashboardGraph(ctx context.Context, db *sql.DB, world *WorldSnapshot, namespace, podName string, workload DashboardWorkload, clusterContext string) ([]DashboardDependencyNode, [][2]string) {
+	if nodes, edges, ok := worldDashboardGraph(world, namespace, podName, workload); ok {
+		return nodes, edges
+	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT source_kind, source_name
 		FROM dependency_graph
@@ -1509,6 +1618,155 @@ func queryDashboardGraph(ctx context.Context, db *sql.DB, namespace, podName str
 		return fallbackDashboardGraph(workload, clusterContext)
 	}
 	return nodes, edges
+}
+
+func worldDashboardGraph(world *WorldSnapshot, namespace, podName string, workload DashboardWorkload) ([]DashboardDependencyNode, [][2]string, bool) {
+	if world == nil || len(world.Workloads) == 0 {
+		return nil, nil, false
+	}
+	namespace = firstNonEmpty(workload.Namespace, namespace)
+	workloadID := worldID(world.Cluster, namespace, firstNonEmpty(workload.Kind, "Pod"), firstNonEmpty(workload.Name, podName))
+	w := world.Workloads[workloadID]
+	if w == nil && podName != "" {
+		if pod := world.Pods[worldID(world.Cluster, namespace, "Pod", podName)]; pod != nil {
+			w = world.Workloads[pod.WorkloadID]
+		}
+	}
+	if w == nil {
+		return nil, nil, false
+	}
+
+	nodes := []DashboardDependencyNode{{
+		ID:     "workload",
+		Label:  firstNonEmpty(w.Kind, "Workload"),
+		Detail: w.Name,
+		X:      58,
+		Y:      126,
+		Kind:   "active",
+	}}
+	var edges [][2]string
+	seen := map[string]string{w.ID: "workload"}
+	addNode := func(worldID, label, detail, kind string, x, y int) string {
+		if id := seen[worldID]; id != "" {
+			return id
+		}
+		id := fmt.Sprintf("dep-%d", len(nodes)-1)
+		seen[worldID] = id
+		nodes = append(nodes, DashboardDependencyNode{
+			ID:     id,
+			Label:  label,
+			Detail: detail,
+			X:      x,
+			Y:      y,
+			Kind:   kind,
+		})
+		return id
+	}
+	addEdge := func(from, to string) {
+		if from == "" || to == "" || from == to {
+			return
+		}
+		for _, edge := range edges {
+			if edge[0] == from && edge[1] == to {
+				return
+			}
+		}
+		edges = append(edges, [2]string{from, to})
+	}
+
+	serviceIDs := append([]string(nil), w.Services...)
+	sort.Strings(serviceIDs)
+	for i, serviceID := range serviceIDs {
+		if i >= 4 {
+			break
+		}
+		service := world.Services[serviceID]
+		if service == nil {
+			continue
+		}
+		serviceDetail := service.Name
+		if ports := strings.Join(service.Ports, ", "); ports != "" {
+			serviceDetail = serviceDetail + " · " + ports
+		}
+		serviceNodeID := addNode(service.ID, "Service", serviceDetail, graphToneForKind("Service"), 238, 78+i*64)
+		addEdge("workload", serviceNodeID)
+
+		ingressIDs := append([]string(nil), service.IngressIDs...)
+		sort.Strings(ingressIDs)
+		for j, ingressID := range ingressIDs {
+			if j >= 2 {
+				break
+			}
+			ingress := world.Ingresses[ingressID]
+			if ingress == nil {
+				continue
+			}
+			ingressDetail := firstNonEmpty(strings.Join(ingress.Hosts, ", "), ingress.Name)
+			ingressNodeID := addNode(ingress.ID, "Ingress", ingressDetail, graphToneForKind("Ingress"), 420, 92+i*64+j*34)
+			addEdge(serviceNodeID, ingressNodeID)
+		}
+	}
+
+	podIDs := append([]string(nil), w.Pods...)
+	sort.Strings(podIDs)
+	for i, podID := range podIDs {
+		if i >= 5 {
+			break
+		}
+		pod := world.Pods[podID]
+		if pod == nil {
+			continue
+		}
+		detail := firstNonEmpty(pod.Phase, "Pod")
+		if pod.RestartCount > 0 {
+			detail = fmt.Sprintf("%s, restarts=%d", detail, pod.RestartCount)
+		}
+		podNodeID := addNode(pod.ID, "Pod", pod.Name+" · "+detail, graphToneForKind("Pod"), 238, 228+i*42)
+		addEdge("workload", podNodeID)
+		if pod.NodeName == "" {
+			continue
+		}
+		node := world.Nodes[worldNodeID(pod.NodeName)]
+		if node == nil {
+			continue
+		}
+		nodeDetail := strings.Trim(strings.Join(nonEmptyDashboard(node.InstanceType, node.Region), " · "), " ·")
+		nodeNodeID := addNode(node.ID, "Node", firstNonEmpty(nodeDetail, node.Name), graphToneForKind("Node"), 420, 228+i*42)
+		addEdge(podNodeID, nodeNodeID)
+	}
+
+	trafficAdded := 0
+	for _, traffic := range world.Traffic {
+		if traffic.From != w.ID && traffic.To != w.ID {
+			continue
+		}
+		peerID := traffic.From
+		direction := "from"
+		if traffic.From == w.ID {
+			peerID = traffic.To
+			direction = "to"
+		}
+		peer := world.Workloads[peerID]
+		if peer == nil {
+			continue
+		}
+		detail := fmt.Sprintf("%s/%s · %.2f rps", peer.Namespace, peer.Name, traffic.RequestsPerSecond)
+		peerNodeID := addNode(peer.ID, "Traffic "+direction, detail, "service", 602, 92+trafficAdded*54)
+		if traffic.From == w.ID {
+			addEdge("workload", peerNodeID)
+		} else {
+			addEdge(peerNodeID, "workload")
+		}
+		trafficAdded++
+		if trafficAdded >= 4 {
+			break
+		}
+	}
+
+	if len(edges) == 0 {
+		return nil, nil, false
+	}
+	return nodes, edges, true
 }
 
 func fallbackDashboardGraph(workload DashboardWorkload, clusterContext string) ([]DashboardDependencyNode, [][2]string) {
@@ -1869,6 +2127,9 @@ func humanAge(t time.Time) string {
 }
 
 func (c *Controller) dashboardEnvironment(ctx context.Context) string {
+	if c != nil && c.config != nil && usableClusterName(c.config.ClusterName) {
+		return strings.TrimSpace(c.config.ClusterName)
+	}
 	for _, key := range []string{
 		"FIXORA_CLUSTER_NAME",
 		"FIXORA_CLUSTER",
@@ -1987,17 +2248,30 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64,
 	if err != nil || len(nodes.Items) == 0 {
 		return 0, 0, nil
 	}
+	podsByNode := map[string][]v1.Pod{}
+	if pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); err == nil {
+		for _, pod := range pods.Items {
+			if pod.Spec.NodeName != "" {
+				podsByNode[pod.Spec.NodeName] = append(podsByNode[pod.Spec.NodeName], pod)
+			}
+		}
+	}
 
 	var total float64
 	nodeCosts := make([]DashboardNodeCost, 0, len(nodes.Items))
 	for _, n := range nodes.Items {
 		vendor, region, instanceType := finops.ParseNodeMetadata(n.Labels, n.Spec.ProviderID)
+		cpuReq, memReq := nodeRequestedResources(podsByNode[n.Name])
 		row := DashboardNodeCost{
-			Name:         n.Name,
-			Vendor:       firstNonEmpty(vendor, "unknown"),
-			Region:       firstNonEmpty(region, "unknown"),
-			InstanceType: firstNonEmpty(instanceType, "unknown"),
-			Status:       "pricing_unavailable",
+			Name:               n.Name,
+			Vendor:             firstNonEmpty(vendor, "unknown"),
+			Region:             firstNonEmpty(region, "unknown"),
+			Zone:               firstNonEmpty(n.Labels["topology.kubernetes.io/zone"], n.Labels["failure-domain.beta.kubernetes.io/zone"]),
+			InstanceType:       firstNonEmpty(instanceType, "unknown"),
+			CPURequestedCores:  cpuReq,
+			MemoryRequestedMiB: memReq / 1024 / 1024,
+			Pods:               len(podsByNode[n.Name]),
+			Status:             "pricing_unavailable",
 		}
 		switch {
 		case vendor == "" || region == "" || instanceType == "":
@@ -2007,6 +2281,7 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64,
 		default:
 			if profile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType); err == nil && profile != nil {
 				row.MonthlyCost = ((profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)) * 730
+				row.RequestedMonthlyCost = ((profile.CPURatePerHour * cpuReq) + (profile.MemoryRatePerHour * (memReq / 1024 / 1024 / 1024))) * 730
 				row.PricingSource = profile.Name
 				row.Status = "priced"
 				total += row.MonthlyCost
@@ -2019,4 +2294,22 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64,
 		return nodeCosts[i].Name < nodeCosts[j].Name
 	})
 	return total, len(nodeCosts), nodeCosts
+}
+
+func nodeRequestedResources(pods []v1.Pod) (cpuCores float64, memoryBytes float64) {
+	for _, pod := range pods {
+		for _, container := range pod.Spec.InitContainers {
+			cpuCores += container.Resources.Requests.Cpu().AsApproximateFloat64()
+			if value, ok := container.Resources.Requests.Memory().AsInt64(); ok {
+				memoryBytes += float64(value)
+			}
+		}
+		for _, container := range pod.Spec.Containers {
+			cpuCores += container.Resources.Requests.Cpu().AsApproximateFloat64()
+			if value, ok := container.Resources.Requests.Memory().AsInt64(); ok {
+				memoryBytes += float64(value)
+			}
+		}
+	}
+	return cpuCores, memoryBytes
 }
