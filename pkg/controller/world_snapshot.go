@@ -114,7 +114,7 @@ type WorldTrafficEdge struct {
 	RequestsPerSecond float64
 }
 
-func (c *Controller) BuildWorldSnapshot(ctx context.Context) *WorldSnapshot {
+func (c *Controller) BuildWorldSnapshot(ctx context.Context) (*WorldSnapshot, []v1.Pod) {
 	cluster := c.dashboardEnvironment(ctx)
 	world := &WorldSnapshot{
 		GeneratedAt: time.Now(),
@@ -126,7 +126,7 @@ func (c *Controller) BuildWorldSnapshot(ctx context.Context) *WorldSnapshot {
 		Nodes:       map[string]*WorldNode{},
 	}
 	if c.clientset == nil {
-		return world
+		return world, nil
 	}
 
 	edgeSeen := map[string]bool{}
@@ -142,7 +142,7 @@ func (c *Controller) BuildWorldSnapshot(ctx context.Context) *WorldSnapshot {
 		world.Edges = append(world.Edges, WorldEdge{From: from, To: to, Kind: kind})
 	}
 
-	if nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); err == nil {
+	if nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 500}); err == nil {
 		for _, node := range nodes.Items {
 			n := worldNodeFromKubernetes(node)
 			world.Nodes[n.ID] = n
@@ -151,10 +151,12 @@ func (c *Controller) BuildWorldSnapshot(ctx context.Context) *WorldSnapshot {
 
 	c.addControllerWorkloads(ctx, world, cluster)
 
+	var allPods []v1.Pod
 	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err == nil {
-		for i := range pods.Items {
-			pod := &pods.Items[i]
+		allPods = pods.Items
+		for i := range allPods {
+			pod := &allPods[i]
 			p := worldPodFromKubernetes(cluster, *pod)
 			identity := c.workloadIdentityForPod(ctx, pod)
 			w := ensureWorldWorkload(world, cluster, pod.Namespace, identity.Kind, identity.Name)
@@ -183,7 +185,7 @@ func (c *Controller) BuildWorldSnapshot(ctx context.Context) *WorldSnapshot {
 		sort.Strings(workload.Ingresses)
 		sort.Strings(workload.NodeNames)
 	}
-	return world
+	return world, allPods
 }
 
 func (c *Controller) addWorldTraffic(ctx context.Context, world *WorldSnapshot, addEdge func(string, string, string)) {
@@ -250,6 +252,13 @@ func (c *Controller) addWorldServices(ctx context.Context, world *WorldSnapshot,
 	if err != nil {
 		return
 	}
+
+	// Index pods by namespace for faster lookup
+	podsByNS := make(map[string][]*WorldPod)
+	for _, pod := range world.Pods {
+		podsByNS[pod.Namespace] = append(podsByNS[pod.Namespace], pod)
+	}
+
 	for _, svc := range services.Items {
 		s := worldServiceFromKubernetes(cluster, svc)
 		world.Services[s.ID] = s
@@ -257,8 +266,10 @@ func (c *Controller) addWorldServices(ctx context.Context, world *WorldSnapshot,
 			continue
 		}
 		selector := k8slabels.SelectorFromSet(k8slabels.Set(svc.Spec.Selector))
-		for _, pod := range world.Pods {
-			if pod.Namespace != svc.Namespace || !selector.Matches(k8slabels.Set(pod.Labels)) {
+		
+		// Only check pods in the same namespace to avoid O(Services * TotalPods)
+		for _, pod := range podsByNS[svc.Namespace] {
+			if !selector.Matches(k8slabels.Set(pod.Labels)) {
 				continue
 			}
 			s.PodIDs = appendUnique(s.PodIDs, pod.ID)

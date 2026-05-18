@@ -489,7 +489,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 		statusCounts["pending_approval"] = pendingCount
 	}
 
-	world := c.BuildWorldSnapshot(ctx)
+	world, allPods := c.BuildWorldSnapshot(ctx)
 
 	snapshot.KPIs = dashboardKPIs(investigations, predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Pipeline = defaultDashboardPipeline(statusCounts, dashboardPipelineItems(remediations))
@@ -505,7 +505,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.SymptomTrends = syms
 
 	// Add FinOps Cluster Cost
-	clusterCost, activeNodes, nodeCosts := c.calculateClusterCostSnapshot(ctx)
+	clusterCost, activeNodes, nodeCosts := c.calculateClusterCostSnapshot(ctx, allPods)
 	snapshot.ClusterCostMo = clusterCost
 	snapshot.ActiveNodes = activeNodes
 	snapshot.NodeCosts = nodeCosts
@@ -2240,20 +2240,18 @@ func clusterNameFromNodeLabels(labels map[string]string) string {
 	return ""
 }
 
-func (c *Controller) calculateClusterCostSnapshot(ctx context.Context) (float64, int, []DashboardNodeCost) {
+func (c *Controller) calculateClusterCostSnapshot(ctx context.Context, pods []v1.Pod) (float64, int, []DashboardNodeCost) {
 	if c.clientset == nil {
 		return 0, 0, nil
 	}
-	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 500})
 	if err != nil || len(nodes.Items) == 0 {
 		return 0, 0, nil
 	}
 	podsByNode := map[string][]v1.Pod{}
-	if pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); err == nil {
-		for _, pod := range pods.Items {
-			if pod.Spec.NodeName != "" {
-				podsByNode[pod.Spec.NodeName] = append(podsByNode[pod.Spec.NodeName], pod)
-			}
+	for _, pod := range pods {
+		if pod.Spec.NodeName != "" {
+			podsByNode[pod.Spec.NodeName] = append(podsByNode[pod.Spec.NodeName], pod)
 		}
 	}
 

@@ -221,7 +221,7 @@ func TestCalculateClusterCostSnapshotReturnsNodesWithoutPricingProvider(t *testi
 		}),
 	}
 
-	total, active, rows := ctrl.calculateClusterCostSnapshot(context.Background())
+	total, active, rows := ctrl.calculateClusterCostSnapshot(context.Background(), nil)
 	if total != 0 || active != 1 || len(rows) != 1 {
 		t.Fatalf("calculateClusterCostSnapshot() = total %.2f active %d rows %d, want 0/1/1", total, active, len(rows))
 	}

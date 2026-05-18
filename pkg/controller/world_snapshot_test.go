@@ -101,7 +101,7 @@ func TestBuildWorldSnapshotMapsControllerServiceIngressAndNode(t *testing.T) {
 		),
 	}
 
-	world := ctrl.BuildWorldSnapshot(context.Background())
+	world, _ := ctrl.BuildWorldSnapshot(context.Background())
 	workloadID := worldID("prod-us-west-2", "checkout", "Deployment", "api")
 	workload := world.Workloads[workloadID]
 	if workload == nil {

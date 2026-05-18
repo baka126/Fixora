@@ -25,7 +25,7 @@ type WorkloadRolloutSnapshot struct {
 }
 
 func (c *Controller) captureWorkloadSnapshot(ctx context.Context, namespace, kind, name string) (WorkloadRolloutSnapshot, bool) {
-	world := c.BuildWorldSnapshot(ctx)
+	world, _ := c.BuildWorldSnapshot(ctx)
 	workload := world.Workloads[worldID(world.Cluster, namespace, kind, name)]
 	if workload == nil {
 		return WorkloadRolloutSnapshot{}, false
