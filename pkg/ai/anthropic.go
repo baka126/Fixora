@@ -109,9 +109,7 @@ func (a *AnthropicProvider) AnalyzeRootCause(ctx context.Context, evidence strin
 }
 
 func (a *AnthropicProvider) PerformForensics(ctx context.Context, forensicCtx ForensicContext) (AIResponse, error) {
-	prompt := fmt.Sprintf(PromptForensics,
-		forensicCtx.Namespace, forensicCtx.PodName, forensicCtx.Reason,
-		forensicCtx.Metrics, forensicCtx.Events, forensicCtx.Logs, forensicCtx.History)
+	prompt := GetForensicPrompt(forensicCtx.PromptType, forensicCtx)
 
 	resp, err := a.client.CreateMessages(ctx, anthropic.MessagesRequest{
 		Model: a.model,

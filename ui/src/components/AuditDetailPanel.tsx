@@ -128,14 +128,23 @@ export const AuditDetailPanel: React.FC<Props> = ({ eventId, onClose }) => {
 
 const DetailBlock = ({ label, content, isCode, isHighlight, emptyMessage }: { label: string; content: string; isCode?: boolean; isHighlight?: boolean; emptyMessage?: string }) => {
   const empty = !content || content === "Pending" || content === "None";
+  const contentClasses = (() => {
+    if (empty) {
+      return 'rounded-lg border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-3 text-[12px] leading-relaxed text-[#647084]';
+    }
+    if (isCode) {
+      return 'max-h-64 overflow-x-auto rounded-lg border border-[#1e293b] bg-[#0f172a] p-3 font-mono text-[12px] leading-relaxed text-[#f8fafc] whitespace-pre-wrap';
+    }
+    if (isHighlight) {
+      return 'rounded-lg border border-[#bbf7d0] bg-[#f0fdf4] p-3 font-mono text-[12px] leading-relaxed text-[#166534] whitespace-pre-wrap';
+    }
+    return 'rounded-lg border border-[#e2e8f0] bg-[#f1f5f9] p-3 font-mono text-[12px] leading-relaxed text-[#334155] whitespace-pre-wrap';
+  })();
+
   return (
     <div>
       <h4 className="text-[11px] font-bold text-[#647084] uppercase mb-1.5">{label}</h4>
-      <div className={empty ? 'rounded-lg border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-3 text-[12px] leading-relaxed text-[#647084]' : `
-          rounded-lg p-3 text-[12px] leading-relaxed whitespace-pre-wrap font-mono
-          ${isHighlight ? 'bg-[#f0fdf4] text-[#166534] border border-[#bbf7d0]' : 'bg-[#f1f5f9] text-[#334155] border border-[#e2e8f0]'}
-          ${isCode ? 'bg-[#0f172a] text-[#f8fafc] border-none overflow-x-auto max-h-64' : ''}
-        `}>
+      <div className={contentClasses}>
         {empty ? emptyMessage || 'No data captured.' : content}
       </div>
     </div>

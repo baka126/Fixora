@@ -7,7 +7,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "v0.4.8"
+  tag: "v0.4.10"
 
 _UI: false
 
@@ -18,7 +18,7 @@ ui:
   image:
     repository: ghcr.io/baka126/fixora-ui
     pullPolicy: IfNotPresent
-    tag: "v0.4.8"
+    tag: "v0.4.10"
   service:
     type: ClusterIP
     port: 80
@@ -140,7 +140,7 @@ validation:
 policyGuardrails:
   enabled: true           # Enable hard policy checks (RBAC protection, registry allowlisting)
   allowedImageRegistries: [] # List of trusted registries (e.g., ["ghcr.io", "docker.io"]). Empty means all are allowed.
-  allowedReplacementImages: [] # Optional pinned/verified replacement images (e.g., ["alexeiled/stress-ng:0.12.05", "registry.example.com/*"]). Empty means all replacement images are allowed.
+  allowedReplacementImages: [] # Optional pinned/verified replacement images (e.g., ["alexeiled/stress-ng:0.12.05", "registry.example.com/*"]). Empty means any pinned non-latest replacement image is allowed, except CPU architecture fixes require an explicit verified image here.
 
 # FinOps Config
 finops:

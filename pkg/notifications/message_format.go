@@ -181,3 +181,23 @@ func truncateText(value string, max int) string {
 	}
 	return strings.TrimSpace(value[:max]) + "..."
 }
+
+func Haystack(evidence EvidenceChain, analyzerEvidence []string, likelyCause string) string {
+	return strings.ToLower(strings.Join([]string{
+		evidence.RootCause,
+		evidence.ClusterContext,
+		evidence.StackTrace,
+		strings.Join(analyzerEvidence, " "),
+		likelyCause,
+	}, "\n"))
+}
+
+func ContainsAny(s string, needles ...string) bool {
+	s = strings.ToLower(s)
+	for _, needle := range needles {
+		if strings.Contains(s, strings.ToLower(needle)) {
+			return true
+		}
+	}
+	return false
+}

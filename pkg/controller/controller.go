@@ -546,7 +546,7 @@ func (c *Controller) scanForLeaks() {
 			_ = downtimeRiskDetails
 
 			// Save Investigation to DB
-			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak")
+			invID := c.history.SaveInvestigation(ctx, evidence, "Predictive Leak", "", string(CategoryRuntime), "Potential memory leak trajectory", evidence.AIConfidence)
 
 			slog.Info("Sending evidence chain to notification channels", "ns", pod.Namespace, "pod", pod.Name)
 			notifications.SendEvidenceChain(c.config, evidence)
@@ -896,13 +896,46 @@ func (c *Controller) processDiagnostic(work podWorkItem) error {
 		return err
 	}
 	identity := c.workloadIdentityForPod(ctx, pod)
-	lockName := remediationBranchSubject(pod, identity)
+	lockName := diagnosticLockName(pod, identity, work.reason)
 	if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockName, 30*time.Minute) {
 		slog.Debug("Skipping diagnostic trigger: workload already under investigation", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", work.reason)
 		return nil
 	}
 	c.diagnosePod(ctx, pod, work.reason)
 	return nil
+}
+
+func diagnosticLockName(pod *v1.Pod, identity workloadIdentity, reason string) string {
+	subject := slugify(remediationBranchSubject(pod, identity))
+	lockReason := diagnosticLockReason(reason)
+	return subject + "/" + lockReason
+}
+
+func diagnosticLockReason(reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	if normalized == "" {
+		return "unknown"
+	}
+	switch {
+	case strings.Contains(normalized, "oomkilled"), strings.Contains(normalized, "out of memory"), strings.Contains(normalized, "oom"):
+		return "oomkilled"
+	case strings.Contains(normalized, "containercannotrun"), strings.Contains(normalized, "exec format"), strings.Contains(normalized, "architecture"):
+		return "image-architecture"
+	case strings.Contains(normalized, "imagepullbackoff"), strings.Contains(normalized, "errimagepull"), strings.Contains(normalized, "pull image"):
+		return "image-pull"
+	case strings.Contains(normalized, "createcontainerconfigerror"):
+		return "container-config"
+	case strings.Contains(normalized, "createcontainererror"):
+		return "container-create"
+	case strings.Contains(normalized, "unschedulable"), strings.Contains(normalized, "pending"):
+		return "scheduling"
+	case strings.Contains(normalized, "crashloopbackoff"):
+		return "crashloop"
+	case strings.Contains(normalized, "podfailed"):
+		return "podfailed"
+	default:
+		return slugify(normalized)
+	}
 }
 
 // DiagnosePodByName allows manual or Alertmanager-driven diagnostic triggers.
@@ -924,9 +957,11 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 
 	diagnosis := c.classifyPodIssue(ctx, pod, reason)
 	correlation := c.correlatePodResources(ctx, pod)
-	diagnosis.Related = uniqueSorted(append(diagnosis.Related, correlation.Related...))
+	orchestration := c.runIncidentAnalyzers(ctx, pod, reason, diagnosis, correlation)
+	diagnosis = mergeAnalyzerFindings(diagnosis, orchestration.Findings)
+	diagnosis.Related = uniqueSorted(append(append(diagnosis.Related, correlation.Related...), orchestration.Related...))
 	telemetry.IncInvestigation("started", string(diagnosis.Category))
-	slog.Info("Deterministic issue classification complete", "ns", pod.Namespace, "pod", pod.Name, "category", diagnosis.Category, "strategy", diagnosis.PatchStrategy, "confidence", diagnosis.Confidence)
+	slog.Info("Deterministic issue classification complete", "ns", pod.Namespace, "pod", pod.Name, "category", diagnosis.Category, "strategy", diagnosis.PatchStrategy, "confidence", diagnosis.Confidence, "supporting_findings", len(orchestration.Findings))
 
 	var historyStr string
 	historySummary := "This is the first time we've diagnosed this pod."
@@ -945,9 +980,12 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	evidence := notifications.EvidenceChain{
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
-		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s\n%s\n%s", pod.Namespace, pod.Name, reason, diagnosis.Summary(), correlation.Summary()),
+		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Reason: %s\n%s\n%s\n%s", pod.Namespace, pod.Name, reason, diagnosis.Summary(), correlation.Summary(), orchestration.Summary()),
 		HistoricalPattern: historySummary,
 		ShowEventButton:   true,
+	}
+	if c.history != nil {
+		c.history.SaveDependencyRefs(ctx, pod.Namespace, "Pod", pod.Name, orchestration.Related)
 	}
 
 	// Gathers related alerts from Alertmanager API
@@ -990,6 +1028,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	// Execute Multi-Modal AI Forensics
 	var rootCause string
 	var logs string
+	var evidenceHash string
 	if c.aiProvider != nil {
 		slog.Info("Requesting AI analysis for investigation", "ns", pod.Namespace, "pod", pod.Name)
 		var err error
@@ -998,46 +1037,81 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			slog.Warn("Error fetching logs during investigation", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 		}
 
-		// Basic Stack Trace extraction for the interactive button
-		lines := strings.Split(logs, "\n")
-		var traceLines []string
-		inTrace := false
-		for _, line := range lines {
-			if strings.Contains(line, "stack trace:") || strings.Contains(line, "panic:") || strings.Contains(line, "goroutine") {
-				inTrace = true
-			}
-			if inTrace {
-				traceLines = append(traceLines, line)
-			}
-			if len(traceLines) > 50 {
-				break
-			}
-		}
-		if len(traceLines) > 0 {
-			evidence.StackTrace = strings.Join(traceLines, "\n")
-		}
-
-		forensicCtx := ai.ForensicContext{
-			Namespace: pod.Namespace,
-			PodName:   pod.Name,
-			Reason:    diagnosis.Symptom,
-			Logs:      logs,
-			Events:    eventsTimeline + "\n\n" + correlation.Summary(),
-			Metrics:   evidence.MetricProof,
-			History:   historyStr,
-		}
-
-		aiResp, err := c.aiProvider.PerformForensics(ctx, forensicCtx)
-		if err != nil {
-			slog.Error("AI Forensics analysis failed", "ns", pod.Namespace, "pod", pod.Name, "error", err)
-			evidence.RootCause = "Forensic analysis failed: " + err.Error()
+		// Calculate Evidence Hash for caching
+		evidenceHash = CalculateEvidenceHash(logs, eventsTimeline, evidence.MetricProof)
+		if cached, hit := c.history.LookupInvestigationByHash(ctx, evidenceHash, 24*time.Hour); hit {
+			slog.Info("Cache HIT: Reusing previous AI analysis for identical evidence", "ns", pod.Namespace, "pod", pod.Name, "hash", evidenceHash)
+			evidence.RootCause = cached.RootCause
+			evidence.AIConfidence = cached.AIConfidence
+			evidence.FinOpsImpact = cached.FinOpsImpact
+			evidence.AIResponse = cached.AIResponse
+			rootCause = cached.RootCause
 		} else {
-			evidence.RootCause = aiResp.Analysis
-			evidence.AIConfidence = aiResp.Confidence
-			evidence.AIPrompt = aiResp.RawPrompt
-			evidence.AIResponse = aiResp.Analysis
-			rootCause = aiResp.Analysis
-			slog.Info("AI analysis complete", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
+			// Basic Stack Trace extraction for the interactive button
+			lines := strings.Split(logs, "\n")
+			var traceLines []string
+			inTrace := false
+			for _, line := range lines {
+				if strings.Contains(line, "stack trace:") || strings.Contains(line, "panic:") || strings.Contains(line, "goroutine") {
+					inTrace = true
+				}
+				if inTrace {
+					traceLines = append(traceLines, line)
+				}
+				if len(traceLines) > 50 {
+					break
+				}
+			}
+			if len(traceLines) > 0 {
+				evidence.StackTrace = strings.Join(traceLines, "\n")
+			}
+
+			// Execution with stateful tokenization for zero-trust security
+			tokenizer := security.NewTokenizer()
+
+			// Sift logs to pick interesting patterns before tokenization
+			siftedLogs := ai.SiftLogs(logs, 100)
+
+			promptType := ai.PromptTypeDefault
+			switch diagnosis.Category {
+			case CategoryScheduling:
+				promptType = ai.PromptTypeScheduling
+			case CategoryNetwork:
+				promptType = ai.PromptTypeNetwork
+			case CategoryStorage:
+				promptType = ai.PromptTypeStorage
+			case CategoryConfig:
+				promptType = ai.PromptTypeConfig
+			case CategoryRuntime:
+				promptType = ai.PromptTypeRuntime
+			}
+
+			forensicCtx := ai.ForensicContext{
+				Namespace:  pod.Namespace,
+				PodName:    pod.Name,
+				Reason:     diagnosis.Symptom,
+				Logs:       tokenizer.Tokenize(siftedLogs),
+				Events:     tokenizer.Tokenize(eventsTimeline + "\n\n" + correlation.Summary()),
+				Metrics:    tokenizer.Tokenize(evidence.MetricProof),
+				History:    tokenizer.Tokenize(historyStr),
+				PromptType: promptType,
+			}
+
+			aiResp, err := c.aiProvider.PerformForensics(ctx, forensicCtx)
+			if err != nil {
+				slog.Error("AI Forensics analysis failed", "ns", pod.Namespace, "pod", pod.Name, "error", err)
+				evidence.RootCause = "Forensic analysis failed: " + err.Error()
+			} else {
+				// Detokenize the summary to restore context for the user
+				analysis := tokenizer.Detokenize(aiResp.Analysis)
+
+				evidence.RootCause = analysis
+				evidence.AIConfidence = aiResp.Confidence
+				evidence.AIPrompt = aiResp.RawPrompt
+				evidence.AIResponse = analysis
+				rootCause = analysis
+				slog.Info("AI analysis complete", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
+			}
 		}
 	} else {
 		evidence.RootCause = diagnosis.LikelyCause
@@ -1045,8 +1119,8 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		rootCause = diagnosis.LikelyCause
 	}
 
-	// FinOps Impact estimation
-	if c.promClient != nil {
+	// FinOps Impact estimation (only if not already cached)
+	if c.promClient != nil && evidence.FinOpsImpact == "" {
 		slog.Debug("Calculating FinOps impact", "ns", pod.Namespace, "pod", pod.Name)
 		pricingProfile := c.getPricingProfile(ctx, pod)
 		cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
@@ -1079,7 +1153,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	}
 
 	// Save the full investigation Evidence Chain to DB
-	invID := c.history.SaveInvestigation(ctx, evidence, reason)
+	invID := c.history.SaveInvestigation(ctx, evidence, reason, evidenceHash, string(diagnosis.Category), diagnosis.Symptom, diagnosis.Confidence)
 	c.history.Update(ctx, pod.Namespace, pod.Name, reason, rootCause, invID)
 
 	c.history.RecordActionCheckpoint(ctx, c.leaderIdentity, "CompletedDiagnostic", fmt.Sprintf("Pod %s/%s, Reason: %s", pod.Namespace, pod.Name, reason))
@@ -1284,7 +1358,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		return
 	}
 
-	patchEvidence := evidence.RootCause + "\n" + evidence.MetricProof + "\n" + diagnosis.Summary()
+	patchEvidence := evidence.RootCause + "\n" + evidence.MetricProof + "\n" + evidence.ClusterContext + "\n" + diagnosis.Summary()
 	if c.history != nil {
 		if feedback := c.history.RemediationFeedback(ctx, pod.Namespace, pod.Name, diagnosis); feedback != "" {
 			patchEvidence += "\n\n[CLOSED LOOP FEEDBACK]\n" + feedback
@@ -1389,6 +1463,12 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			}
 			telemetry.IncValidation("manifest-aware", "passed")
 			if c.config.PolicyGuardrailsEnabled {
+				if err := enforceArchitectureImageGuardrail(diagnosis, changes, c.config.AllowedReplacementImages); err != nil {
+					telemetry.IncPolicyRejection(policyRejectionReason(err))
+					slog.Error("Policy guardrail rejected architecture image remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
+					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
+					return
+				}
 				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, c.config.AllowedReplacementImages, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)

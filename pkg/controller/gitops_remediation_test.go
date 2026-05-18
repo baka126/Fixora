@@ -73,6 +73,29 @@ func TestFluxHelmReleaseFleetSourceAllowsArbitraryYamlFileName(t *testing.T) {
 	}
 }
 
+func TestHelmSourceIncludesSchemaAndConfiguredValueFiles(t *testing.T) {
+	source := gitops.WorkloadSource{
+		ManifestType: gitops.ManifestHelm,
+		Path:         "charts/api",
+		Helm: gitops.HelmSource{
+			ValueFiles: []string{"values-prod.yaml", "../shared/prod.yaml"},
+		},
+	}
+
+	for _, file := range []string{
+		"charts/api/values.schema.json",
+		"charts/api/values-prod.yaml",
+		"charts/shared/prod.yaml",
+	} {
+		if !isGitOpsContextFile(source, file) {
+			t.Fatalf("expected Helm context to include %s", file)
+		}
+	}
+	if isGitOpsEditableFile(source, "charts/api/values.schema.json") {
+		t.Fatal("expected Helm schema to be context-only, not editable")
+	}
+}
+
 func TestValidateRemediationFileChangeDefersHelmTemplateDryRun(t *testing.T) {
 	result := validateRemediationFileChange(gitops.WorkloadSource{ManifestType: gitops.ManifestHelm}, vcs.FileChange{
 		FilePath:   "charts/api/templates/deployment.yaml",

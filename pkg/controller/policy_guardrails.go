@@ -48,6 +48,43 @@ func enforcePatchGuardrails(source gitops.WorkloadSource, changes []vcs.FileChan
 	return nil
 }
 
+func enforceArchitectureImageGuardrail(diagnosis Diagnosis, changes []vcs.FileChange, allowedReplacementImages []string) error {
+	if !isArchitectureImageDiagnosis(diagnosis) || len(allowedReplacementImages) > 0 {
+		return nil
+	}
+	for _, change := range changes {
+		previousImages := manifestImageSet(change.PreviousContent)
+		decoder := yaml.NewDecoder(bytes.NewReader(change.NewContent))
+		for {
+			var doc map[string]interface{}
+			err := decoder.Decode(&doc)
+			if err == io.EOF {
+				break
+			}
+			if err != nil || len(doc) == 0 {
+				continue
+			}
+			for _, image := range policyDocumentImages(doc) {
+				if !previousImages[image] {
+					return fmt.Errorf("replacement image %s must be configured in ALLOWED_REPLACEMENT_IMAGES for CPU architecture remediation", image)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func isArchitectureImageDiagnosis(diagnosis Diagnosis) bool {
+	if diagnosis.PatchStrategy != PatchImage {
+		return false
+	}
+	haystack := strings.ToLower(strings.Join(append([]string{diagnosis.Symptom, diagnosis.LikelyCause}, diagnosis.Evidence...), "\n"))
+	return strings.Contains(haystack, "architecture") ||
+		strings.Contains(haystack, "exec format") ||
+		strings.Contains(haystack, "cpu instruction") ||
+		strings.Contains(haystack, "wrong architecture")
+}
+
 func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, content, previousContent []byte, allowedImageRegistries, allowedReplacementImages []string, incidentNamespace string, expectedTargets []manifestIdentity, excludedNamespaces []string) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	previousImages := manifestImageSet(previousContent)
@@ -101,22 +138,24 @@ func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, co
 				matchedExpectedTarget = true
 			}
 		}
+		images := policyDocumentImages(doc)
 		if len(allowedImageRegistries) > 0 {
-			for _, image := range manifestImages(doc) {
+			for _, image := range images {
 				registry := imageRegistry(image)
 				if !registryAllowed(registry, allowedImageRegistries) {
 					return fmt.Errorf("image registry %s is not allowlisted for image %s in %s", registry, image, filePath)
 				}
 			}
 		}
-		if len(allowedReplacementImages) > 0 {
-			for _, image := range manifestImages(doc) {
-				if previousImages[image] {
-					continue
-				}
-				if !imageAllowed(image, allowedReplacementImages) {
-					return fmt.Errorf("replacement image %s is not allowlisted in %s", image, filePath)
-				}
+		for _, image := range images {
+			if previousImages[image] {
+				continue
+			}
+			if !imagePinned(image) {
+				return fmt.Errorf("replacement image %s must be pinned to a non-latest tag or digest in %s", image, filePath)
+			}
+			if len(allowedReplacementImages) > 0 && !imageAllowed(image, allowedReplacementImages) {
+				return fmt.Errorf("replacement image %s is not allowlisted in %s", image, filePath)
 			}
 		}
 	}
@@ -186,6 +225,20 @@ func manifestImages(doc map[string]interface{}) []string {
 	return images
 }
 
+func policyDocumentImages(doc map[string]interface{}) []string {
+	seen := map[string]bool{}
+	var images []string
+	for _, image := range append(manifestImages(doc), helmValuesImages(doc)...) {
+		image = strings.TrimSpace(image)
+		if image == "" || seen[image] {
+			continue
+		}
+		seen[image] = true
+		images = append(images, image)
+	}
+	return images
+}
+
 func visitManifestContainers(node interface{}, visit func(map[string]interface{})) {
 	switch typed := node.(type) {
 	case map[string]interface{}:
@@ -206,6 +259,71 @@ func visitManifestContainers(node interface{}, visit func(map[string]interface{}
 			visitManifestContainers(item, visit)
 		}
 	}
+}
+
+func helmValuesImages(node interface{}) []string {
+	var images []string
+	visitHelmValuesImages(node, "", func(image string) {
+		images = append(images, image)
+	})
+	return images
+}
+
+func visitHelmValuesImages(node interface{}, parentKey string, visit func(string)) {
+	switch typed := node.(type) {
+	case map[string]interface{}:
+		if image := helmImageFromMap(typed, parentKey); image != "" {
+			visit(image)
+		}
+		for key, value := range typed {
+			lowerKey := strings.ToLower(strings.TrimSpace(key))
+			if image, ok := value.(string); ok && lowerKey == "image" && strings.TrimSpace(image) != "" {
+				visit(image)
+			}
+			visitHelmValuesImages(value, lowerKey, visit)
+		}
+	case []interface{}:
+		for _, item := range typed {
+			visitHelmValuesImages(item, parentKey, visit)
+		}
+	}
+}
+
+func helmImageFromMap(values map[string]interface{}, parentKey string) string {
+	repository := stringMapValue(values, "repository")
+	if repository == "" {
+		return ""
+	}
+	registry := stringMapValue(values, "registry")
+	tag := stringMapValue(values, "tag")
+	digest := stringMapValue(values, "digest")
+	image := repository
+	if registry != "" && !strings.Contains(repository, "/") {
+		image = strings.TrimSuffix(registry, "/") + "/" + repository
+	}
+	if digest != "" {
+		digest = strings.TrimPrefix(digest, "@")
+		return image + "@" + digest
+	}
+	if tag != "" {
+		return image + ":" + tag
+	}
+	if strings.Contains(strings.ToLower(parentKey), "image") {
+		return image
+	}
+	return ""
+}
+
+func stringMapValue(values map[string]interface{}, key string) string {
+	for currentKey, value := range values {
+		if !strings.EqualFold(strings.TrimSpace(currentKey), key) {
+			continue
+		}
+		if str, ok := value.(string); ok {
+			return strings.TrimSpace(str)
+		}
+	}
+	return ""
 }
 
 func imageRegistry(image string) string {
@@ -243,6 +361,23 @@ func imageAllowed(image string, allowed []string) bool {
 	return false
 }
 
+func imagePinned(image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return false
+	}
+	if strings.Contains(image, "@sha256:") {
+		return true
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon <= lastSlash {
+		return false
+	}
+	tag := strings.TrimSpace(image[lastColon+1:])
+	return tag != "" && !strings.EqualFold(tag, "latest")
+}
+
 func manifestImageSet(content []byte) map[string]bool {
 	images := map[string]bool{}
 	if len(content) == 0 {
@@ -258,7 +393,7 @@ func manifestImageSet(content []byte) map[string]bool {
 		if err != nil {
 			return images
 		}
-		for _, image := range manifestImages(doc) {
+		for _, image := range policyDocumentImages(doc) {
 			images[image] = true
 		}
 	}

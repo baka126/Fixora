@@ -141,7 +141,7 @@ metadata:
 spec:
   containers:
   - name: stress
-    image: alexeiled/stress-ng
+    image: alexeiled/stress-ng:0.12.05
 `),
 	}}, nil, nil, "default", []manifestIdentity{{Namespace: "default", Kind: "Pod", Name: "oom-test-2"}}, nil)
 	if err == nil {
@@ -160,11 +160,133 @@ metadata:
 spec:
   containers:
   - name: stress
-    image: alexeiled/stress-ng
+    image: alexeiled/stress-ng:0.12.05
 `),
 	}}, nil, nil, "default", []manifestIdentity{{Namespace: "default", Kind: "Pod", Name: "oom-test-2"}}, nil)
 	if err != nil {
 		t.Fatalf("expected matching target to pass, got %v", err)
+	}
+}
+
+func TestEnforcePatchGuardrailsRejectsUnpinnedReplacementImage(t *testing.T) {
+	previous := []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: polinux/stress
+`)
+	err := enforcePatchGuardrails(gitops.WorkloadSource{}, []vcs.FileChange{{
+		FilePath:        "deploy/app.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: alexeiled/stress-ng
+`),
+	}}, nil, nil, "default", nil, nil)
+	if err == nil {
+		t.Fatal("expected unpinned replacement image to be rejected")
+	}
+}
+
+func TestEnforcePatchGuardrailsRejectsUnpinnedHelmValuesImageTag(t *testing.T) {
+	previous := []byte(`
+image:
+  repository: polinux/stress
+  tag: "1.0.0"
+`)
+	err := enforcePatchGuardrails(gitops.WorkloadSource{ManifestType: gitops.ManifestHelm}, []vcs.FileChange{{
+		FilePath:        "charts/stress/values.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+image:
+  repository: alexeiled/stress-ng
+`),
+	}}, nil, nil, "default", nil, nil)
+	if err == nil {
+		t.Fatal("expected unpinned Helm values replacement image to be rejected")
+	}
+}
+
+func TestEnforcePatchGuardrailsAllowsPinnedHelmValuesImageTag(t *testing.T) {
+	previous := []byte(`
+image:
+  repository: polinux/stress
+  tag: "1.0.0"
+`)
+	err := enforcePatchGuardrails(gitops.WorkloadSource{ManifestType: gitops.ManifestHelm}, []vcs.FileChange{{
+		FilePath:        "charts/stress/values.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+image:
+  repository: alexeiled/stress-ng
+  tag: "0.12.05"
+`),
+	}}, nil, []string{"alexeiled/stress-ng:0.12.05"}, "default", nil, nil)
+	if err != nil {
+		t.Fatalf("expected pinned allowlisted Helm values image to pass, got %v", err)
+	}
+}
+
+func TestEnforceArchitectureImageGuardrailCoversHelmValues(t *testing.T) {
+	previous := []byte(`
+image:
+  repository: polinux/stress
+  tag: "1.0.0"
+`)
+	err := enforceArchitectureImageGuardrail(Diagnosis{
+		PatchStrategy: PatchImage,
+		LikelyCause:   "exec format error from wrong CPU architecture",
+	}, []vcs.FileChange{{
+		FilePath:        "charts/stress/values.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+image:
+  repository: alexeiled/stress-ng
+  tag: "0.12.05"
+`),
+	}}, nil)
+	if err == nil {
+		t.Fatal("expected architecture Helm values image replacement without allowlist to be rejected")
+	}
+}
+
+func TestEnforcePatchGuardrailsRejectsLatestReplacementImage(t *testing.T) {
+	previous := []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: polinux/stress
+`)
+	err := enforcePatchGuardrails(gitops.WorkloadSource{}, []vcs.FileChange{{
+		FilePath:        "deploy/app.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: alexeiled/stress-ng:latest
+`),
+	}}, nil, nil, "default", nil, nil)
+	if err == nil {
+		t.Fatal("expected latest replacement image to be rejected")
 	}
 }
 
@@ -179,7 +301,7 @@ spec:
     spec:
       containers:
       - name: app
-        image: ghcr.io/pao-pao/stress
+        image: ghcr.io/pao-pao/stress:1.0.0
 `),
 	}}, nil, []string{"alexeiled/stress-ng:0.12.05"}, "default", nil, nil)
 	if err == nil {
@@ -237,5 +359,71 @@ spec:
 	}}, nil, []string{"alexeiled/stress-ng:0.12.05"}, "default", nil, nil)
 	if err != nil {
 		t.Fatalf("expected only newly introduced image to need allowlisting, got %v", err)
+	}
+}
+
+func TestEnforceArchitectureImageGuardrailRequiresVerifiedAllowlist(t *testing.T) {
+	previous := []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: polinux/stress
+`)
+	err := enforceArchitectureImageGuardrail(Diagnosis{
+		PatchStrategy: PatchImage,
+		LikelyCause:   "The container image is incompatible with the node CPU architecture and fails with exec format error.",
+	}, []vcs.FileChange{{
+		FilePath:        "deploy/app.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: alexeiled/stress-ng:0.12.05
+`),
+	}}, nil)
+	if err == nil {
+		t.Fatal("expected architecture image replacement without allowlist to be rejected")
+	}
+}
+
+func TestEnforceArchitectureImageGuardrailAllowsVerifiedAllowlist(t *testing.T) {
+	previous := []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: polinux/stress
+`)
+	err := enforceArchitectureImageGuardrail(Diagnosis{
+		PatchStrategy: PatchImage,
+		LikelyCause:   "The container image is incompatible with the node CPU architecture and fails with exec format error.",
+	}, []vcs.FileChange{{
+		FilePath:        "deploy/app.yaml",
+		PreviousContent: previous,
+		NewContent: []byte(`
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: alexeiled/stress-ng:0.12.05
+`),
+	}}, []string{"alexeiled/stress-ng:0.12.05"})
+	if err != nil {
+		t.Fatalf("expected allowlisted architecture replacement to pass, got %v", err)
 	}
 }

@@ -129,7 +129,7 @@ func ValidateRenderSandbox(source gitops.WorkloadSource, sourceFiles map[string]
 	case gitops.ManifestKustomize:
 		return renderKustomize(sandbox.Dir, paths, opts)
 	case gitops.ManifestHelm, gitops.ManifestFluxHelmRelease:
-		return renderHelm(sandbox.Dir, paths, opts)
+		return renderHelm(sandbox.Dir, paths, source, changedSandboxPaths(changes), opts)
 	default:
 		return ValidationResult{Valid: true, Skipped: true, Output: "render validation not required for raw manifests"}
 	}
@@ -165,7 +165,7 @@ func renderKustomize(root string, paths []string, opts SandboxOptions) Validatio
 	return renderSkippedOrRequired(opts, "kustomize render skipped: neither kustomize nor kubectl is available")
 }
 
-func renderHelm(root string, paths []string, opts SandboxOptions) ValidationResult {
+func renderHelm(root string, paths []string, source gitops.WorkloadSource, changed map[string]bool, opts SandboxOptions) ValidationResult {
 	chart := firstMatchingBase(paths, "Chart.yaml")
 	if chart == "" {
 		return renderSkippedOrRequired(opts, "helm render skipped: no Chart.yaml found")
@@ -174,12 +174,127 @@ func renderHelm(root string, paths []string, opts SandboxOptions) ValidationResu
 	if !ok {
 		return renderSkippedOrRequired(opts, "helm render skipped: helm is not available")
 	}
+	args := buildHelmTemplateArgs(root, chart, paths, source, changed)
+	return runRenderCommand(opts.Timeout, tool, args...)
+}
+
+func buildHelmTemplateArgs(root, chart string, paths []string, source gitops.WorkloadSource, changed map[string]bool) []string {
 	chartDir := filepath.Join(root, filepath.Dir(chart))
-	args := []string{"template", chartDir}
-	if values := firstMatchingBase(paths, "values.yaml", "values.yml"); values != "" {
+	args := []string{"template"}
+	if source.Helm.ReleaseName != "" {
+		args = append(args, source.Helm.ReleaseName)
+	}
+	args = append(args, chartDir)
+	if source.Helm.Namespace != "" {
+		args = append(args, "--namespace", source.Helm.Namespace)
+	}
+	for _, values := range helmValueFileOrder(chart, paths, source, changed) {
 		args = append(args, "-f", filepath.Join(root, values))
 	}
-	return runRenderCommand(opts.Timeout, tool, args...)
+	for key, value := range source.Helm.Parameters {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		args = append(args, "--set", key+"="+value)
+	}
+	for key, value := range source.Helm.FileParameters {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		filePath, ok := helmExistingPath(chart, paths, value)
+		if !ok {
+			continue
+		}
+		args = append(args, "--set-file", key+"="+filepath.Join(root, filePath))
+	}
+	return args
+}
+
+func helmValueFileOrder(chart string, paths []string, source gitops.WorkloadSource, changed map[string]bool) []string {
+	pathSet := map[string]bool{}
+	for _, item := range paths {
+		pathSet[filepath.ToSlash(filepath.Clean(item))] = true
+	}
+
+	var out []string
+	add := func(item string) {
+		item = filepath.ToSlash(filepath.Clean(strings.TrimSpace(item)))
+		if item == "." || item == "" || filepath.IsAbs(item) || strings.HasPrefix(item, "../") {
+			return
+		}
+		if pathSet[item] && !containsString(out, item) {
+			out = append(out, item)
+		}
+	}
+
+	chartDir := filepath.ToSlash(filepath.Dir(chart))
+	for _, item := range source.Helm.ValueFiles {
+		if item == "" || strings.HasPrefix(strings.TrimSpace(item), "$") {
+			continue
+		}
+		add(item)
+		add(filepath.ToSlash(filepath.Join(chartDir, item)))
+	}
+	if len(out) > 0 {
+		return out
+	}
+
+	for _, item := range []string{
+		filepath.ToSlash(filepath.Join(chartDir, "values.yaml")),
+		filepath.ToSlash(filepath.Join(chartDir, "values.yml")),
+	} {
+		add(item)
+	}
+	for item := range changed {
+		if isValuesYAML(item) {
+			add(item)
+		}
+	}
+	return out
+}
+
+func helmExistingPath(chart string, paths []string, value string) (string, bool) {
+	pathSet := map[string]bool{}
+	for _, item := range paths {
+		pathSet[filepath.ToSlash(filepath.Clean(item))] = true
+	}
+	cleanValue := filepath.ToSlash(filepath.Clean(strings.TrimSpace(value)))
+	if cleanValue == "." || cleanValue == "" || filepath.IsAbs(cleanValue) || strings.HasPrefix(cleanValue, "../") {
+		return "", false
+	}
+	candidates := []string{cleanValue}
+	if chart != "" {
+		candidates = append(candidates, filepath.ToSlash(filepath.Join(filepath.Dir(chart), cleanValue)))
+	}
+	for _, candidate := range candidates {
+		if pathSet[candidate] {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func changedSandboxPaths(changes []vcs.FileChange) map[string]bool {
+	out := map[string]bool{}
+	for _, change := range changes {
+		out[filepath.ToSlash(filepath.Clean(change.FilePath))] = true
+	}
+	return out
+}
+
+func isValuesYAML(item string) bool {
+	base := strings.ToLower(filepath.Base(item))
+	return (strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml")) &&
+		(strings.HasPrefix(base, "values") || strings.Contains(base, "values"))
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func runRenderCommand(timeout time.Duration, tool string, args ...string) ValidationResult {

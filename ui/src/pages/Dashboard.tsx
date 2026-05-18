@@ -44,6 +44,7 @@ import type {
   DashboardDependencyEdge,
   DashboardDependencyNode,
   DashboardEvidence,
+  DashboardGitOpsMapping,
   DashboardGuardrail,
   DashboardIncident,
   DashboardKPI,
@@ -569,17 +570,20 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
 
         <DrawerCard icon={<FileCode2 className="h-4 w-4 text-[#2563eb]" />} title="GitOps Mapping">
           {incident.gitops ? (
-            <KeyValueRows
-              rows={[
-                ['Controller', incident.gitops.controller],
-                ['ArgoCD App', incident.gitops.app],
-                ['Repository', incident.gitops.repo],
-                ['Revision', incident.gitops.revision],
-                ['Path', incident.gitops.path],
-                ['Manifest Type', incident.gitops.manifestType],
-                ['Overlay', incident.gitops.overlay || ''],
-              ]}
-            />
+            <div>
+              <KeyValueRows
+                rows={[
+                  ['Controller', incident.gitops.controller],
+                  ['App', incident.gitops.app],
+                  ['Repository', incident.gitops.repo],
+                  ['Revision', incident.gitops.revision],
+                  ['Path', incident.gitops.path],
+                  ['Manifest Type', readableManifestType(incident.gitops.manifestType)],
+                  ['Overlay', incident.gitops.overlay || ''],
+                ]}
+              />
+              {isHelmGitOps(incident.gitops.manifestType) && <HelmMapping gitops={incident.gitops} />}
+            </div>
           ) : (
             <MiniEmpty message="No GitOps source is mapped yet." />
           )}
@@ -592,6 +596,9 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
         <DrawerCard icon={<ShieldCheck className="h-4 w-4 text-[#16a34a]" />} title="Guardrails">
           {incident.guardrails?.length ? (
             <div className="divide-y divide-[#e5e7eb]">
+              {renderValidationGuardrail(incident.guardrails) && (
+                <RenderValidationBadge guardrail={renderValidationGuardrail(incident.guardrails)!} helm={isHelmGitOps(incident.gitops?.manifestType)} />
+              )}
               {incident.guardrails.map((guardrail) => (
                 <GuardrailRow key={guardrail.label} guardrail={guardrail} />
               ))}
@@ -629,6 +636,53 @@ const EvidenceRow = ({ item }: { item: DashboardEvidence }) => (
   </div>
 );
 
+const HelmMapping = ({ gitops }: { gitops: DashboardGitOpsMapping }) => {
+  const helm = gitops.helm;
+  const values = helm?.valueFiles || [];
+  const valuesFrom = helm?.valuesFrom || [];
+  return (
+    <div className="border-t border-[#e5e7eb] px-3 py-3 text-[12px]">
+      <div className="mb-2 flex items-center gap-2 font-semibold text-[#111827]">
+        <Boxes className="h-4 w-4 text-[#2563eb]" />
+        Helm source
+      </div>
+      <div className="grid gap-2">
+        <KeyValueRows
+          compact
+          rows={[
+            ['Release', helm?.releaseName],
+            ['Namespace', helm?.namespace],
+            ['Chart', helm?.chart],
+            ['Version', helm?.chartVersion],
+            ['Chart Repo', helm?.repoUrl],
+          ]}
+        />
+        {values.length > 0 ? (
+          <OrderedFileList title="Active values order" files={values} />
+        ) : (
+          <MiniInline message="No values files have been reported for this Helm source yet." />
+        )}
+        {valuesFrom.length > 0 && <OrderedFileList title="valuesFrom" files={valuesFrom} />}
+      </div>
+    </div>
+  );
+};
+
+const OrderedFileList = ({ title, files }: { title: string; files: string[] }) => (
+  <div className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2">
+    <div className="mb-1 text-[11px] font-semibold uppercase text-[#647084]">{title}</div>
+    <div className="space-y-1">
+      {files.slice(0, 6).map((file, index) => (
+        <div key={`${file}-${index}`} className="flex items-center gap-2 text-[#334155]">
+          <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-white text-[10px] font-semibold text-[#2563eb]">{index + 1}</span>
+          <span className="truncate">{file}</span>
+        </div>
+      ))}
+      {files.length > 6 && <div className="text-[11px] text-[#647084]">+{files.length - 6} more</div>}
+    </div>
+  </div>
+);
+
 const RecommendedPR = ({ pr }: { pr: DashboardRecommendedPR }) => (
   <div className="space-y-3 px-3 py-3 text-[12px]">
     <KeyValueRows
@@ -636,8 +690,20 @@ const RecommendedPR = ({ pr }: { pr: DashboardRecommendedPR }) => (
         ['Branch', pr.branch],
         ['Files', pr.fileCount ? `${pr.fileCount} files` : `${pr.files?.length || 0} files`],
         ['Strategy', pr.strategy],
+        ['Patch Target', pr.patchTarget],
       ]}
     />
+    {(pr.reason || pr.avoided || pr.summary?.length) && (
+      <div className="rounded-md border border-[#dbeafe] bg-[#eff6ff] p-2 text-[#1e3a8a]">
+        {pr.reason && <div className="font-medium">{pr.reason}</div>}
+        {pr.avoided && <div className="mt-1 text-[11px]">Avoided: {pr.avoided}</div>}
+        {!!pr.summary?.length && (
+          <ul className="mt-2 space-y-1 text-[11px] text-[#334155]">
+            {pr.summary.map((item) => <li key={item}>• {item}</li>)}
+          </ul>
+        )}
+      </div>
+    )}
     {!!pr.files?.length && (
       <div className="space-y-1 pl-[84px]">
         {pr.files.slice(0, 4).map((file) => (
@@ -694,6 +760,7 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
                   <div className="h-1" style={{ background: stageTone }} />
                   <div className="m-2 rounded-md border border-[#eef2f7] bg-[#f8fafc] px-2 py-3 text-center">
                     <div className="text-[12px] font-semibold leading-4 text-[#111827]">{stage.label}</div>
+                    {stage.note && <div className="mt-1 truncate text-[10px] text-[#647084]">{stage.note}</div>}
                   </div>
                   <div className="space-y-2 px-2 pb-2">
                     {visibleItems.length ? (
@@ -706,7 +773,8 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
                           className="block rounded border border-transparent p-1 text-[11px] hover:border-[#e5e7eb] hover:bg-[#f8fafc]"
                         >
                           <div className="truncate font-semibold text-[#111827]">{item.label}</div>
-                          <div className="mt-0.5 truncate text-[#6b7280]">{item.age || item.repository}</div>
+                          <div className="mt-0.5 truncate text-[#6b7280]">{item.detail || item.repository}</div>
+                          <div className="mt-0.5 truncate text-[#94a3b8]">{item.age || item.repository}</div>
                         </a>
                       ))
                     ) : (
@@ -1005,6 +1073,13 @@ const ResourceDetailPanel = ({
         <DetailLine label="Signal" value={incident.source || 'Unknown'} />
         <DetailLine label="Risk" value={incident.risk || 'Unknown'} />
         {incident.gitops && <DetailLine label="GitOps" value={`${incident.gitops.controller} · ${incident.gitops.path || incident.gitops.repo}`} />}
+        {incident.gitops?.helm && isHelmNode(node) && (
+          <>
+            <DetailLine label="Chart" value={helmChartLabel(incident.gitops)} />
+            <DetailLine label="Release" value={incident.gitops.helm.releaseName || incident.gitops.app || 'Unknown'} />
+            <DetailLine label="Values" value={(incident.gitops.helm.valueFiles || []).join(' → ') || 'Not reported'} />
+          </>
+        )}
         {incident.pr && <DetailLine label="PR" value={incident.pr.branch || incident.pr.title} />}
       </div>
       <div className="mt-3 border-t border-[#e5e7eb] pt-3">
@@ -1132,6 +1207,7 @@ const flowNodeStyle = (node: DashboardDependencyNode, selected: boolean, expande
 
 const graphNodeColor = (kind: string) => {
   const lower = kind.toLowerCase();
+  if (lower.includes('helm') || lower.includes('chart')) return '#2563eb';
   if (lower.includes('active') || lower.includes('deployment')) return '#2563eb';
   if (lower.includes('warning') || lower.includes('config') || lower.includes('secret')) return '#f97316';
   if (lower.includes('stateful')) return '#0ea5e9';
@@ -1139,8 +1215,8 @@ const graphNodeColor = (kind: string) => {
   return '#64748b';
 };
 
-const KeyValueRows = ({ rows }: { rows: [string, string | undefined][] }) => (
-  <div className="space-y-2 px-3 py-3 text-[12px]">
+const KeyValueRows = ({ rows, compact = false }: { rows: [string, string | undefined][]; compact?: boolean }) => (
+  <div className={`space-y-2 text-[12px] ${compact ? '' : 'px-3 py-3'}`}>
     {rows.filter(([, value]) => !!value).map(([label, value]) => (
       <div key={label} className="grid grid-cols-[84px_1fr] gap-3">
         <span className="font-semibold text-[#111827]">{label}</span>
@@ -1149,6 +1225,21 @@ const KeyValueRows = ({ rows }: { rows: [string, string | undefined][] }) => (
     ))}
   </div>
 );
+
+const RenderValidationBadge = ({ guardrail, helm }: { guardrail: DashboardGuardrail; helm?: boolean }) => {
+  const tone = guardrailTone(guardrail.status);
+  return (
+    <div className="border-b border-[#e5e7eb] px-3 py-3">
+      <div className="flex items-center justify-between gap-3 rounded-md border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2 text-[12px]">
+        <div className="min-w-0">
+          <div className="font-semibold text-[#111827]">{renderValidationTitle(guardrail.status, helm)}</div>
+          {guardrail.detail && <div className="mt-0.5 truncate text-[11px] text-[#647084]">{guardrail.detail}</div>}
+        </div>
+        <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-medium ${tone}`}>{guardrail.status}</span>
+      </div>
+    </div>
+  );
+};
 
 const GuardrailRow = ({ guardrail }: { guardrail: DashboardGuardrail }) => {
   const tone = guardrailTone(guardrail.status);
@@ -1163,6 +1254,44 @@ const GuardrailRow = ({ guardrail }: { guardrail: DashboardGuardrail }) => {
       </span>
     </div>
   );
+};
+
+const renderValidationGuardrail = (guardrails: DashboardGuardrail[]) =>
+  guardrails.find((guardrail) => /render/i.test(guardrail.label));
+
+const renderValidationTitle = (status: string, helm?: boolean) => {
+  const prefix = helm ? 'Helm render' : 'Render validation';
+  switch ((status || '').toLowerCase()) {
+    case 'passed':
+      return `${prefix} passed`;
+    case 'failed':
+      return `${prefix} failed`;
+    case 'skipped':
+      return `${prefix} skipped`;
+    default:
+      return `${prefix} pending`;
+  }
+};
+
+const MiniInline = ({ message }: { message: string }) => (
+  <div className="rounded-md border border-dashed border-[#d1d5db] bg-[#f8fafc] px-2 py-2 text-[11px] text-[#647084]">{message}</div>
+);
+
+const isHelmGitOps = (manifestType?: string) => /helm/i.test(manifestType || '');
+
+const readableManifestType = (manifestType?: string) => {
+  switch ((manifestType || '').toLowerCase()) {
+    case 'flux-helmrelease':
+      return 'Flux HelmRelease';
+    case 'helm':
+      return 'Helm';
+    case 'kustomize':
+      return 'Kustomize';
+    case 'raw':
+      return 'Raw manifests';
+    default:
+      return manifestType || 'Unknown';
+  }
 };
 
 const guardrailTone = (status: string) => {
@@ -1191,6 +1320,8 @@ const WorkloadIcon = ({ workload }: { workload: DashboardWorkload }) => {
 
 const renderWorkloadGlyph = (kind: string, className: string) => {
   const lower = kind.toLowerCase();
+  if (lower.includes('values')) return <FileCode2 className={className} />;
+  if (lower.includes('render')) return <Code2 className={className} />;
   if (lower.includes('stateful')) return <Database className={className} />;
   if (lower.includes('daemon')) return <Server className={className} />;
   if (lower.includes('helm')) return <Boxes className={className} />;
@@ -1200,6 +1331,13 @@ const renderWorkloadGlyph = (kind: string, className: string) => {
   if (lower.includes('ingress')) return <Layers3 className={className} />;
   if (lower.includes('pod')) return <Container className={className} />;
   return <Code2 className={className} />;
+};
+
+const isHelmNode = (node: DashboardDependencyNode) => /helm|chart|values|render/i.test(`${node.label} ${node.kind}`);
+
+const helmChartLabel = (gitops: DashboardGitOpsMapping) => {
+  const chart = gitops.helm?.chart || 'Unknown chart';
+  return gitops.helm?.chartVersion ? `${chart}@${gitops.helm.chartVersion}` : chart;
 };
 
 const workloadColor = (kind: string) => {

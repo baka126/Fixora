@@ -1,5 +1,8 @@
 import { useEffect, useRef } from 'react';
+import { apiClient } from '../api/client';
 import { useStore } from '../store/useStore';
+
+const DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
 
 export const useWebSocket = () => {
   const ws = useRef<WebSocket | null>(null);
@@ -49,5 +52,29 @@ export const useWebSocket = () => {
       }
     };
   }, [token, setDashboard]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    let cancelled = false;
+    const intervalId = window.setInterval(() => {
+      apiClient
+        .get('/dashboard')
+        .then(({ data }) => {
+          if (!cancelled) {
+            setDashboard(data);
+          }
+        })
+        .catch(() => {
+          // WebSocket remains the primary path; polling is a quiet freshness fallback.
+        });
+    }, DASHBOARD_REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [token, setDashboard]);
+
   return null;
 };

@@ -63,6 +63,17 @@ export interface DashboardGitOpsMapping {
   path: string;
   manifestType: string;
   overlay?: string;
+  helm?: DashboardHelmMapping;
+}
+
+export interface DashboardHelmMapping {
+  releaseName?: string;
+  namespace?: string;
+  chart?: string;
+  chartVersion?: string;
+  repoUrl?: string;
+  valueFiles?: string[];
+  valuesFrom?: string[];
 }
 
 export interface DashboardRecommendedPR {
@@ -75,6 +86,10 @@ export interface DashboardRecommendedPR {
   risk: string;
   approverRequired: boolean;
   url?: string;
+  patchTarget?: string;
+  reason?: string;
+  avoided?: string;
+  summary?: string[];
 }
 
 export interface DashboardGuardrail {
@@ -140,6 +155,7 @@ export interface DashboardGitOpsSource {
   path: string;
   manifestType: string;
   overlay?: string;
+  helm?: DashboardHelmMapping;
   workloads: number;
 }
 
@@ -236,6 +252,7 @@ export interface DashboardPipelineItem {
   id: string;
   label: string;
   repository?: string;
+  detail?: string;
   age: string;
   url?: string;
 }

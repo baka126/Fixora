@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
@@ -19,82 +20,100 @@ var (
 // This allows Fixora to send scrubbed config files to AI models and then
 // safely map the tokens back to their original values when the AI returns a patch.
 type Tokenizer struct {
-	mapping map[string]string
+	mapping        map[string]string
+	reverseMapping map[string]string
 }
 
 func NewTokenizer() *Tokenizer {
 	return &Tokenizer{
-		mapping: make(map[string]string),
+		mapping:        make(map[string]string),
+		reverseMapping: make(map[string]string),
 	}
 }
 
-func (t *Tokenizer) generateToken() string {
+func (t *Tokenizer) generateToken(hint string) string {
 	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("TOKEN_%x", b)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("FIXORA_%s_%d", hint, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("FIXORA_%s_%x", hint, b)
 }
 
-func (t *Tokenizer) tokenizeMatch(match string) string {
-	tok := t.generateToken()
+func (t *Tokenizer) tokenizeMatch(match string, hint string) string {
+	if tok, exists := t.reverseMapping[match]; exists {
+		return tok
+	}
+	tok := t.generateToken(hint)
 	t.mapping[tok] = match
+	t.reverseMapping[match] = tok
 	return tok
 }
 
+func isGeneratedToken(value string) bool {
+	return strings.HasPrefix(strings.Trim(value, `"'`), "FIXORA_")
+}
+
 // Tokenize processes an input string, replacing recognized secrets, PII, and
-// likely-sensitive structural YAML fields with symmetric UUID tokens.
+// likely-sensitive structural YAML fields with symmetric tokens.
 func (t *Tokenizer) Tokenize(input string) string {
 	tokenized := input
 
-	// 1. YAML Specific fields (env values)
+	// 1. Provider-specific secrets before broad YAML/generic key matching.
+	tokenized = awsAccessKeyRegex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "AWS") })
+	tokenized = awsSecretKeyRegex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "AWS_SECRET") })
+	tokenized = privateKeyRegex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "PRIVATE_KEY") })
+
+	// 2. YAML Specific fields (env values)
 	tokenized = yamlEnvValueRegex.ReplaceAllStringFunc(tokenized, func(match string) string {
 		parts := yamlEnvValueRegex.FindStringSubmatch(match)
 		if len(parts) == 3 {
 			prefix := parts[1]
 			val := strings.TrimSpace(parts[2])
 			lowerVal := strings.ToLower(val)
-			// Skip tokenizing non-sensitive values like booleans to avoid confusing AI structural logic
-			if len(val) > 4 && !strings.Contains(lowerVal, "true") && !strings.Contains(lowerVal, "false") && !strings.Contains(val, "[") && !strings.Contains(val, "{") {
-				tok := t.generateToken()
-				t.mapping[tok] = val
+			// Skip tokenizing non-sensitive/structural values to preserve AI context
+			if len(val) > 4 && !isGeneratedToken(val) && !strings.Contains(lowerVal, "true") && !strings.Contains(lowerVal, "false") && !strings.Contains(val, "[") && !strings.Contains(val, "{") {
+				tok := t.tokenizeMatch(val, "VAL")
 				return prefix + tok
 			}
 		}
 		return match
 	})
 
-	// 2. K8s Secret data block heuristics
+	// 3. K8s Secret data block heuristics
 	tokenized = k8sSecretDataRegex.ReplaceAllStringFunc(tokenized, func(match string) string {
 		parts := k8sSecretDataRegex.FindStringSubmatch(match)
 		if len(parts) == 4 {
 			prefix := parts[1] + parts[2] + ": "
 			val := strings.TrimSpace(parts[3])
-			tok := t.generateToken()
-			t.mapping[tok] = val
+			if isGeneratedToken(val) {
+				return match
+			}
+			tok := t.tokenizeMatch(val, "SEC")
 			return prefix + tok
 		}
 		return match
 	})
 
-	// 3. Generic Secrets & Tokens (AWS, generic passwords, etc)
+	// 4. Generic Secrets & Tokens
 	tokenized = genericTokenValueRegex.ReplaceAllStringFunc(tokenized, func(match string) string {
 		parts := genericTokenValueRegex.FindStringSubmatch(match)
 		if len(parts) == 3 {
 			prefix := parts[1]
 			val := parts[2]
-			tok := t.generateToken()
-			t.mapping[tok] = val
+			if isGeneratedToken(val) {
+				return match
+			}
+			tok := t.tokenizeMatch(val, "KEY")
 			return prefix + tok
 		}
 		return match
 	})
 
-	// 4. Fallback to full match tokenization for explicit PII/Keys
-	tokenized = emailRegex.ReplaceAllStringFunc(tokenized, t.tokenizeMatch)
-	tokenized = ipv4Regex.ReplaceAllStringFunc(tokenized, t.tokenizeMatch)
-	tokenized = ipv6Regex.ReplaceAllStringFunc(tokenized, t.tokenizeMatch)
-	tokenized = jwtRegex.ReplaceAllStringFunc(tokenized, t.tokenizeMatch)
-	tokenized = awsAccessKeyRegex.ReplaceAllStringFunc(tokenized, t.tokenizeMatch)
-	tokenized = privateKeyRegex.ReplaceAllStringFunc(tokenized, t.tokenizeMatch)
+	// 5. PII/Network Tokenization
+	tokenized = emailRegex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "EMAIL") })
+	tokenized = ipv4Regex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "IP") })
+	tokenized = ipv6Regex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "IP") })
+	tokenized = jwtRegex.ReplaceAllStringFunc(tokenized, func(m string) string { return t.tokenizeMatch(m, "JWT") })
 
 	return tokenized
 }

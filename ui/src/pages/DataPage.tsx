@@ -201,6 +201,12 @@ const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: 
                 <MiniKV label="Namespace" value={row.workload.namespace} />
                 <MiniKV label="Files" value={`${row.files?.length || 0}`} />
                 <MiniKV label="GitOps" value={row.gitops?.manifestType || 'Unknown'} />
+                {row.gitops?.helm && (
+                  <>
+                    <MiniKV label="Chart" value={helmChartLabel(row.gitops)} />
+                    <MiniKV label="Values" value={row.gitops.helm.valueFiles?.[0] || 'HelmRelease values'} />
+                  </>
+                )}
               </div>
               {row.failureReason && <p className="mt-3 line-clamp-2 rounded-md bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]">{row.failureReason}</p>}
             </article>
@@ -228,7 +234,7 @@ const MiniKV = ({ label, value }: { label: string; value?: string }) => (
 const GitOpsSources = ({ rows }: { rows: DashboardGitOpsSource[] }) => {
   if (!rows.length) return <Empty title="No GitOps sources mapped yet" message="ArgoCD and Flux source mappings will appear after Fixora correlates workloads to repositories." />;
   return (
-    <Table headers={['Controller', 'App', 'Repository', 'Revision', 'Path', 'Type', 'Workloads']}>
+    <Table headers={['Controller', 'App', 'Repository', 'Revision', 'Path', 'Type', 'Helm', 'Workloads']}>
       {rows.map((row) => (
         <tr key={row.id} className="border-t border-[#e5e7eb]">
           <td className="px-4 py-3 font-medium">{row.controller}</td>
@@ -236,7 +242,17 @@ const GitOpsSources = ({ rows }: { rows: DashboardGitOpsSource[] }) => {
           <td className="px-4 py-3">{row.repo}</td>
           <td className="px-4 py-3">{row.revision}</td>
           <td className="px-4 py-3">{row.path || 'Repository root'}</td>
-          <td className="px-4 py-3">{row.manifestType || 'Unknown'}</td>
+          <td className="px-4 py-3">{readableManifestType(row.manifestType)}</td>
+          <td className="px-4 py-3">
+            {row.helm ? (
+              <div className="max-w-[220px]">
+                <div className="truncate font-medium text-[#111827]">{helmChartLabel(row)}</div>
+                <div className="truncate text-[11px] text-[#647084]">{row.helm.valueFiles?.join(' → ') || row.helm.releaseName || 'values pending'}</div>
+              </div>
+            ) : (
+              <span className="text-[#94a3b8]">Not Helm</span>
+            )}
+          </td>
           <td className="px-4 py-3">{row.workloads}</td>
         </tr>
       ))}
@@ -417,10 +433,14 @@ const filterRemediations = (rows: DashboardRemediation[], query: string, range: 
     row.gitops?.app,
     row.gitops?.path,
     row.gitops?.manifestType,
+    row.gitops?.helm?.chart,
+    row.gitops?.helm?.chartVersion,
+    row.gitops?.helm?.releaseName,
+    row.gitops?.helm?.valueFiles?.join(' '),
   ]));
 
 const filterGitOpsSources = (rows: DashboardGitOpsSource[], query: string) =>
-  rows.filter((row) => matchesQuery(query, [row.controller, row.app, row.namespace, row.repo, row.revision, row.path, row.manifestType, row.overlay]));
+  rows.filter((row) => matchesQuery(query, [row.controller, row.app, row.namespace, row.repo, row.revision, row.path, row.manifestType, row.overlay, row.helm?.chart, row.helm?.releaseName, row.helm?.valueFiles?.join(' ')]));
 
 const filterPredictions = (rows: DashboardPrediction[], query: string, range: string) =>
   rows.filter((row) => withinAge(row.lastAlertAge, range) && matchesQuery(query, [row.risk, row.namespace, row.podName]));
@@ -474,3 +494,23 @@ const ageToMinutes = (age: string) => {
 };
 
 const remediationClosed = (status: string) => /merged|closed|succeeded|reverted|production_failed|revert_failed/.test(status || '');
+
+const readableManifestType = (manifestType?: string) => {
+  switch ((manifestType || '').toLowerCase()) {
+    case 'flux-helmrelease':
+      return 'Flux HelmRelease';
+    case 'helm':
+      return 'Helm';
+    case 'kustomize':
+      return 'Kustomize';
+    case 'raw':
+      return 'Raw manifests';
+    default:
+      return manifestType || 'Unknown';
+  }
+};
+
+const helmChartLabel = (source: { helm?: { chart?: string; chartVersion?: string } }) => {
+  const chart = source.helm?.chart || 'Unknown chart';
+  return source.helm?.chartVersion ? `${chart}@${source.helm.chartVersion}` : chart;
+};

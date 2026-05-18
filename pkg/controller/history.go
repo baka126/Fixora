@@ -100,10 +100,19 @@ func (h *historyCache) initDB() {
 			finops_impact TEXT,
 			finops_details TEXT,
 			ai_prompt TEXT,
-			ai_response TEXT
+			ai_response TEXT,
+			evidence_hash VARCHAR(64),
+			category VARCHAR(50),
+			symptom TEXT,
+			confidence INTEGER
 		);`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS category VARCHAR(50);`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS symptom TEXT;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS confidence INTEGER;`,
 		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS ai_prompt TEXT;`,
 		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS ai_response TEXT;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS evidence_hash VARCHAR(64);`,
+		`CREATE INDEX IF NOT EXISTS idx_investigations_hash ON investigations (evidence_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_investigations_pod ON investigations (namespace, pod_name);`,
 		`CREATE TABLE IF NOT EXISTS incident_history (
 			id SERIAL PRIMARY KEY,
@@ -187,6 +196,13 @@ func (h *historyCache) initDB() {
 			overlay_role TEXT,
 			environment TEXT,
 			region TEXT,
+			helm_release_name TEXT,
+			helm_namespace TEXT,
+			helm_repo_url TEXT,
+			helm_chart TEXT,
+			helm_chart_version TEXT,
+			helm_value_files JSONB,
+			helm_values_from JSONB,
 			changed_files JSONB,
 			failure_reason TEXT,
 			revert_pr_url TEXT,
@@ -203,9 +219,27 @@ func (h *historyCache) initDB() {
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_name TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_selector TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS gitops_namespace TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_release_name TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_namespace TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_repo_url TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_chart TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_chart_version TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_value_files JSONB;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_values_from JSONB;`,
 		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_pod ON remediation_outcomes (namespace, pod_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_status ON remediation_outcomes (status);`,
 		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_strategy ON remediation_outcomes (diagnosis_category, patch_strategy);`,
+		`CREATE TABLE IF NOT EXISTS dependency_graph (
+			id SERIAL PRIMARY KEY,
+			namespace VARCHAR(255) NOT NULL,
+			target_kind VARCHAR(100) NOT NULL,
+			target_name VARCHAR(255) NOT NULL,
+			source_kind VARCHAR(100) NOT NULL,
+			source_name VARCHAR(255) NOT NULL,
+			UNIQUE(namespace, target_kind, target_name, source_kind, source_name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_dep_source ON dependency_graph (namespace, source_kind, source_name);`,
+		`CREATE INDEX IF NOT EXISTS idx_dep_target ON dependency_graph (namespace, target_kind, target_name);`,
 		`CREATE TABLE IF NOT EXISTS autofix_events (
 			id SERIAL PRIMARY KEY,
 			created_at TIMESTAMP NOT NULL
@@ -310,7 +344,7 @@ func (h *historyCache) saveToDB(ctx context.Context, namespace, podName string, 
 	}
 }
 
-func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notifications.EvidenceChain, reason string) int64 {
+func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notifications.EvidenceChain, reason, hash string, category, symptom string, confidence int) int64 {
 	if h.db == nil {
 		return 0
 	}
@@ -319,8 +353,9 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 		INSERT INTO investigations (
 			namespace, pod_name, timestamp, reason, metric_proof, cluster_context,
 			historical_pattern, event_timeline, stack_trace, root_cause,
-			ai_confidence, finops_impact, finops_details, ai_prompt, ai_response
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ai_confidence, finops_impact, finops_details, ai_prompt, ai_response,
+			evidence_hash, category, symptom, confidence
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		RETURNING id
 	`
 	var id int64
@@ -329,6 +364,7 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 		evidence.HistoricalPattern, evidence.EventTimeline, evidence.StackTrace, evidence.RootCause,
 		evidence.AIConfidence, evidence.FinOpsImpact, evidence.FinOpsDetails,
 		security.ScrubPII(evidence.AIPrompt), security.ScrubPII(evidence.AIResponse),
+		hash, category, symptom, confidence,
 	).Scan(&id)
 
 	if err != nil {
@@ -336,6 +372,59 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 		return 0
 	}
 	return id
+}
+
+func (h *historyCache) LookupInvestigationByHash(ctx context.Context, hash string, maxAge time.Duration) (notifications.EvidenceChain, bool) {
+	if h.db == nil || hash == "" {
+		return notifications.EvidenceChain{}, false
+	}
+
+	query := `
+		SELECT root_cause, ai_confidence, finops_impact, timestamp
+		FROM investigations
+		WHERE evidence_hash = $1
+		ORDER BY timestamp DESC LIMIT 1
+	`
+	var evidence notifications.EvidenceChain
+	var timestamp time.Time
+	err := h.db.QueryRowContext(ctx, query, hash).Scan(
+		&evidence.RootCause, &evidence.AIConfidence, &evidence.FinOpsImpact, &timestamp,
+	)
+
+	if err == sql.ErrNoRows {
+		return notifications.EvidenceChain{}, false
+	}
+	if err != nil {
+		slog.Error("Failed to lookup investigation by hash", "error", err)
+		return notifications.EvidenceChain{}, false
+	}
+
+	if time.Since(timestamp) > maxAge {
+		return notifications.EvidenceChain{}, false
+	}
+
+	evidence.AIResponse = evidence.RootCause // For backward compatibility
+	return evidence, true
+}
+
+func (h *historyCache) SaveDependencyRefs(ctx context.Context, namespace, targetKind, targetName string, refs []string) {
+	if h == nil || h.db == nil || namespace == "" || targetKind == "" || targetName == "" {
+		return
+	}
+	query := `
+		INSERT INTO dependency_graph (namespace, target_kind, target_name, source_kind, source_name)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (namespace, target_kind, target_name, source_kind, source_name) DO NOTHING
+	`
+	for _, ref := range refs {
+		kind, name, ok := splitKindName(ref)
+		if !ok || (kind == targetKind && name == targetName) {
+			continue
+		}
+		if _, err := h.db.ExecContext(ctx, query, namespace, targetKind, targetName, kind, name); err != nil {
+			slog.Error("Failed to save analyzer dependency", "namespace", namespace, "target", targetKind+"/"+targetName, "source", kind+"/"+name, "error", err)
+		}
+	}
 }
 
 func (h *historyCache) SaveAlert(ctx context.Context, alert alertmanager.Alert, source string) {
@@ -727,4 +816,66 @@ func (h *historyCache) CheckAndLockInvestigation(ctx context.Context, ns, pod st
 	slog.Debug("Creating/Renewing in-memory investigation lock", "key", key)
 	h.investigationLocks[key] = time.Now()
 	return true
+}
+
+type CategoryTrend struct {
+	Category string `json:"category"`
+	Count    int    `json:"count"`
+}
+
+type SymptomTrend struct {
+	Symptom string `json:"symptom"`
+	Count   int    `json:"count"`
+}
+
+func (h *historyCache) GetAggregatedTrends(ctx context.Context, since time.Duration) ([]CategoryTrend, []SymptomTrend, error) {
+	if h.db == nil {
+		return nil, nil, fmt.Errorf("database not configured")
+	}
+
+	startTime := time.Now().Add(-since)
+
+	// Top Categories
+	catRows, err := h.db.QueryContext(ctx, `
+		SELECT category, COUNT(*) as count
+		FROM investigations
+		WHERE timestamp > $1 AND category IS NOT NULL AND category != ''
+		GROUP BY category
+		ORDER BY count DESC
+	`, startTime)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer catRows.Close()
+
+	var categories []CategoryTrend
+	for catRows.Next() {
+		var ct CategoryTrend
+		if err := catRows.Scan(&ct.Category, &ct.Count); err == nil {
+			categories = append(categories, ct)
+		}
+	}
+
+	// Top Symptoms
+	symRows, err := h.db.QueryContext(ctx, `
+		SELECT symptom, COUNT(*) as count
+		FROM investigations
+		WHERE timestamp > $1 AND symptom IS NOT NULL AND symptom != ''
+		GROUP BY symptom
+		ORDER BY count DESC LIMIT 10
+	`, startTime)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer symRows.Close()
+
+	var symptoms []SymptomTrend
+	for symRows.Next() {
+		var st SymptomTrend
+		if err := symRows.Scan(&st.Symptom, &st.Count); err == nil {
+			symptoms = append(symptoms, st)
+		}
+	}
+
+	return categories, symptoms, nil
 }

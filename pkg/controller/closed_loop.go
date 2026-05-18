@@ -73,6 +73,16 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 		slog.Error("Failed to marshal remediation changed files", "error", err)
 		changedFilesJSON = []byte("[]")
 	}
+	helmValueFilesJSON, err := json.Marshal(nonEmptyDashboard(rec.Source.Helm.ValueFiles...))
+	if err != nil {
+		slog.Error("Failed to marshal Helm value files", "error", err)
+		helmValueFilesJSON = []byte("[]")
+	}
+	helmValuesFromJSON, err := json.Marshal(nonEmptyDashboard(rec.Source.Helm.ValuesFrom...))
+	if err != nil {
+		slog.Error("Failed to marshal Helm valuesFrom", "error", err)
+		helmValuesFromJSON = []byte("[]")
+	}
 
 	query := `
 		INSERT INTO remediation_outcomes (
@@ -80,6 +90,8 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 			status, vcs_type, repo_owner, repo_name, base_branch, head_branch,
 			pr_title, gitops_controller, gitops_app, gitops_namespace, gitops_repo_url, gitops_revision,
 			gitops_path, manifest_type, overlay_role, environment, region,
+			helm_release_name, helm_namespace, helm_repo_url, helm_chart, helm_chart_version,
+			helm_value_files, helm_values_from,
 			changed_files, failure_reason, workload_kind, workload_name, workload_selector,
 			created_at, updated_at
 		) VALUES (
@@ -88,7 +100,8 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 			$12, $13, $14, $15, $16,
 			$17, $18, $19, $20, $21,
 			$22, $23, $24, $25, $26,
-			$27, $28, $29
+			$27, $28, $29, $30, $31,
+			$32, $33, $34, $35, $36
 		)
 		RETURNING id
 	`
@@ -98,6 +111,8 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 		string(rec.Status), rec.VCSType, rec.Options.RepoOwner, rec.Options.RepoName, rec.Options.Base, rec.Options.Head,
 		rec.Options.Title, string(rec.Source.Controller), rec.Source.AppName, rec.Source.AppNamespace, rec.Source.RepoURL, rec.Source.TargetRevision,
 		rec.Source.Path, string(rec.Source.ManifestType), string(rec.Source.OverlayRole), rec.Source.Environment, rec.Source.Region,
+		rec.Source.Helm.ReleaseName, rec.Source.Helm.Namespace, rec.Source.Helm.RepoURL, rec.Source.Helm.Chart, rec.Source.Helm.ChartVersion,
+		helmValueFilesJSON, helmValuesFromJSON,
 		changedFilesJSON, rec.FailureReason, rec.WorkloadKind, rec.WorkloadName, rec.WorkloadSelector,
 		now, now,
 	).Scan(&id)

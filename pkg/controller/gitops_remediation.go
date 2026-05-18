@@ -30,30 +30,27 @@ func gitOpsPatchInstructions(source gitops.WorkloadSource, pod *v1.Pod, identity
 	case gitops.ManifestKustomize:
 		return fmt.Sprintf("%s. Kustomize overlay detected: target the owner workload %s, not the ephemeral pod name. Do not edit rendered/base workload manifests directly. Update kustomization.yaml and create or update a StrategicMergePatch under an allowed patch path. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
 	case gitops.ManifestHelm:
-		return fmt.Sprintf("%s. Helm source detected: target the owner workload %s. Prefer values.yaml for environment-specific changes such as image, resources, probes, env, and scheduling; edit templates only when the structural chart template is the root cause. Do not patch a rendered Pod manifest. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Helm source detected: target the owner workload %s through chart values first. Prefer values.yaml or the active values file declared by ArgoCD/Flux for image.repository, image.tag, resources, probes, env, nodeSelector, tolerations, and affinity. Keep image repository and tag pinned and compatible with the node architecture. Edit templates only when the chart template itself is the root cause. Do not patch a rendered Pod manifest or Deployment manifest from Helm output. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
 	case gitops.ManifestFluxHelmRelease:
-		return fmt.Sprintf("%s. Flux HelmRelease detected: target the owner workload %s. Prefer HelmRelease values or referenced values files, not rendered workload YAML. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
+		return fmt.Sprintf("%s. Flux HelmRelease detected: target the owner workload %s through HelmRelease spec.values or referenced values files. Keep image repository and tag pinned and compatible with the node architecture. Do not patch rendered workload YAML created by Helm. Patch strategy: %s", source.Summary(), workloadRef, diagnosis.PatchStrategy)
 	default:
 		return fmt.Sprintf("%s. Raw manifest source detected: edit only the source manifest for affected workload %s in namespace %s. Prefer controller manifests such as Deployment, StatefulSet, DaemonSet, Job, or CronJob over bare Pod manifests when an owner workload exists. Return a valid full manifest with top-level apiVersion/kind/metadata/spec and update existing fields in place. Preserve metadata.name, annotations, namespace, restartPolicy placement, and unrelated field ordering unless directly required by the fix. If this is a bare Pod image fix, change only image or imagePullPolicy because live Pods reject args, command, resources, and most spec updates; do not nest a complete manifest under containers. Patch strategy: %s", source.Summary(), workloadRef, pod.Namespace, diagnosis.PatchStrategy)
 	}
 }
 
 func isGitOpsContextFile(source gitops.WorkloadSource, filePath string) bool {
-	if !isRemediableManifest(filePath) {
-		return false
-	}
 	switch source.ManifestType {
 	case gitops.ManifestKustomize:
-		return true
+		return isRemediableManifest(filePath)
 	case gitops.ManifestFluxHelmRelease:
 		if isFluxHelmReleaseFleetSource(source) {
-			return true
+			return isRemediableManifest(filePath)
 		}
-		return isHelmRelevantFile(filePath)
+		return isHelmRelevantFile(source, filePath)
 	case gitops.ManifestHelm:
-		return isHelmRelevantFile(filePath)
+		return isHelmRelevantFile(source, filePath)
 	default:
-		return true
+		return isRemediableManifest(filePath)
 	}
 }
 
@@ -65,9 +62,9 @@ func isGitOpsEditableFile(source gitops.WorkloadSource, filePath string) bool {
 		if isFluxHelmReleaseFleetSource(source) {
 			return isRemediableManifest(filePath)
 		}
-		return isHelmEditableFile(filePath)
+		return isHelmEditableFile(source, filePath)
 	case gitops.ManifestHelm:
-		return isHelmEditableFile(filePath)
+		return isHelmEditableFile(source, filePath)
 	default:
 		return isRemediableManifest(filePath)
 	}
@@ -109,17 +106,48 @@ func isKustomizePatchFile(filePath string) bool {
 	return strings.Contains(lower, "/patches/") || strings.Contains(lower, "fixora-patches/") || strings.Contains(base, "patch")
 }
 
-func isHelmRelevantFile(filePath string) bool {
+func isHelmRelevantFile(source gitops.WorkloadSource, filePath string) bool {
 	lower := strings.ToLower(filePath)
 	base := path.Base(lower)
+	if base == "chart.yaml" || base == "chart.lock" || base == "values.schema.json" {
+		return true
+	}
 	return isRemediableManifest(filePath) &&
-		(base == "values.yaml" || base == "values.yml" || base == "chart.yaml" || strings.Contains(lower, "/templates/") || strings.Contains(lower, "helmrelease"))
+		(isHelmValuesFile(source, filePath) || strings.Contains(lower, "/templates/") || strings.Contains(lower, "helmrelease"))
 }
 
-func isHelmEditableFile(filePath string) bool {
+func isHelmEditableFile(source gitops.WorkloadSource, filePath string) bool {
 	lower := strings.ToLower(filePath)
+	return isHelmValuesFile(source, filePath) || strings.Contains(lower, "helmrelease") || strings.Contains(lower, "/templates/")
+}
+
+func isHelmValuesFile(source gitops.WorkloadSource, filePath string) bool {
+	cleanFile := path.Clean(strings.TrimSpace(filePath))
+	lower := strings.ToLower(cleanFile)
 	base := path.Base(lower)
-	return base == "values.yaml" || base == "values.yml" || strings.Contains(lower, "helmrelease") || strings.Contains(lower, "/templates/")
+	if (strings.HasPrefix(base, "values") || strings.Contains(base, "values")) && (strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml")) {
+		return true
+	}
+	for _, valueFile := range source.Helm.ValueFiles {
+		valueFile = strings.TrimSpace(valueFile)
+		if valueFile == "" || strings.HasPrefix(valueFile, "$") {
+			continue
+		}
+		candidate := path.Clean(valueFile)
+		candidates := []string{candidate}
+		if source.Path != "" {
+			candidates = append(candidates, path.Clean(path.Join(source.Path, candidate)))
+		}
+		for _, item := range candidates {
+			if item == "." || strings.HasPrefix(item, "../") || path.IsAbs(item) {
+				continue
+			}
+			if cleanFile == item || strings.HasSuffix(cleanFile, "/"+item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isFluxHelmReleaseFleetSource(source gitops.WorkloadSource) bool {

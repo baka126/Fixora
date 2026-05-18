@@ -56,7 +56,10 @@ func (c *Controller) monitorRemediationOutcomes() {
 
 		if failure := c.workloadRegressionReason(ctx, rec); failure != "" {
 			c.markProductionRemediationFailure(ctx, rec, failure)
+			continue
 		}
+		c.markRemediationStatus(ctx, rec.ID, RemediationSucceeded, rec.PRURL, "Post-merge observation completed without regression")
+		telemetry.IncRemediation(string(RemediationSucceeded), rec.PatchStrategy)
 	}
 
 	for _, rec := range c.history.RemediationsNeedingRevert(ctx, 20) {

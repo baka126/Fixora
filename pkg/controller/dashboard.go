@@ -41,6 +41,8 @@ type DashboardSnapshot struct {
 	ClusterCostMo    float64                  `json:"clusterCostMo"`
 	ActiveNodes      int                      `json:"activeNodes"`
 	NodeCosts        []DashboardNodeCost      `json:"nodeCosts,omitempty"`
+	CategoryTrends   []CategoryTrend          `json:"categoryTrends,omitempty"`
+	SymptomTrends    []SymptomTrend           `json:"symptomTrends,omitempty"`
 }
 
 type DashboardMetadata struct {
@@ -112,14 +114,25 @@ type DashboardEvidence struct {
 }
 
 type DashboardGitOpsMapping struct {
-	Controller   string `json:"controller"`
-	App          string `json:"app"`
-	Namespace    string `json:"namespace,omitempty"`
-	Repo         string `json:"repo"`
-	Revision     string `json:"revision"`
-	Path         string `json:"path"`
-	ManifestType string `json:"manifestType"`
-	Overlay      string `json:"overlay,omitempty"`
+	Controller   string                `json:"controller"`
+	App          string                `json:"app"`
+	Namespace    string                `json:"namespace,omitempty"`
+	Repo         string                `json:"repo"`
+	Revision     string                `json:"revision"`
+	Path         string                `json:"path"`
+	ManifestType string                `json:"manifestType"`
+	Overlay      string                `json:"overlay,omitempty"`
+	Helm         *DashboardHelmMapping `json:"helm,omitempty"`
+}
+
+type DashboardHelmMapping struct {
+	ReleaseName  string   `json:"releaseName,omitempty"`
+	Namespace    string   `json:"namespace,omitempty"`
+	Chart        string   `json:"chart,omitempty"`
+	ChartVersion string   `json:"chartVersion,omitempty"`
+	RepoURL      string   `json:"repoUrl,omitempty"`
+	ValueFiles   []string `json:"valueFiles,omitempty"`
+	ValuesFrom   []string `json:"valuesFrom,omitempty"`
 }
 
 type DashboardRecommendedPR struct {
@@ -132,6 +145,10 @@ type DashboardRecommendedPR struct {
 	Risk             string   `json:"risk"`
 	ApproverRequired bool     `json:"approverRequired"`
 	URL              string   `json:"url,omitempty"`
+	PatchTarget      string   `json:"patchTarget,omitempty"`
+	Reason           string   `json:"reason,omitempty"`
+	Avoided          string   `json:"avoided,omitempty"`
+	Summary          []string `json:"summary,omitempty"`
 }
 
 type DashboardRemediation struct {
@@ -151,16 +168,17 @@ type DashboardRemediation struct {
 }
 
 type DashboardGitOpsSource struct {
-	ID           string `json:"id"`
-	Controller   string `json:"controller"`
-	App          string `json:"app"`
-	Namespace    string `json:"namespace,omitempty"`
-	Repo         string `json:"repo"`
-	Revision     string `json:"revision"`
-	Path         string `json:"path"`
-	ManifestType string `json:"manifestType"`
-	Overlay      string `json:"overlay,omitempty"`
-	Workloads    int    `json:"workloads"`
+	ID           string                `json:"id"`
+	Controller   string                `json:"controller"`
+	App          string                `json:"app"`
+	Namespace    string                `json:"namespace,omitempty"`
+	Repo         string                `json:"repo"`
+	Revision     string                `json:"revision"`
+	Path         string                `json:"path"`
+	ManifestType string                `json:"manifestType"`
+	Overlay      string                `json:"overlay,omitempty"`
+	Helm         *DashboardHelmMapping `json:"helm,omitempty"`
+	Workloads    int                   `json:"workloads"`
 }
 
 type DashboardPrediction struct {
@@ -212,6 +230,7 @@ type DashboardPipelineItem struct {
 	ID         string `json:"id"`
 	Label      string `json:"label"`
 	Repository string `json:"repository,omitempty"`
+	Detail     string `json:"detail,omitempty"`
 	Age        string `json:"age"`
 	URL        string `json:"url,omitempty"`
 }
@@ -298,6 +317,13 @@ type dashboardRemediationRow struct {
 	OverlayRole       string
 	Environment       string
 	Region            string
+	HelmReleaseName   string
+	HelmNamespace     string
+	HelmRepoURL       string
+	HelmChart         string
+	HelmChartVersion  string
+	HelmValueFiles    []string
+	HelmValuesFrom    []string
 	ChangedFiles      []string
 	FailureReason     string
 	WorkloadKind      string
@@ -465,6 +491,11 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
 	snapshot.Predictions = dashboardPredictions(predictions)
 	snapshot.AuditEvents = dashboardAuditEvents(investigations, remediations, alerts)
+
+	// Add analytical trends
+	cats, syms, _ := c.history.GetAggregatedTrends(ctx, 24*time.Hour)
+	snapshot.CategoryTrends = cats
+	snapshot.SymptomTrends = syms
 
 	// Add FinOps Cluster Cost
 	clusterCost, activeNodes, nodeCosts := c.calculateClusterCostSnapshot(ctx)
@@ -719,11 +750,19 @@ func dashboardPipelineItems(rows []dashboardRemediationRow) map[string][]Dashboa
 			ID:         fmt.Sprintf("remediation-%d", row.ID),
 			Label:      firstNonEmpty(row.HeadBranch, row.PRTitle, row.FailureReason, row.PodName),
 			Repository: dashboardRepository(row),
+			Detail:     dashboardPipelineItemDetail(row),
 			Age:        humanAge(row.UpdatedAt),
 			URL:        row.PRURL,
 		})
 	}
 	return items
+}
+
+func dashboardPipelineItemDetail(row dashboardRemediationRow) string {
+	if dashboardManifestIsHelm(row.ManifestType) {
+		return firstNonEmpty(dashboardPatchTarget(row), row.ManifestType)
+	}
+	return firstNonEmpty(row.ManifestType, row.PatchStrategy)
 }
 
 func queryDashboardInvestigations(ctx context.Context, db *sql.DB, limit int) []dashboardInvestigationRow {
@@ -759,7 +798,10 @@ func queryDashboardRemediations(ctx context.Context, db *sql.DB, limit int) []da
 		       COALESCE(gitops_controller, ''), COALESCE(gitops_app, ''), COALESCE(gitops_namespace, ''),
 		       COALESCE(gitops_repo_url, ''), COALESCE(gitops_revision, ''), COALESCE(gitops_path, ''),
 		       COALESCE(manifest_type, ''), COALESCE(overlay_role, ''), COALESCE(environment, ''),
-		       COALESCE(region, ''), COALESCE(changed_files, '[]'::jsonb), COALESCE(failure_reason, ''),
+		       COALESCE(region, ''), COALESCE(helm_release_name, ''), COALESCE(helm_namespace, ''),
+		       COALESCE(helm_repo_url, ''), COALESCE(helm_chart, ''), COALESCE(helm_chart_version, ''),
+		       COALESCE(helm_value_files, '[]'::jsonb), COALESCE(helm_values_from, '[]'::jsonb),
+		       COALESCE(changed_files, '[]'::jsonb), COALESCE(failure_reason, ''),
 		       COALESCE(workload_kind, ''), COALESCE(workload_name, ''), COALESCE(workload_selector, ''),
 		       updated_at
 		FROM remediation_outcomes
@@ -775,7 +817,11 @@ func queryDashboardRemediations(ctx context.Context, db *sql.DB, limit int) []da
 	for rows.Next() {
 		var row dashboardRemediationRow
 		var changedFiles []byte
-		if err := rows.Scan(&row.ID, &row.InvestigationID, &row.Namespace, &row.PodName, &row.DiagnosisCategory, &row.PatchStrategy, &row.Status, &row.RepoOwner, &row.RepoName, &row.BaseBranch, &row.HeadBranch, &row.PRURL, &row.PRTitle, &row.GitOpsController, &row.GitOpsApp, &row.GitOpsNamespace, &row.GitOpsRepoURL, &row.GitOpsRevision, &row.GitOpsPath, &row.ManifestType, &row.OverlayRole, &row.Environment, &row.Region, &changedFiles, &row.FailureReason, &row.WorkloadKind, &row.WorkloadName, &row.WorkloadSelector, &row.UpdatedAt); err == nil {
+		var helmValueFiles []byte
+		var helmValuesFrom []byte
+		if err := rows.Scan(&row.ID, &row.InvestigationID, &row.Namespace, &row.PodName, &row.DiagnosisCategory, &row.PatchStrategy, &row.Status, &row.RepoOwner, &row.RepoName, &row.BaseBranch, &row.HeadBranch, &row.PRURL, &row.PRTitle, &row.GitOpsController, &row.GitOpsApp, &row.GitOpsNamespace, &row.GitOpsRepoURL, &row.GitOpsRevision, &row.GitOpsPath, &row.ManifestType, &row.OverlayRole, &row.Environment, &row.Region, &row.HelmReleaseName, &row.HelmNamespace, &row.HelmRepoURL, &row.HelmChart, &row.HelmChartVersion, &helmValueFiles, &helmValuesFrom, &changedFiles, &row.FailureReason, &row.WorkloadKind, &row.WorkloadName, &row.WorkloadSelector, &row.UpdatedAt); err == nil {
+			row.HelmValueFiles = dashboardStringList(helmValueFiles)
+			row.HelmValuesFrom = dashboardStringList(helmValuesFrom)
 			row.ChangedFiles = dashboardChangedFilePaths(changedFiles)
 			out = append(out, row)
 		}
@@ -887,6 +933,7 @@ func dashboardGitOpsSources(rows []dashboardRemediationRow) []DashboardGitOpsSou
 					Path:         gitops.Path,
 					ManifestType: gitops.ManifestType,
 					Overlay:      gitops.Overlay,
+					Helm:         gitops.Helm,
 				},
 				workloads: map[string]bool{},
 			}
@@ -996,6 +1043,14 @@ func dashboardChangedFilePaths(raw []byte) []string {
 	return files
 }
 
+func dashboardStringList(raw []byte) []string {
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	return nonEmptyDashboard(values...)
+}
+
 func dashboardIncidents(ctx context.Context, db *sql.DB, investigations []dashboardInvestigationRow, remByInvestigation map[int64]dashboardRemediationRow, remByPod map[string]dashboardRemediationRow) []DashboardIncident {
 	out := make([]DashboardIncident, 0, len(investigations))
 	for _, inv := range investigations {
@@ -1024,6 +1079,9 @@ func dashboardIncidents(ctx context.Context, db *sql.DB, investigations []dashbo
 			incident.PR = pr
 		}
 		incident.Graph, incident.Edges = queryDashboardGraph(ctx, db, inv.Namespace, inv.PodName, incident.Workload, inv.ClusterContext)
+		if incident.GitOps != nil && dashboardManifestIsHelm(incident.GitOps.ManifestType) {
+			incident.Graph, incident.Edges = dashboardHelmGraph(incident.GitOps, incident.PR, incident.Graph, incident.Edges)
+		}
 		out = append(out, incident)
 	}
 	return out
@@ -1119,6 +1177,23 @@ func dashboardGitOps(rem dashboardRemediationRow) *DashboardGitOpsMapping {
 		Path:         rem.GitOpsPath,
 		ManifestType: rem.ManifestType,
 		Overlay:      overlay,
+		Helm:         dashboardHelmMapping(rem),
+	}
+}
+
+func dashboardHelmMapping(rem dashboardRemediationRow) *DashboardHelmMapping {
+	if !dashboardManifestIsHelm(rem.ManifestType) &&
+		rem.HelmReleaseName == "" && rem.HelmChart == "" && len(rem.HelmValueFiles) == 0 && len(rem.HelmValuesFrom) == 0 {
+		return nil
+	}
+	return &DashboardHelmMapping{
+		ReleaseName:  rem.HelmReleaseName,
+		Namespace:    rem.HelmNamespace,
+		Chart:        rem.HelmChart,
+		ChartVersion: rem.HelmChartVersion,
+		RepoURL:      rem.HelmRepoURL,
+		ValueFiles:   rem.HelmValueFiles,
+		ValuesFrom:   rem.HelmValuesFrom,
 	}
 }
 
@@ -1136,7 +1211,95 @@ func dashboardPR(rem dashboardRemediationRow) *DashboardRecommendedPR {
 		Risk:             dashboardRisk(rem),
 		ApproverRequired: rem.Status == "pending_approval" || rem.Status == "generated",
 		URL:              rem.PRURL,
+		PatchTarget:      dashboardPatchTarget(rem),
+		Reason:           dashboardPatchReason(rem),
+		Avoided:          dashboardPatchAvoided(rem),
+		Summary:          dashboardPatchSummary(rem),
 	}
+}
+
+func dashboardPatchTarget(rem dashboardRemediationRow) string {
+	if dashboardManifestIsHelm(rem.ManifestType) {
+		for _, file := range rem.ChangedFiles {
+			if isDashboardValuesFile(file) {
+				return file
+			}
+		}
+		if len(rem.HelmValueFiles) > 0 {
+			return rem.HelmValueFiles[len(rem.HelmValueFiles)-1]
+		}
+		if rem.ManifestType == "flux-helmrelease" {
+			return "HelmRelease spec.values"
+		}
+		return "Helm chart values"
+	}
+	if len(rem.ChangedFiles) > 0 {
+		return rem.ChangedFiles[0]
+	}
+	return ""
+}
+
+func dashboardPatchReason(rem dashboardRemediationRow) string {
+	if dashboardManifestIsHelm(rem.ManifestType) {
+		return "Workload is Helm-managed, so Fixora patches chart values or HelmRelease values instead of rendered Kubernetes output."
+	}
+	if rem.ManifestType == "kustomize" {
+		return "Workload is Kustomize-managed, so Fixora uses an overlay patch path."
+	}
+	return "Fixora patches the discovered GitOps source manifest for the affected workload."
+}
+
+func dashboardPatchAvoided(rem dashboardRemediationRow) string {
+	if dashboardManifestIsHelm(rem.ManifestType) {
+		return "Rendered Pod/Deployment manifest"
+	}
+	if rem.ManifestType == "kustomize" {
+		return "Direct base manifest edit"
+	}
+	return ""
+}
+
+func dashboardPatchSummary(rem dashboardRemediationRow) []string {
+	var summary []string
+	if dashboardManifestIsHelm(rem.ManifestType) {
+		if target := dashboardPatchTarget(rem); target != "" {
+			summary = append(summary, "Targeted "+target)
+		}
+		if rem.HelmChart != "" {
+			label := rem.HelmChart
+			if rem.HelmChartVersion != "" {
+				label += "@" + rem.HelmChartVersion
+			}
+			summary = append(summary, "Chart "+label)
+		}
+		if len(rem.ChangedFiles) > 0 && !dashboardChangedTemplates(rem.ChangedFiles) {
+			summary = append(summary, "No template files changed")
+		}
+	}
+	if len(summary) == 0 && len(rem.ChangedFiles) > 0 {
+		summary = append(summary, fmt.Sprintf("Changed %d file(s)", len(rem.ChangedFiles)))
+	}
+	return summary
+}
+
+func dashboardChangedTemplates(files []string) bool {
+	for _, file := range files {
+		if strings.Contains(strings.ToLower(file), "/templates/") {
+			return true
+		}
+	}
+	return false
+}
+
+func dashboardManifestIsHelm(manifestType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(manifestType))
+	return normalized == "helm" || normalized == "flux-helmrelease" || strings.Contains(normalized, "helm")
+}
+
+func isDashboardValuesFile(file string) bool {
+	base := strings.ToLower(path.Base(file))
+	return (strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml")) &&
+		(strings.HasPrefix(base, "values") || strings.Contains(base, "values"))
 }
 
 func dashboardGuardrails(rem dashboardRemediationRow) []DashboardGuardrail {
@@ -1145,13 +1308,84 @@ func dashboardGuardrails(rem dashboardRemediationRow) []DashboardGuardrail {
 	}
 	renderStatus := dashboardRenderGuardrailStatus(rem)
 	remediationStatus := dashboardRemediationGuardrailStatus(rem.Status)
-	return []DashboardGuardrail{
+	guardrails := []DashboardGuardrail{
 		{Label: "Identity match", Status: "passed", Detail: "Target workload matched GitOps source metadata."},
 		{Label: "Privileged paths blocked", Status: "passed", Detail: "No protected paths were changed."},
 		{Label: "Duplicate PR check", Status: "passed", Detail: "No active remediation was found for this workload and branch."},
-		{Label: "Render validation", Status: renderStatus, Detail: dashboardRenderGuardrailDetail(rem, renderStatus)},
-		{Label: "Remediation state", Status: remediationStatus, Detail: dashboardRemediationGuardrailDetail(rem)},
 	}
+	if dashboardManifestIsHelm(rem.ManifestType) {
+		guardrails = append(guardrails,
+			DashboardGuardrail{Label: "Helm source detected", Status: "passed", Detail: dashboardHelmSourceDetail(rem)},
+			DashboardGuardrail{Label: "Values file selected", Status: dashboardValuesFileGuardrailStatus(rem), Detail: dashboardValuesFileGuardrailDetail(rem)},
+			DashboardGuardrail{Label: "Image tag pinned", Status: dashboardImagePinGuardrailStatus(rem), Detail: dashboardImagePinGuardrailDetail(rem)},
+			DashboardGuardrail{Label: "Template edit avoided", Status: dashboardTemplateEditGuardrailStatus(rem), Detail: dashboardTemplateEditGuardrailDetail(rem)},
+		)
+	}
+	guardrails = append(guardrails,
+		DashboardGuardrail{Label: "Render validation", Status: renderStatus, Detail: dashboardRenderGuardrailDetail(rem, renderStatus)},
+		DashboardGuardrail{Label: "Remediation state", Status: remediationStatus, Detail: dashboardRemediationGuardrailDetail(rem)},
+	)
+	return guardrails
+}
+
+func dashboardHelmSourceDetail(rem dashboardRemediationRow) string {
+	parts := nonEmptyDashboard(rem.HelmChart, rem.HelmChartVersion, rem.HelmReleaseName)
+	if len(parts) == 0 {
+		return "Fixora resolved this workload as Helm-managed."
+	}
+	return "Resolved " + strings.Join(parts, " · ")
+}
+
+func dashboardValuesFileGuardrailStatus(rem dashboardRemediationRow) string {
+	if !dashboardManifestIsHelm(rem.ManifestType) {
+		return "skipped"
+	}
+	if len(rem.HelmValueFiles) > 0 || strings.Contains(strings.ToLower(strings.Join(rem.ChangedFiles, "\n")), "values") || rem.ManifestType == "flux-helmrelease" {
+		return "passed"
+	}
+	return "pending"
+}
+
+func dashboardValuesFileGuardrailDetail(rem dashboardRemediationRow) string {
+	if target := dashboardPatchTarget(rem); target != "" {
+		return "Selected " + target + " as the Helm remediation target."
+	}
+	return "Waiting for an active values file or HelmRelease values target."
+}
+
+func dashboardImagePinGuardrailStatus(rem dashboardRemediationRow) string {
+	reason := strings.ToLower(rem.FailureReason)
+	if strings.Contains(reason, "replacement image") || strings.Contains(reason, "non-latest") || strings.Contains(reason, "allowlisted") {
+		return "failed"
+	}
+	if rem.PatchStrategy == "image" || strings.Contains(strings.ToLower(strings.Join(rem.ChangedFiles, "\n")), "values") {
+		return "passed"
+	}
+	return "skipped"
+}
+
+func dashboardImagePinGuardrailDetail(rem dashboardRemediationRow) string {
+	if dashboardImagePinGuardrailStatus(rem) == "failed" && rem.FailureReason != "" {
+		return truncateDashboard(rem.FailureReason, 140)
+	}
+	if rem.PatchStrategy == "image" {
+		return "Replacement images must be pinned and architecture-approved before PR creation."
+	}
+	return "No image replacement was detected in this remediation."
+}
+
+func dashboardTemplateEditGuardrailStatus(rem dashboardRemediationRow) string {
+	if dashboardChangedTemplates(rem.ChangedFiles) {
+		return "pending"
+	}
+	return "passed"
+}
+
+func dashboardTemplateEditGuardrailDetail(rem dashboardRemediationRow) string {
+	if dashboardChangedTemplates(rem.ChangedFiles) {
+		return "Template files changed; render validation must prove the chart output is safe."
+	}
+	return "Remediation stayed in values or HelmRelease configuration."
 }
 
 func dashboardRenderGuardrailStatus(rem dashboardRemediationRow) string {
@@ -1307,6 +1541,84 @@ func fallbackDashboardGraph(workload DashboardWorkload, clusterContext string) (
 	if len(nodes) == 1 {
 		return nodes, edges
 	}
+	return nodes, edges
+}
+
+func dashboardHelmGraph(gitops *DashboardGitOpsMapping, pr *DashboardRecommendedPR, nodes []DashboardDependencyNode, edges [][2]string) ([]DashboardDependencyNode, [][2]string) {
+	if gitops == nil || len(nodes) == 0 {
+		return nodes, edges
+	}
+	seen := map[string]bool{}
+	for _, node := range nodes {
+		seen[node.ID] = true
+	}
+	addNode := func(node DashboardDependencyNode) {
+		if node.ID == "" || seen[node.ID] {
+			return
+		}
+		seen[node.ID] = true
+		nodes = append(nodes, node)
+	}
+	addEdge := func(from, to string) {
+		if from == "" || to == "" {
+			return
+		}
+		for _, edge := range edges {
+			if edge[0] == from && edge[1] == to {
+				return
+			}
+		}
+		edges = append(edges, [2]string{from, to})
+	}
+
+	helm := gitops.Helm
+	values := []string{}
+	if helm != nil {
+		values = append(values, helm.ValueFiles...)
+	}
+	if pr != nil && pr.PatchTarget != "" && isDashboardValuesFile(pr.PatchTarget) {
+		values = append(values, pr.PatchTarget)
+	}
+	values = nonEmptyDashboard(values...)
+
+	helmReleaseID := ""
+	if strings.Contains(strings.ToLower(gitops.ManifestType), "flux-helmrelease") {
+		helmReleaseID = "helmrelease"
+		label := "HelmRelease"
+		detail := firstNonEmpty(gitops.App, "release")
+		if helm != nil {
+			detail = firstNonEmpty(helm.ReleaseName, detail)
+		}
+		addNode(DashboardDependencyNode{ID: helmReleaseID, Label: label, Detail: detail, Kind: "helm", X: 60, Y: 42})
+		addEdge(helmReleaseID, "workload")
+	}
+
+	chartID := "helm-chart"
+	chartDetail := "Chart"
+	if helm != nil {
+		chartDetail = firstNonEmpty(helm.Chart, chartDetail)
+		if helm.ChartVersion != "" {
+			chartDetail += "@" + helm.ChartVersion
+		}
+	}
+	addNode(DashboardDependencyNode{ID: chartID, Label: "Helm Chart", Detail: chartDetail, Kind: "helm", X: 60, Y: 86})
+	if helmReleaseID != "" {
+		addEdge(helmReleaseID, chartID)
+	} else {
+		addEdge(chartID, "workload")
+	}
+
+	for i, valueFile := range values {
+		if i >= 4 {
+			break
+		}
+		id := fmt.Sprintf("helm-values-%d", i)
+		addNode(DashboardDependencyNode{ID: id, Label: "Values file", Detail: valueFile, Kind: "config", X: 240 + (i%2)*160, Y: 28 + (i/2)*52})
+		addEdge(id, chartID)
+	}
+	addNode(DashboardDependencyNode{ID: "helm-render", Label: "Rendered workload", Detail: firstNonEmpty(gitops.Path, "helm template"), Kind: "neutral", X: 240, Y: 126})
+	addEdge(chartID, "helm-render")
+	addEdge("helm-render", "workload")
 	return nodes, edges
 }
 
