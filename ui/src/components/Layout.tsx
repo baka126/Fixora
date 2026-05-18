@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Check,
   ChevronDown,
+  Boxes,
   Database,
   FileCode2,
   FileText,
@@ -26,6 +27,7 @@ import type { DashboardIntegration } from '../types';
 
 const navItems = [
   { to: '/', icon: TriangleAlert, label: 'Incidents' },
+  { to: '/workloads', icon: Boxes, label: 'Workloads' },
   { to: '/alerts', icon: Activity, label: 'Alerts' },
   { to: '/remediations', icon: GitPullRequestArrow, label: 'Remediations' },
   { to: '/gitops', icon: FileCode2, label: 'GitOps Sources' },

@@ -117,6 +117,10 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
         </div>
       )}
 
+      {kind === 'gitops' && <GitOpsTopology rows={filteredGitOps} />}
+
+      {kind === 'audit' && <AuditRCAOverview rows={filteredAuditEvents} />}
+
       <section className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
         <header className="flex items-center justify-between border-b border-[#e5e7eb] px-5 py-4">
           <div className="flex items-start gap-3">
@@ -253,10 +257,42 @@ const GitOpsSources = ({ rows }: { rows: DashboardGitOpsSource[] }) => {
               <span className="text-[#94a3b8]">Not Helm</span>
             )}
           </td>
-          <td className="px-4 py-3">{row.workloads}</td>
+          <td className="px-4 py-3">
+            <GitOpsWorkloads source={row} />
+          </td>
         </tr>
       ))}
     </Table>
+  );
+};
+
+const GitOpsWorkloads = ({ source }: { source: DashboardGitOpsSource }) => {
+  const [open, setOpen] = useState(false);
+  const refs = source.workloadRefs || [];
+  if (!refs.length) {
+    return <span className="text-[#647084]">{source.workloads}</span>;
+  }
+  const visible = open ? refs : refs.slice(0, 3);
+  return (
+    <div className="min-w-[180px]">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="rounded-md bg-[#eff6ff] px-2 py-1 text-[11px] font-semibold text-[#2563eb] hover:bg-[#dbeafe]"
+      >
+        {source.workloads} workload{source.workloads === 1 ? '' : 's'}
+      </button>
+      <div className="mt-2 flex max-w-[320px] flex-wrap gap-1.5">
+        {visible.map((workload) => (
+          <span key={`${workload.namespace}/${workload.kind}/${workload.name}`} className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] px-2 py-1 text-[11px] text-[#334155]">
+            {workload.namespace ? `${workload.namespace}/` : ''}{workload.name}
+          </span>
+        ))}
+        {!open && refs.length > visible.length && (
+          <span className="rounded-md bg-[#f1f5f9] px-2 py-1 text-[11px] text-[#647084]">+{refs.length - visible.length} more</span>
+        )}
+      </div>
+    </div>
   );
 };
 
@@ -313,6 +349,80 @@ const NodeCostList = ({ nodes, activeNodes }: { nodes: DashboardNodeCost[]; acti
     )}
   </div>
 );
+
+const GitOpsTopology = ({ rows }: { rows: DashboardGitOpsSource[] }) => {
+  if (!rows.length) return null;
+  const helm = rows.filter((row) => /helm/i.test(row.manifestType) || row.helm).length;
+  const kustomize = rows.filter((row) => /kustomize/i.test(row.manifestType)).length;
+  const controllers = new Set(rows.map((row) => row.controller).filter(Boolean));
+  return (
+    <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <section className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-[15px] font-semibold text-[#111827]">GitOps Topology</h2>
+            <p className="mt-1 text-[12px] text-[#647084]">Controller to repository to manifest source mapping, including Helm values and overlays when available.</p>
+          </div>
+          <span className="rounded-md bg-[#eff6ff] px-2 py-1 text-[11px] font-medium text-[#2563eb]">{rows.length} sources</span>
+        </div>
+        <div className="max-h-[300px] space-y-3 overflow-y-auto pr-1">
+          {rows.map((row) => (
+            <div key={row.id} className="grid gap-2 rounded-lg border border-[#e5e7eb] p-3 md:grid-cols-[180px_1fr_180px] md:items-center">
+              <TopologyNode icon={<FileCode2 className="h-4 w-4" />} label={row.controller || 'GitOps'} detail={row.app || row.namespace || 'application'} tone="blue" />
+              <div className="min-w-0 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-3 py-2">
+                <div className="truncate text-[12px] font-semibold text-[#111827]">{row.repo}</div>
+                <div className="truncate text-[11px] text-[#647084]">{row.revision || 'revision unknown'} · {row.path || 'repository root'}</div>
+              </div>
+              <TopologyNode icon={<GitBranch className="h-4 w-4" />} label={readableManifestType(row.manifestType)} detail={row.overlay || row.helm?.valueFiles?.[0] || `${row.workloads} workloads`} tone={row.helm ? 'green' : 'orange'} />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+        <h2 className="text-[15px] font-semibold text-[#111827]">Source Coverage</h2>
+        <div className="mt-4 space-y-3">
+          <CoverageRow label="Controllers" value={`${controllers.size}`} detail={Array.from(controllers).join(', ') || 'Unknown'} />
+          <CoverageRow label="Helm-aware sources" value={`${helm}`} detail="chart, version, values files, or HelmRelease" />
+          <CoverageRow label="Kustomize overlays" value={`${kustomize}`} detail="overlay and patch sources" />
+          <CoverageRow label="Mapped workloads" value={`${rows.reduce((sum, row) => sum + (row.workloads || 0), 0)}`} detail="reported by dashboard snapshot" />
+        </div>
+      </section>
+    </div>
+  );
+};
+
+const TopologyNode = ({ icon, label, detail, tone }: { icon: ReactNode; label: string; detail: string; tone: 'blue' | 'green' | 'orange' }) => {
+  const classes = tone === 'green' ? 'bg-[#f0fdf4] text-[#15803d]' : tone === 'orange' ? 'bg-[#fff7ed] text-[#ea580c]' : 'bg-[#eff6ff] text-[#2563eb]';
+  return (
+    <div className="min-w-0 rounded-md border border-[#e5e7eb] bg-white p-2">
+      <div className={`mb-2 inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-semibold ${classes}`}>{icon}{label || 'Unknown'}</div>
+      <div className="truncate text-[11px] text-[#647084]">{detail || 'Not reported'}</div>
+    </div>
+  );
+};
+
+const CoverageRow = ({ label, value, detail }: { label: string; value: string; detail: string }) => (
+  <div className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-3">
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-[12px] font-semibold text-[#111827]">{label}</span>
+      <span className="text-[18px] font-semibold text-[#2563eb]">{value}</span>
+    </div>
+    <div className="mt-1 truncate text-[11px] text-[#647084]">{detail}</div>
+  </div>
+);
+
+const AuditRCAOverview = ({ rows }: { rows: DashboardAuditEvent[] }) => {
+  if (!rows.length) return null;
+  const investigations = rows.filter((row) => row.type === 'Investigation');
+  const failures = rows.filter((row) => /fail|reject|block/i.test(`${row.status} ${row.detail}`));
+  return (
+    <div className="mb-4 grid gap-3 md:grid-cols-3">
+      <RemediationStat icon={<Activity className="h-4 w-4" />} label="Investigations" value={`${investigations.length}`} tone="text-[#2563eb]" />
+      <RemediationStat icon={<ShieldAlert className="h-4 w-4" />} label="Blocked or failed decisions" value={`${failures.length}`} tone="text-[#dc2626]" />
+      <RemediationStat icon={<FileText className="h-4 w-4" />} label="Audit events in range" value={`${rows.length}`} tone="text-[#15803d]" />
+    </div>
+  );
+};
 
 const AuditEvents = ({ rows, onSelect }: { rows: DashboardAuditEvent[]; onSelect: (id: string) => void }) => {
   if (!rows.length) return <Empty title="No audit events recorded yet" message="Investigations, alerts, and remediation decisions will be logged here." />;

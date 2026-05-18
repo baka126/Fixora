@@ -499,7 +499,13 @@ const IncidentTable = ({
                       <td className="px-3 py-4">
                         <StatusChip value={incident.status} severity={incident.severity} />
                       </td>
-                      <td className="max-w-[220px] px-3 py-4 text-[#111827]">{incident.cause || 'Pending root cause'}</td>
+                      <td className="max-w-[260px] px-3 py-4 text-[#111827]">
+                        <ExpandableText
+                          value={incident.cause || 'Pending root cause'}
+                          collapsedClassName="line-clamp-3"
+                          buttonLabel="Read root cause"
+                        />
+                      </td>
                       <td className="px-3 py-4">
                         <Confidence value={incident.confidence} />
                       </td>
@@ -568,6 +574,14 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
           )}
         </DrawerCard>
 
+        <DrawerCard icon={<FileText className="h-4 w-4 text-[#2563eb]" />} title="Log Patterns">
+          <IncidentLogPatterns incident={incident} />
+        </DrawerCard>
+
+        <DrawerCard icon={<AlertCircle className="h-4 w-4 text-[#f97316]" />} title="RCA Explainability">
+          <IncidentRCA incident={incident} />
+        </DrawerCard>
+
         <DrawerCard icon={<FileCode2 className="h-4 w-4 text-[#2563eb]" />} title="GitOps Mapping">
           {incident.gitops ? (
             <div>
@@ -607,6 +621,10 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
             <MiniEmpty message="Guardrail results will appear after remediation analysis." />
           )}
         </DrawerCard>
+
+        <DrawerCard icon={<SlidersIcon />} title="Policy & SLO">
+          <IncidentPolicy incident={incident} />
+        </DrawerCard>
       </div>
     )}
   </aside>
@@ -626,15 +644,147 @@ const DrawerCard = ({ icon, title, children }: { icon: ReactNode; title: string;
 );
 
 const EvidenceRow = ({ item }: { item: DashboardEvidence }) => (
-  <div className="grid grid-cols-[84px_1fr_auto] items-center gap-3 px-3 py-3 text-[12px]">
+  <div className="grid grid-cols-[84px_1fr_auto] items-start gap-3 px-3 py-3 text-[12px]">
     <div className="font-semibold text-[#111827]">{item.label}</div>
-    <div className="line-clamp-2 text-[#374151]">{item.value}</div>
+    <ExpandableText
+      value={item.value}
+      collapsedClassName="line-clamp-2"
+      preserveWhitespace={/event|log|trace|stack/i.test(item.label)}
+      buttonLabel={`Read ${item.label}`}
+    />
     <div className="flex items-center gap-2">
       {!!item.count && <span className="rounded-full bg-[#dbeafe] px-2 py-0.5 text-[11px] font-semibold text-[#2563eb]">{item.count}</span>}
       {item.link && <button className="font-medium text-[#2563eb]">{item.link}</button>}
     </div>
   </div>
 );
+
+const ExpandableText = ({
+  value,
+  collapsedClassName,
+  preserveWhitespace = false,
+  buttonLabel = 'Read more',
+}: {
+  value: string;
+  collapsedClassName: string;
+  preserveWhitespace?: boolean;
+  buttonLabel?: string;
+}) => {
+  const [open, setOpen] = useState(false);
+  const isLong = (value || '').length > 140 || (value || '').includes('\n');
+  return (
+    <div className="min-w-0">
+      <div
+        className={`${open ? 'max-h-72 overflow-auto rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2' : collapsedClassName} ${preserveWhitespace ? 'whitespace-pre-wrap font-mono text-[11px] leading-5' : 'leading-5'} text-[#374151]`}
+        title={!open ? value : undefined}
+      >
+        {value}
+      </div>
+      {isLong && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen((current) => !current);
+          }}
+          className="mt-1 text-[11px] font-semibold text-[#2563eb] hover:underline"
+          aria-expanded={open}
+        >
+          {open ? 'Show less' : buttonLabel}
+        </button>
+      )}
+    </div>
+  );
+};
+
+const IncidentLogPatterns = ({ incident }: { incident: DashboardIncident }) => {
+  const logItems = (incident.evidence || []).filter((item) => /log|stack|trace|event|pattern/i.test(`${item.label} ${item.icon} ${item.value}`));
+  const backendPatterns = incident.logPatterns || [];
+  if (!logItems.length && !backendPatterns.length) {
+    return <MiniEmpty message="No log, event, or stack pattern has been attached to this incident yet." />;
+  }
+  return (
+    <div className="space-y-2 px-3 py-3">
+      {backendPatterns.slice(0, 4).map((item) => (
+        <div key={`${item.source}-${item.pattern}`} className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2">
+          <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-semibold text-[#111827]">
+            <span>{item.label}</span>
+            {!!item.count && <span className="rounded-full bg-[#dbeafe] px-2 py-0.5 text-[#2563eb]">{item.count}</span>}
+          </div>
+          <pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded bg-[#0f172a] p-2 text-[11px] leading-5 text-[#f8fafc]">{item.pattern}</pre>
+        </div>
+      ))}
+      {logItems.slice(0, 3).map((item) => (
+        <div key={`${item.label}-${item.value}`} className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2">
+          <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-semibold text-[#111827]">
+            <span>{item.label}</span>
+            {!!item.count && <span className="rounded-full bg-[#dbeafe] px-2 py-0.5 text-[#2563eb]">{item.count}</span>}
+          </div>
+          <pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded bg-[#0f172a] p-2 text-[11px] leading-5 text-[#f8fafc]">{item.value}</pre>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const IncidentRCA = ({ incident }: { incident: DashboardIncident }) => (
+  <div className="space-y-2 px-3 py-3 text-[12px]">
+    <KeyValueRows
+      compact
+      rows={[
+        ['Root cause', incident.rca?.summary || incident.cause || 'Pending'],
+        ['Confidence', `${incident.rca?.confidence ?? incident.confidence ?? 0}%`],
+        ['Signal', incident.rca?.signal || incident.source || 'Unknown'],
+        ['Risk', incident.rca?.risk || incident.risk || 'Unknown'],
+        ['Recommended action', incident.rca?.recommendedAction],
+        ['Negative feedback', incident.rca?.negativeFeedback],
+        ['Patch strategy', incident.pr?.strategy],
+        ['Patch target', incident.pr?.patchTarget],
+      ]}
+    />
+    {incident.pr?.reason && (
+      <div className="rounded-md border border-[#dbeafe] bg-[#eff6ff] p-2 text-[#1e3a8a]">
+        <div className="font-semibold">Why Fixora selected this remediation</div>
+        <p className="mt-1 leading-5">{incident.pr.reason}</p>
+      </div>
+    )}
+    {incident.pr?.summary?.length ? (
+      <div className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2">
+        <div className="mb-1 text-[11px] font-semibold uppercase text-[#647084]">Remediation summary</div>
+        <ul className="space-y-1 text-[#334155]">
+          {incident.pr.summary.map((item) => <li key={item}>{item}</li>)}
+        </ul>
+      </div>
+    ) : null}
+  </div>
+);
+
+const IncidentPolicy = ({ incident }: { incident: DashboardIncident }) => {
+  const requiresApproval = incident.pr?.approverRequired;
+  const renderGuardrail = incident.guardrails?.find((guardrail) => /render/i.test(guardrail.label));
+  const duplicateGuardrail = incident.guardrails?.find((guardrail) => /duplicate/i.test(guardrail.label));
+  const policy = incident.policyState;
+  return (
+    <div className="space-y-2 px-3 py-3 text-[12px]">
+      <KeyValueRows
+        compact
+        rows={[
+          ['Mode', policy?.mode],
+          ['Approval', policy?.approvalRequired || requiresApproval ? 'Required' : incident.pr ? 'Not required' : 'No PR candidate'],
+          ['Render check', renderGuardrail?.status || 'Pending'],
+          ['Duplicate PR', duplicateGuardrail?.status || 'Pending'],
+          ['Availability SLO', policy?.availabilitySlo ? `${(policy.availabilitySlo * 100).toFixed(2)}%` : 'Not configured in dashboard metadata'],
+          ['Burn rate', policy?.burnRateThreshold ? `${policy.burnRateThreshold}x` : 'Not configured in dashboard metadata'],
+        ]}
+      />
+      <div className="rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-2 text-[11px] leading-5 text-[#647084]">
+        SLO and remediation policy edits should use a dedicated safe settings API so the UI can show configured, missing, and last-rotated state without returning secret values.
+      </div>
+    </div>
+  );
+};
+
+const SlidersIcon = () => <Code2 className="h-4 w-4 text-[#647084]" />;
 
 const HelmMapping = ({ gitops }: { gitops: DashboardGitOpsMapping }) => {
   const helm = gitops.helm;
@@ -803,6 +953,7 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
   const edges = incident?.edges || [];
   const incidentId = incident?.id || null;
   const [graphState, setGraphState] = useState<GraphState>({ incidentId: null, selectedNodeId: null, collapsedNodeIds: new Set(), expanded: false });
+  const [graphKind, setGraphKind] = useState('all');
 
   const activeGraphState = graphState.incidentId === incidentId
     ? graphState
@@ -812,10 +963,12 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
   const expanded = activeGraphState.expanded;
 
   const visibleNodeIds = visibleGraphNodeIds(nodes, edges, collapsedNodeIds);
-  const visibleNodes = nodes.filter((node) => visibleNodeIds.has(node.id));
-  const visibleEdges = edges.filter(([from, to]) => visibleNodeIds.has(from) && visibleNodeIds.has(to) && !collapsedNodeIds.has(from));
+  const kindFilteredIds = new Set(nodes.filter((node) => graphKind === 'all' || normalizeGraphKind(node) === graphKind).map((node) => node.id));
+  const visibleNodes = nodes.filter((node) => visibleNodeIds.has(node.id) && kindFilteredIds.has(node.id));
+  const visibleEdges = edges.filter(([from, to]) => visibleNodeIds.has(from) && visibleNodeIds.has(to) && kindFilteredIds.has(from) && kindFilteredIds.has(to) && !collapsedNodeIds.has(from));
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || visibleNodes[0] || null;
   const hasChildren = !!selectedNode && edges.some(([from]) => from === selectedNode.id);
+  const graphKinds = Array.from(new Set(nodes.map(normalizeGraphKind).filter(Boolean))).sort();
 
   const toggleSelectedChildren = () => {
     if (!selectedNode) return;
@@ -833,12 +986,23 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
 
   return (
     <section className={`rounded-lg border border-[#e5e7eb] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${expanded ? 'fixed inset-2 z-40 sm:inset-4' : ''}`}>
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <h2 className="text-[14px] font-semibold text-[#111827]">Dependency Graph</h2>
         <AlertCircle className="h-3.5 w-3.5 text-[#94a3b8]" />
+        {nodes.length > 0 && (
+          <select
+            value={graphKind}
+            onChange={(event) => setGraphKind(event.target.value)}
+            className="ml-auto h-8 rounded-md border border-[#e5e7eb] bg-white px-2 text-[11px] font-medium text-[#374151] outline-none"
+            title="Filter graph resources"
+          >
+            <option value="all">All resources</option>
+            {graphKinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+          </select>
+        )}
         <button
           onClick={() => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { expanded: !expanded }))}
-          className="ml-auto grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151] hover:bg-[#f8fafc]"
+          className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151] hover:bg-[#f8fafc]"
           title={expanded ? 'Collapse graph' : 'Expand graph'}
         >
           {expanded ? <X className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
@@ -846,6 +1010,11 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
       </div>
       {incident && nodes.length ? (
         <div className={`grid gap-3 ${expanded ? 'h-[calc(100%-44px)] grid-cols-1 xl:grid-cols-[1fr_300px]' : 'grid-cols-1'}`}>
+          {nodes.length > 24 && !expanded && (
+            <div className="rounded-md border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-[11px] text-[#9a3412]">
+              Large graph detected. Use the resource filter or expanded view before inspecting dense dependency chains.
+            </div>
+          )}
           <GraphCanvas
             nodes={visibleNodes}
             edges={visibleEdges}
@@ -1213,6 +1382,21 @@ const graphNodeColor = (kind: string) => {
   if (lower.includes('stateful')) return '#0ea5e9';
   if (lower.includes('service')) return '#16a34a';
   return '#64748b';
+};
+
+const normalizeGraphKind = (node: DashboardDependencyNode) => {
+  const raw = `${node.kind || ''} ${node.label || ''}`.toLowerCase();
+  if (raw.includes('helm')) return 'Helm';
+  if (raw.includes('kustom')) return 'Kustomize';
+  if (raw.includes('deployment')) return 'Deployment';
+  if (raw.includes('stateful')) return 'StatefulSet';
+  if (raw.includes('daemon')) return 'DaemonSet';
+  if (raw.includes('config')) return 'ConfigMap';
+  if (raw.includes('secret')) return 'Secret';
+  if (raw.includes('service')) return 'Service';
+  if (raw.includes('ingress')) return 'Ingress';
+  if (raw.includes('pod')) return 'Pod';
+  return node.kind || node.label || 'Resource';
 };
 
 const KeyValueRows = ({ rows, compact = false }: { rows: [string, string | undefined][]; compact?: boolean }) => (

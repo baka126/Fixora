@@ -87,6 +87,42 @@ func TestDashboardWorkloadPrefersOwnerFromContext(t *testing.T) {
 	}
 }
 
+func TestDashboardWorkloadViewsExposeIncidentRCAAndPolicy(t *testing.T) {
+	incidents := []DashboardIncident{{
+		ID:          "investigation-7",
+		Workload:    DashboardWorkload{Kind: "Deployment", Name: "api", Namespace: "checkout", PodName: "api-123"},
+		Severity:    "critical",
+		Status:      "CrashLoopBackOff",
+		Evidence:    []DashboardEvidence{{Label: "Logs / stack trace", Value: "exec format error"}},
+		LogPatterns: []DashboardLogPattern{{Label: "Log pattern", Pattern: "exec format error", Source: "logs", Severity: "critical", Count: 1}},
+		RCA:         &DashboardRCA{Summary: "Architecture mismatch", Confidence: 91, Signal: "Logs", Risk: "Low risk"},
+		PolicyState: &DashboardWorkloadPolicy{Mode: "Click-to-fix", ApprovalRequired: true, AvailabilitySLO: 0.99},
+	}}
+	remediations := []DashboardRemediation{{
+		ID:       42,
+		Status:   "pr_opened",
+		Workload: DashboardWorkload{Kind: "Deployment", Name: "api", Namespace: "checkout", PodName: "api-123"},
+		GitOps:   &DashboardGitOpsMapping{Controller: "ArgoCD", App: "checkout-api", Repo: "github.com/acme/platform", Path: "overlays/prod"},
+	}}
+
+	got := dashboardWorkloadViews(nil, incidents, remediations, nil, nil, nil, DashboardPolicy{Mode: "Click-to-fix"}, 0.99, 14.4)
+	if len(got) != 1 {
+		t.Fatalf("workload view count = %d, want 1", len(got))
+	}
+	if got[0].LatestIncidentID != "investigation-7" || got[0].ActiveRemediationID != 42 {
+		t.Fatalf("workload ids = incident %q remediation %d, want investigation-7/42", got[0].LatestIncidentID, got[0].ActiveRemediationID)
+	}
+	if got[0].RCA == nil || got[0].RCA.Summary != "Architecture mismatch" {
+		t.Fatalf("RCA = %#v, want Architecture mismatch", got[0].RCA)
+	}
+	if got[0].PolicyState == nil || got[0].PolicyState.AvailabilitySLO != 0.99 {
+		t.Fatalf("policy = %#v, want availability SLO", got[0].PolicyState)
+	}
+	if got[0].GitOps == nil || got[0].GitOps.App != "checkout-api" {
+		t.Fatalf("gitops = %#v, want checkout-api", got[0].GitOps)
+	}
+}
+
 func TestFallbackDashboardGraphUsesRelatedResources(t *testing.T) {
 	nodes, edges := fallbackDashboardGraph(DashboardWorkload{Kind: "Deployment", Name: "api"}, `Related Resources:
 - ConfigMap/api-env

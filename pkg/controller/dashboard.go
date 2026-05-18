@@ -31,12 +31,14 @@ type DashboardSnapshot struct {
 	Integrations     []DashboardIntegration   `json:"integrations"`
 	Availability     []DashboardAvailability  `json:"availability"`
 	KPIs             []DashboardKPI           `json:"kpis"`
+	Workloads        []DashboardWorkloadView  `json:"workloads,omitempty"`
 	Incidents        []DashboardIncident      `json:"incidents"`
 	Remediations     []DashboardRemediation   `json:"remediations"`
 	GitOpsSources    []DashboardGitOpsSource  `json:"gitopsSources"`
 	Predictions      []DashboardPrediction    `json:"predictions"`
 	AuditEvents      []DashboardAuditEvent    `json:"auditEvents"`
 	Pipeline         []DashboardPipelineStage `json:"pipeline"`
+	Widgets          []DashboardWidget        `json:"widgets,omitempty"`
 	SettingsSections []DashboardSettings      `json:"settingsSections"`
 	ClusterCostMo    float64                  `json:"clusterCostMo"`
 	ActiveNodes      int                      `json:"activeNodes"`
@@ -80,22 +82,25 @@ type DashboardKPI struct {
 }
 
 type DashboardIncident struct {
-	ID         string                    `json:"id"`
-	Workload   DashboardWorkload         `json:"workload"`
-	Status     string                    `json:"status"`
-	Cause      string                    `json:"cause"`
-	Confidence int                       `json:"confidence"`
-	Source     string                    `json:"source"`
-	Age        string                    `json:"age"`
-	Severity   string                    `json:"severity"`
-	Priority   string                    `json:"priority"`
-	Risk       string                    `json:"risk"`
-	Evidence   []DashboardEvidence       `json:"evidence,omitempty"`
-	GitOps     *DashboardGitOpsMapping   `json:"gitops,omitempty"`
-	PR         *DashboardRecommendedPR   `json:"pr,omitempty"`
-	Guardrails []DashboardGuardrail      `json:"guardrails,omitempty"`
-	Graph      []DashboardDependencyNode `json:"graph,omitempty"`
-	Edges      [][2]string               `json:"edges,omitempty"`
+	ID          string                    `json:"id"`
+	Workload    DashboardWorkload         `json:"workload"`
+	Status      string                    `json:"status"`
+	Cause       string                    `json:"cause"`
+	Confidence  int                       `json:"confidence"`
+	Source      string                    `json:"source"`
+	Age         string                    `json:"age"`
+	Severity    string                    `json:"severity"`
+	Priority    string                    `json:"priority"`
+	Risk        string                    `json:"risk"`
+	Evidence    []DashboardEvidence       `json:"evidence,omitempty"`
+	GitOps      *DashboardGitOpsMapping   `json:"gitops,omitempty"`
+	PR          *DashboardRecommendedPR   `json:"pr,omitempty"`
+	Guardrails  []DashboardGuardrail      `json:"guardrails,omitempty"`
+	LogPatterns []DashboardLogPattern     `json:"logPatterns,omitempty"`
+	RCA         *DashboardRCA             `json:"rca,omitempty"`
+	PolicyState *DashboardWorkloadPolicy  `json:"policyState,omitempty"`
+	Graph       []DashboardDependencyNode `json:"graph,omitempty"`
+	Edges       [][2]string               `json:"edges,omitempty"`
 }
 
 type DashboardWorkload struct {
@@ -111,6 +116,73 @@ type DashboardEvidence struct {
 	Value string `json:"value"`
 	Count int    `json:"count,omitempty"`
 	Link  string `json:"link,omitempty"`
+}
+
+type DashboardLogPattern struct {
+	Label    string `json:"label"`
+	Pattern  string `json:"pattern"`
+	Source   string `json:"source"`
+	Severity string `json:"severity"`
+	Count    int    `json:"count,omitempty"`
+}
+
+type DashboardRCA struct {
+	Summary           string   `json:"summary"`
+	Confidence        int      `json:"confidence"`
+	Signal            string   `json:"signal"`
+	Risk              string   `json:"risk"`
+	RecommendedAction string   `json:"recommendedAction,omitempty"`
+	EvidenceUsed      []string `json:"evidenceUsed,omitempty"`
+	NegativeFeedback  string   `json:"negativeFeedback,omitempty"`
+}
+
+type DashboardWorkloadPolicy struct {
+	Mode              string  `json:"mode"`
+	AutoFix           bool    `json:"autoFix"`
+	ApprovalRequired  bool    `json:"approvalRequired"`
+	AvailabilitySLO   float64 `json:"availabilitySlo,omitempty"`
+	BurnRateThreshold float64 `json:"burnRateThreshold,omitempty"`
+	Status            string  `json:"status"`
+}
+
+type DashboardWorkloadCost struct {
+	MonthlyCost          float64 `json:"monthlyCost,omitempty"`
+	RequestedMonthlyCost float64 `json:"requestedMonthlyCost,omitempty"`
+	PricingSource        string  `json:"pricingSource,omitempty"`
+}
+
+type DashboardWorkloadView struct {
+	ID                  string                   `json:"id"`
+	Cluster             string                   `json:"cluster,omitempty"`
+	Workload            DashboardWorkload        `json:"workload"`
+	Health              string                   `json:"health"`
+	Status              string                   `json:"status"`
+	Desired             int32                    `json:"desired,omitempty"`
+	Ready               int32                    `json:"ready,omitempty"`
+	Incidents           int                      `json:"incidents"`
+	Remediations        int                      `json:"remediations"`
+	Predictions         int                      `json:"predictions"`
+	LatestIncidentID    string                   `json:"latestIncidentId,omitempty"`
+	ActiveRemediationID int64                    `json:"activeRemediationId,omitempty"`
+	GitOps              *DashboardGitOpsMapping  `json:"gitops,omitempty"`
+	Evidence            []DashboardEvidence      `json:"evidence,omitempty"`
+	LogPatterns         []DashboardLogPattern    `json:"logPatterns,omitempty"`
+	RCA                 *DashboardRCA            `json:"rca,omitempty"`
+	PolicyState         *DashboardWorkloadPolicy `json:"policyState,omitempty"`
+	Cost                DashboardWorkloadCost    `json:"cost,omitempty"`
+	Pods                []string                 `json:"pods,omitempty"`
+	Services            []string                 `json:"services,omitempty"`
+	Ingresses           []string                 `json:"ingresses,omitempty"`
+	Nodes               []string                 `json:"nodes,omitempty"`
+}
+
+type DashboardWidget struct {
+	ID     string                 `json:"id"`
+	Title  string                 `json:"title"`
+	Type   string                 `json:"type"`
+	Scope  string                 `json:"scope"`
+	Status string                 `json:"status"`
+	Data   map[string]interface{} `json:"data,omitempty"`
 }
 
 type DashboardGitOpsMapping struct {
@@ -179,6 +251,7 @@ type DashboardGitOpsSource struct {
 	Overlay      string                `json:"overlay,omitempty"`
 	Helm         *DashboardHelmMapping `json:"helm,omitempty"`
 	Workloads    int                   `json:"workloads"`
+	WorkloadRefs []DashboardWorkload   `json:"workloadRefs,omitempty"`
 }
 
 type DashboardPrediction struct {
@@ -493,7 +566,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 
 	snapshot.KPIs = dashboardKPIs(investigations, predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Pipeline = defaultDashboardPipeline(statusCounts, dashboardPipelineItems(remediations))
-	snapshot.Incidents = dashboardIncidents(ctx, db, world, investigations, remByInvestigation, remByPod)
+	snapshot.Incidents = dashboardIncidents(ctx, db, world, investigations, remByInvestigation, remByPod, snapshot.Policy, c.config.SLOAvailabilityObjective, c.config.SLOBurnRateThreshold)
 	snapshot.Remediations = dashboardRemediations(remediations)
 	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
 	snapshot.Predictions = dashboardPredictions(predictions)
@@ -509,6 +582,8 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.ClusterCostMo = clusterCost
 	snapshot.ActiveNodes = activeNodes
 	snapshot.NodeCosts = nodeCosts
+	snapshot.Workloads = dashboardWorkloadViews(world, snapshot.Incidents, snapshot.Remediations, snapshot.Predictions, snapshot.GitOpsSources, nodeCosts, snapshot.Policy, c.config.SLOAvailabilityObjective, c.config.SLOBurnRateThreshold)
+	snapshot.Widgets = dashboardWidgets(snapshot)
 
 	return snapshot
 }
@@ -950,12 +1025,31 @@ func dashboardGitOpsSources(rows []dashboardRemediationRow) []DashboardGitOpsSou
 	out := make([]DashboardGitOpsSource, 0, len(aggregates))
 	for _, aggregate := range aggregates {
 		aggregate.source.Workloads = len(aggregate.workloads)
+		aggregate.source.WorkloadRefs = dashboardGitOpsWorkloadRefs(aggregate.workloads)
 		out = append(out, aggregate.source)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Repo+out[i].Path < out[j].Repo+out[j].Path
 	})
 	return out
+}
+
+func dashboardGitOpsWorkloadRefs(workloads map[string]bool) []DashboardWorkload {
+	refs := make([]DashboardWorkload, 0, len(workloads))
+	for key := range workloads {
+		parts := strings.SplitN(key, "/", 2)
+		namespace := ""
+		name := key
+		if len(parts) == 2 {
+			namespace = parts[0]
+			name = parts[1]
+		}
+		refs = append(refs, DashboardWorkload{Kind: "Workload", Name: name, Namespace: namespace})
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].Namespace+"/"+refs[i].Name < refs[j].Namespace+"/"+refs[j].Name
+	})
+	return refs
 }
 
 func dashboardPredictions(rows []dashboardPredictionRow) []DashboardPrediction {
@@ -979,6 +1073,312 @@ func dashboardPredictions(rows []dashboardPredictionRow) []DashboardPrediction {
 		})
 	}
 	return out
+}
+
+func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident, remediations []DashboardRemediation, predictions []DashboardPrediction, gitopsSources []DashboardGitOpsSource, nodeCosts []DashboardNodeCost, policy DashboardPolicy, availabilitySLO, burnRateThreshold float64) []DashboardWorkloadView {
+	records := map[string]*DashboardWorkloadView{}
+	ensure := func(workload DashboardWorkload) *DashboardWorkloadView {
+		key := dashboardWorkloadKey(workload)
+		if records[key] == nil {
+			records[key] = &DashboardWorkloadView{
+				ID:          key,
+				Cluster:     "",
+				Workload:    workload,
+				Health:      "unknown",
+				Status:      "No live workload status has been captured yet.",
+				PolicyState: dashboardWorkloadPolicy(policy, dashboardRemediationRow{}, availabilitySLO, burnRateThreshold),
+			}
+		}
+		return records[key]
+	}
+
+	if world != nil {
+		for _, workload := range world.Workloads {
+			view := ensure(DashboardWorkload{Kind: workload.Kind, Name: workload.Name, Namespace: workload.Namespace})
+			view.Cluster = workload.Cluster
+			view.Status = firstNonEmpty(workload.Status, view.Status)
+			view.Desired = workload.Desired
+			view.Ready = workload.Ready
+			view.Health = dashboardWorkloadHealth(workload)
+			view.Pods = dashboardWorldPodNames(world.Pods, workload.Pods)
+			view.Services = dashboardWorldServiceNames(world.Services, workload.Services)
+			view.Ingresses = dashboardWorldIngressNames(world.Ingresses, workload.Ingresses)
+			view.Nodes = append([]string{}, workload.NodeNames...)
+			sort.Strings(view.Nodes)
+			view.Cost = dashboardWorkloadCost(workload.NodeNames, nodeCosts)
+		}
+	}
+
+	for _, incident := range incidents {
+		view := ensure(incident.Workload)
+		view.Incidents++
+		if view.LatestIncidentID == "" {
+			view.LatestIncidentID = incident.ID
+			view.Evidence = incident.Evidence
+			view.LogPatterns = incident.LogPatterns
+			view.RCA = incident.RCA
+			view.PolicyState = incident.PolicyState
+			view.GitOps = incident.GitOps
+			view.Status = firstNonEmpty(incident.Status, view.Status)
+			view.Health = incident.Severity
+		}
+		if view.GitOps == nil {
+			view.GitOps = incident.GitOps
+		}
+	}
+
+	for _, remediation := range remediations {
+		view := ensure(remediation.Workload)
+		view.Remediations++
+		if view.ActiveRemediationID == 0 && !dashboardRemediationClosed(remediation.Status) {
+			view.ActiveRemediationID = remediation.ID
+		}
+		if view.GitOps == nil {
+			view.GitOps = remediation.GitOps
+		}
+	}
+
+	for _, prediction := range predictions {
+		view := ensure(DashboardWorkload{Kind: "Pod", Name: prediction.PodName, Namespace: prediction.Namespace})
+		view.Predictions++
+		if view.Health == "unknown" && prediction.Risk != "" {
+			view.Health = prediction.Risk
+			view.Status = "Predictive signal: " + prediction.Risk
+		}
+	}
+
+	if len(gitopsSources) > 0 {
+		for _, source := range gitopsSources {
+			for _, view := range records {
+				if view.GitOps == nil && dashboardGitOpsSourceMatchesWorkload(source, view.Workload) {
+					view.GitOps = dashboardGitOpsMappingFromSource(source)
+				}
+			}
+		}
+	}
+
+	out := make([]DashboardWorkloadView, 0, len(records))
+	for _, record := range records {
+		if record.Health == "" {
+			record.Health = "unknown"
+		}
+		out = append(out, *record)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		hotI := out[i].Incidents > 0
+		hotJ := out[j].Incidents > 0
+		if hotI != hotJ {
+			return hotI
+		}
+		return out[i].Workload.Namespace+"/"+out[i].Workload.Kind+"/"+out[i].Workload.Name < out[j].Workload.Namespace+"/"+out[j].Workload.Kind+"/"+out[j].Workload.Name
+	})
+	if len(out) > 250 {
+		return out[:250]
+	}
+	return out
+}
+
+func dashboardWorkloadKey(workload DashboardWorkload) string {
+	return strings.Join([]string{workload.Namespace, workload.Kind, workload.Name}, "/")
+}
+
+func dashboardWorkloadHealth(workload *WorldWorkload) string {
+	if workload == nil {
+		return "unknown"
+	}
+	if workload.Desired > 0 && workload.Ready < workload.Desired {
+		return "degraded"
+	}
+	if strings.Contains(strings.ToLower(workload.Status), "failed") {
+		return "critical"
+	}
+	if workload.Ready > 0 || workload.Kind == "CronJob" {
+		return "healthy"
+	}
+	return "unknown"
+}
+
+func dashboardWorldPodNames(items map[string]*WorldPod, ids []string) []string {
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if item, ok := items[id]; ok {
+			names = append(names, item.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func dashboardWorldServiceNames(items map[string]*WorldService, ids []string) []string {
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if item, ok := items[id]; ok {
+			names = append(names, item.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func dashboardWorldIngressNames(items map[string]*WorldIngress, ids []string) []string {
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if item, ok := items[id]; ok {
+			names = append(names, item.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func dashboardGitOpsSourceHelmNamespace(source DashboardGitOpsSource) string {
+	if source.Helm == nil {
+		return ""
+	}
+	return source.Helm.Namespace
+}
+
+func dashboardGitOpsSourceMatchesWorkload(source DashboardGitOpsSource, workload DashboardWorkload) bool {
+	namespace := firstNonEmpty(source.Namespace, dashboardGitOpsSourceHelmNamespace(source))
+	if namespace != "" && namespace != workload.Namespace {
+		return false
+	}
+	names := []string{source.App, path.Base(source.Path)}
+	if source.Helm != nil {
+		names = append(names, source.Helm.ReleaseName, source.Helm.Chart)
+	}
+	for _, name := range names {
+		if strings.TrimSpace(name) == workload.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func dashboardGitOpsMappingFromSource(source DashboardGitOpsSource) *DashboardGitOpsMapping {
+	return &DashboardGitOpsMapping{
+		Controller:   source.Controller,
+		App:          source.App,
+		Namespace:    source.Namespace,
+		Repo:         source.Repo,
+		Revision:     source.Revision,
+		Path:         source.Path,
+		ManifestType: source.ManifestType,
+		Overlay:      source.Overlay,
+		Helm:         source.Helm,
+	}
+}
+
+func dashboardWorkloadCost(nodeNames []string, nodeCosts []DashboardNodeCost) DashboardWorkloadCost {
+	if len(nodeNames) == 0 || len(nodeCosts) == 0 {
+		return DashboardWorkloadCost{}
+	}
+	nodeSet := map[string]bool{}
+	for _, name := range nodeNames {
+		nodeSet[name] = true
+	}
+	var cost DashboardWorkloadCost
+	sources := map[string]bool{}
+	for _, node := range nodeCosts {
+		if !nodeSet[node.Name] {
+			continue
+		}
+		if node.RequestedMonthlyCost > 0 {
+			cost.RequestedMonthlyCost += node.RequestedMonthlyCost
+		}
+		if node.MonthlyCost > 0 {
+			cost.MonthlyCost += node.MonthlyCost
+		}
+		if node.PricingSource != "" {
+			sources[node.PricingSource] = true
+		}
+	}
+	if len(sources) > 0 {
+		keys := make([]string, 0, len(sources))
+		for source := range sources {
+			keys = append(keys, source)
+		}
+		sort.Strings(keys)
+		cost.PricingSource = strings.Join(keys, ", ")
+	}
+	return cost
+}
+
+func dashboardRemediationClosed(status string) bool {
+	return strings.Contains(status, "succeeded") || strings.Contains(status, "reverted") || strings.Contains(status, "closed")
+}
+
+func dashboardWidgets(snapshot DashboardSnapshot) []DashboardWidget {
+	return []DashboardWidget{
+		{
+			ID:     "workload-health",
+			Title:  "Workload health",
+			Type:   "summary",
+			Scope:  "cluster",
+			Status: "ready",
+			Data: map[string]interface{}{
+				"workloads":    len(snapshot.Workloads),
+				"incidents":    len(snapshot.Incidents),
+				"gitopsMapped": countDashboardMappedWorkloads(snapshot.Workloads),
+			},
+		},
+		{
+			ID:     "evidence-coverage",
+			Title:  "Evidence coverage",
+			Type:   "coverage",
+			Scope:  "incidents",
+			Status: "ready",
+			Data: map[string]interface{}{
+				"metrics": countIncidentsWithEvidence(snapshot.Incidents, "Metric proof"),
+				"events":  countIncidentsWithEvidence(snapshot.Incidents, "Cluster events"),
+				"logs":    countIncidentsWithEvidence(snapshot.Incidents, "Logs / stack trace"),
+			},
+		},
+		{
+			ID:     "gitops-topology",
+			Title:  "GitOps topology",
+			Type:   "topology",
+			Scope:  "sources",
+			Status: "ready",
+			Data: map[string]interface{}{
+				"sources": len(snapshot.GitOpsSources),
+				"helm":    countDashboardHelmSources(snapshot.GitOpsSources),
+			},
+		},
+	}
+}
+
+func countDashboardMappedWorkloads(workloads []DashboardWorkloadView) int {
+	count := 0
+	for _, workload := range workloads {
+		if workload.GitOps != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func countIncidentsWithEvidence(incidents []DashboardIncident, label string) int {
+	count := 0
+	for _, incident := range incidents {
+		for _, evidence := range incident.Evidence {
+			if evidence.Label == label {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+func countDashboardHelmSources(sources []DashboardGitOpsSource) int {
+	count := 0
+	for _, source := range sources {
+		if dashboardManifestIsHelm(source.ManifestType) || source.Helm != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func dashboardAuditEvents(investigations []dashboardInvestigationRow, remediations []dashboardRemediationRow, alerts []dashboardAlertRow) []DashboardAuditEvent {
@@ -1058,7 +1458,7 @@ func dashboardStringList(raw []byte) []string {
 	return nonEmptyDashboard(values...)
 }
 
-func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, investigations []dashboardInvestigationRow, remByInvestigation map[int64]dashboardRemediationRow, remByPod map[string]dashboardRemediationRow) []DashboardIncident {
+func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, investigations []dashboardInvestigationRow, remByInvestigation map[int64]dashboardRemediationRow, remByPod map[string]dashboardRemediationRow, policy DashboardPolicy, availabilitySLO, burnRateThreshold float64) []DashboardIncident {
 	out := make([]DashboardIncident, 0, len(investigations))
 	for _, inv := range investigations {
 		rem, ok := remByInvestigation[inv.ID]
@@ -1066,18 +1466,21 @@ func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, i
 			rem = remByPod[dashboardPodKey(inv.Namespace, inv.PodName)]
 		}
 		incident := DashboardIncident{
-			ID:         fmt.Sprintf("investigation-%d", inv.ID),
-			Workload:   dashboardWorkload(inv, rem),
-			Status:     firstNonEmpty(contextValue(inv.ClusterContext, "Reason"), inv.Reason),
-			Cause:      firstNonEmpty(shortRootCause(inv.RootCause), contextValue(inv.ClusterContext, "Diagnosis"), inv.Reason),
-			Confidence: inv.AIConfidence,
-			Source:     dashboardIncidentSource(inv),
-			Age:        humanAge(inv.Timestamp),
-			Severity:   dashboardSeverity(inv),
-			Priority:   dashboardPriority(inv),
-			Risk:       dashboardRisk(rem),
-			Evidence:   dashboardEvidence(inv),
-			Guardrails: dashboardGuardrails(rem),
+			ID:          fmt.Sprintf("investigation-%d", inv.ID),
+			Workload:    dashboardWorkload(inv, rem),
+			Status:      firstNonEmpty(contextValue(inv.ClusterContext, "Reason"), inv.Reason),
+			Cause:       firstNonEmpty(shortRootCause(inv.RootCause), contextValue(inv.ClusterContext, "Diagnosis"), inv.Reason),
+			Confidence:  inv.AIConfidence,
+			Source:      dashboardIncidentSource(inv),
+			Age:         humanAge(inv.Timestamp),
+			Severity:    dashboardSeverity(inv),
+			Priority:    dashboardPriority(inv),
+			Risk:        dashboardRisk(rem),
+			Evidence:    dashboardEvidence(inv),
+			Guardrails:  dashboardGuardrails(rem),
+			LogPatterns: dashboardLogPatterns(inv),
+			RCA:         dashboardRCA(inv, rem),
+			PolicyState: dashboardWorkloadPolicy(policy, rem, availabilitySLO, burnRateThreshold),
 		}
 		if gitops := dashboardGitOps(rem); gitops != nil {
 			incident.GitOps = gitops
@@ -1164,6 +1567,83 @@ func dashboardEvidence(inv dashboardInvestigationRow) []DashboardEvidence {
 		evidence = append(evidence, DashboardEvidence{Icon: "icon-chart", Label: "FinOps", Value: truncateDashboard(inv.FinOpsImpact, 180)})
 	}
 	return evidence
+}
+
+func dashboardLogPatterns(inv dashboardInvestigationRow) []DashboardLogPattern {
+	var patterns []DashboardLogPattern
+	if inv.StackTrace != "" {
+		patterns = append(patterns, DashboardLogPattern{
+			Label:    "Log pattern",
+			Pattern:  truncateDashboard(firstMeaningfulDashboardLine(inv.StackTrace), 220),
+			Source:   "logs",
+			Severity: dashboardSeverity(inv),
+			Count:    countNonEmptyLines(inv.StackTrace),
+		})
+	}
+	if inv.EventTimeline != "" {
+		patterns = append(patterns, DashboardLogPattern{
+			Label:    "Event pattern",
+			Pattern:  truncateDashboard(firstMeaningfulDashboardLine(inv.EventTimeline), 220),
+			Source:   "events",
+			Severity: dashboardSeverity(inv),
+			Count:    countNonEmptyLines(inv.EventTimeline),
+		})
+	}
+	return patterns
+}
+
+func dashboardRCA(inv dashboardInvestigationRow, rem dashboardRemediationRow) *DashboardRCA {
+	summary := firstNonEmpty(shortRootCause(inv.RootCause), contextValue(inv.ClusterContext, "Diagnosis"), inv.Reason)
+	if summary == "" && inv.ID == 0 {
+		return nil
+	}
+	evidenceUsed := []string{}
+	if inv.MetricProof != "" {
+		evidenceUsed = append(evidenceUsed, "metrics")
+	}
+	if inv.EventTimeline != "" {
+		evidenceUsed = append(evidenceUsed, "events")
+	}
+	if inv.StackTrace != "" {
+		evidenceUsed = append(evidenceUsed, "logs")
+	}
+	if inv.HistoricalPattern != "" {
+		evidenceUsed = append(evidenceUsed, "history")
+	}
+	return &DashboardRCA{
+		Summary:           summary,
+		Confidence:        inv.AIConfidence,
+		Signal:            dashboardIncidentSource(inv),
+		Risk:              dashboardRisk(rem),
+		RecommendedAction: dashboardPatchReason(rem),
+		EvidenceUsed:      evidenceUsed,
+		NegativeFeedback:  dashboardNegativeFeedback(inv, rem),
+	}
+}
+
+func dashboardNegativeFeedback(inv dashboardInvestigationRow, rem dashboardRemediationRow) string {
+	if rem.FailureReason != "" && (rem.Status == "production_failed" || rem.Status == "revert_opened" || rem.Status == "reverted" || rem.Status == "revert_failed") {
+		return truncateDashboard(rem.FailureReason, 180)
+	}
+	if strings.Contains(strings.ToLower(inv.HistoricalPattern), "failed") || strings.Contains(strings.ToLower(inv.HistoricalPattern), "revert") {
+		return truncateDashboard(inv.HistoricalPattern, 180)
+	}
+	return ""
+}
+
+func dashboardWorkloadPolicy(policy DashboardPolicy, rem dashboardRemediationRow, availabilitySLO, burnRateThreshold float64) *DashboardWorkloadPolicy {
+	if policy.Mode == "" {
+		return nil
+	}
+	approvalRequired := policy.Mode != "Auto-fix" || rem.Status == "pending_approval" || rem.Status == "generated"
+	return &DashboardWorkloadPolicy{
+		Mode:              policy.Mode,
+		AutoFix:           policy.Mode == "Auto-fix",
+		ApprovalRequired:  approvalRequired,
+		AvailabilitySLO:   availabilitySLO,
+		BurnRateThreshold: burnRateThreshold,
+		Status:            policy.Description,
+	}
 }
 
 func dashboardGitOps(rem dashboardRemediationRow) *DashboardGitOpsMapping {
@@ -2089,6 +2569,17 @@ func shortRootCause(value string) string {
 	}
 	lines := strings.Split(value, "\n")
 	return truncateDashboard(lines[0], 96)
+}
+
+func firstMeaningfulDashboardLine(value string) string {
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return security.ScrubPII(line)
+	}
+	return ""
 }
 
 func truncateDashboard(value string, limit int) string {

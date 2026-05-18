@@ -54,6 +54,39 @@ export interface DashboardEvidence {
   link?: string;
 }
 
+export interface DashboardLogPattern {
+  label: string;
+  pattern: string;
+  source: string;
+  severity: string;
+  count?: number;
+}
+
+export interface DashboardRCA {
+  summary: string;
+  confidence: number;
+  signal: string;
+  risk: string;
+  recommendedAction?: string;
+  evidenceUsed?: string[];
+  negativeFeedback?: string;
+}
+
+export interface DashboardWorkloadPolicy {
+  mode: string;
+  autoFix: boolean;
+  approvalRequired: boolean;
+  availabilitySlo?: number;
+  burnRateThreshold?: number;
+  status: string;
+}
+
+export interface DashboardWorkloadCost {
+  monthlyCost?: number;
+  requestedMonthlyCost?: number;
+  pricingSource?: string;
+}
+
 export interface DashboardGitOpsMapping {
   controller: string;
   app: string;
@@ -125,6 +158,9 @@ export interface DashboardIncident {
   gitops?: DashboardGitOpsMapping;
   pr?: DashboardRecommendedPR;
   guardrails?: DashboardGuardrail[];
+  logPatterns?: DashboardLogPattern[];
+  rca?: DashboardRCA;
+  policyState?: DashboardWorkloadPolicy;
   graph?: DashboardDependencyNode[];
   edges?: DashboardDependencyEdge[];
 }
@@ -157,6 +193,41 @@ export interface DashboardGitOpsSource {
   overlay?: string;
   helm?: DashboardHelmMapping;
   workloads: number;
+  workloadRefs?: DashboardWorkload[];
+}
+
+export interface DashboardWorkloadView {
+  id: string;
+  cluster?: string;
+  workload: DashboardWorkload;
+  health: string;
+  status: string;
+  desired?: number;
+  ready?: number;
+  incidents: number;
+  remediations: number;
+  predictions: number;
+  latestIncidentId?: string;
+  activeRemediationId?: number;
+  gitops?: DashboardGitOpsMapping;
+  evidence?: DashboardEvidence[];
+  logPatterns?: DashboardLogPattern[];
+  rca?: DashboardRCA;
+  policyState?: DashboardWorkloadPolicy;
+  cost?: DashboardWorkloadCost;
+  pods?: string[];
+  services?: string[];
+  ingresses?: string[];
+  nodes?: string[];
+}
+
+export interface DashboardWidget {
+  id: string;
+  title: string;
+  type: string;
+  scope: string;
+  status: string;
+  data?: Record<string, unknown>;
 }
 
 export interface Group {
@@ -287,12 +358,14 @@ export interface DashboardState {
   integrations: DashboardIntegration[];
   availability: DashboardAvailability[];
   kpis: DashboardKPI[];
+  workloads?: DashboardWorkloadView[];
   incidents: DashboardIncident[];
   remediations: DashboardRemediation[];
   gitopsSources: DashboardGitOpsSource[];
   predictions: DashboardPrediction[];
   auditEvents: DashboardAuditEvent[];
   pipeline: DashboardPipelineStage[];
+  widgets?: DashboardWidget[];
   settingsSections: DashboardSettingsSection[];
   clusterCostMo?: number;
   activeNodes?: number;
