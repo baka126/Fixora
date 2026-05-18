@@ -489,7 +489,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 		statusCounts["pending_approval"] = pendingCount
 	}
 
-	world, allPods := c.BuildWorldSnapshot(ctx)
+	world, allPods := c.CachedWorldSnapshot(ctx)
 
 	snapshot.KPIs = dashboardKPIs(investigations, predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Pipeline = defaultDashboardPipeline(statusCounts, dashboardPipelineItems(remediations))
@@ -505,7 +505,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.SymptomTrends = syms
 
 	// Add FinOps Cluster Cost
-	clusterCost, activeNodes, nodeCosts := c.calculateClusterCostSnapshot(ctx, allPods)
+	clusterCost, activeNodes, nodeCosts := c.calculateClusterCostSnapshotFromWorld(world, allPods)
 	snapshot.ClusterCostMo = clusterCost
 	snapshot.ActiveNodes = activeNodes
 	snapshot.NodeCosts = nodeCosts
@@ -2291,6 +2291,60 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context, pods []v1
 	sort.Slice(nodeCosts, func(i, j int) bool {
 		return nodeCosts[i].Name < nodeCosts[j].Name
 	})
+	return total, len(nodeCosts), nodeCosts
+}
+
+func (c *Controller) calculateClusterCostSnapshotFromWorld(world *WorldSnapshot, pods []v1.Pod) (float64, int, []DashboardNodeCost) {
+	if world == nil || len(world.Nodes) == 0 {
+		return 0, 0, nil
+	}
+	podsByNode := map[string][]v1.Pod{}
+	for _, pod := range pods {
+		if pod.Spec.NodeName != "" {
+			podsByNode[pod.Spec.NodeName] = append(podsByNode[pod.Spec.NodeName], pod)
+		}
+	}
+	nodeNames := make([]string, 0, len(world.Nodes))
+	for _, node := range world.Nodes {
+		nodeNames = append(nodeNames, node.Name)
+	}
+	sort.Strings(nodeNames)
+
+	var total float64
+	nodeCosts := make([]DashboardNodeCost, 0, len(nodeNames))
+	for _, name := range nodeNames {
+		node := world.Nodes[worldNodeID(name)]
+		if node == nil {
+			continue
+		}
+		cpuReq, memReq := nodeRequestedResources(podsByNode[node.Name])
+		row := DashboardNodeCost{
+			Name:               node.Name,
+			Vendor:             firstNonEmpty(node.Vendor, "unknown"),
+			Region:             firstNonEmpty(node.Region, "unknown"),
+			Zone:               node.Zone,
+			InstanceType:       firstNonEmpty(node.InstanceType, "unknown"),
+			CPURequestedCores:  cpuReq,
+			MemoryRequestedMiB: memReq / 1024 / 1024,
+			Pods:               len(podsByNode[node.Name]),
+			Status:             "pricing_unavailable",
+		}
+		switch {
+		case node.Vendor == "" || node.Region == "" || node.InstanceType == "":
+			row.Status = "metadata_missing"
+		case c.pricingProvider == nil:
+			row.Status = "pricing_not_configured"
+		default:
+			if profile, err := c.pricingProvider.GetProfileForInstance(node.Vendor, node.Region, node.InstanceType); err == nil && profile != nil {
+				row.MonthlyCost = ((profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)) * 730
+				row.RequestedMonthlyCost = ((profile.CPURatePerHour * cpuReq) + (profile.MemoryRatePerHour * (memReq / 1024 / 1024 / 1024))) * 730
+				row.PricingSource = profile.Name
+				row.Status = "priced"
+				total += row.MonthlyCost
+			}
+		}
+		nodeCosts = append(nodeCosts, row)
+	}
 	return total, len(nodeCosts), nodeCosts
 }
 

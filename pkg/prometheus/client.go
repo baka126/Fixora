@@ -326,7 +326,9 @@ func (c *Client) queryHTTPErrorRatiosByPod(window time.Duration) (map[string]flo
 		/
 		sum by (namespace, pod) (rate(http_requests_total[%s]))
 	`, promDuration(window), promDuration(window))
-	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, _, err := c.api.Query(ctx, query, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +359,9 @@ func (c *Client) GetTrafficEdges(window time.Duration, minRPS float64) ([]metric
 			rate(istio_requests_total{source_workload!="",destination_workload!=""}[%s])
 		) > %f
 	`, promDuration(window), minRPS)
-	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, _, err := c.api.Query(ctx, query, time.Now())
 	if err != nil {
 		return nil, err
 	}

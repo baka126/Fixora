@@ -113,6 +113,11 @@ type Controller struct {
 	customScrubbers []*regexp.Regexp
 	alertWatchMu    sync.RWMutex
 	alertWatches    map[string]time.Time
+	worldCacheMu    sync.RWMutex
+	worldCache      *WorldSnapshot
+	worldPods       []v1.Pod
+	worldCacheAt    time.Time
+	worldRefreshing bool
 }
 
 // NewController initializes a new diagnostic controller with all required clients.
@@ -147,6 +152,7 @@ func NewController(clientset kubernetes.Interface, dynamicClient dynamic.Interfa
 	if cfg.InfracostAPIKey != "" {
 		providers = append(providers, finops.NewInfracostClient(cfg.InfracostAPIKey))
 	}
+	providers = append(providers, finops.DefaultCatalogClient)
 	// Fallback to direct cloud APIs
 	providers = append(providers, finops.DefaultAWSClient)
 	providers = append(providers, finops.DefaultAzureClient)

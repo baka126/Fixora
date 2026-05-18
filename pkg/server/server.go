@@ -110,8 +110,22 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := json.NewEncoder(w).Encode(s.controller.DashboardSnapshot(r.Context())); err != nil {
+		if r.Context().Err() != nil || isClientDisconnect(err) {
+			slog.Debug("Dashboard client disconnected before response completed", "error", err)
+			return
+		}
 		slog.Error("Failed to encode dashboard snapshot", "error", err)
 	}
+}
+
+func isClientDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "i/o timeout")
 }
 
 func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
