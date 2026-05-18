@@ -148,8 +148,8 @@ export const Dashboard = () => {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 gap-0 2xl:grid-cols-[minmax(720px,1fr)_392px]">
-      <section className="min-w-0 space-y-4 p-3 sm:p-4">
+    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 items-start gap-0 2xl:grid-cols-[minmax(720px,1fr)_392px]">
+      <section className="min-w-0 self-start space-y-4 p-3 sm:p-4">
         {!!dashboard?.availability?.length && <AvailabilityBanner availability={dashboard.availability} />}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
@@ -503,7 +503,8 @@ const IncidentTable = ({
                         <ExpandableText
                           value={incident.cause || 'Pending root cause'}
                           collapsedClassName="line-clamp-3"
-                          buttonLabel="Read root cause"
+                          buttonLabel="More"
+                          alwaysExpandable
                         />
                       </td>
                       <td className="px-3 py-4">
@@ -534,7 +535,7 @@ const IncidentTable = ({
 };
 
 const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) => (
-  <aside className="border-t border-[#e5e7eb] bg-white p-3 2xl:border-l 2xl:border-t-0">
+  <aside className="self-start border-t border-[#e5e7eb] bg-white p-3 2xl:sticky 2xl:top-[76px] 2xl:max-h-[calc(100vh-76px)] 2xl:overflow-y-auto 2xl:border-l 2xl:border-t-0">
     {!incident ? (
       <EmptyState
         icon={<FileText className="h-8 w-8" />}
@@ -664,14 +665,16 @@ const ExpandableText = ({
   collapsedClassName,
   preserveWhitespace = false,
   buttonLabel = 'Read more',
+  alwaysExpandable = false,
 }: {
   value: string;
   collapsedClassName: string;
   preserveWhitespace?: boolean;
   buttonLabel?: string;
+  alwaysExpandable?: boolean;
 }) => {
   const [open, setOpen] = useState(false);
-  const isLong = (value || '').length > 140 || (value || '').includes('\n');
+  const isLong = alwaysExpandable || (value || '').length > 140 || (value || '').includes('\n');
   return (
     <div className="min-w-0">
       <div
@@ -957,8 +960,8 @@ const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) =
 
   const activeGraphState = graphState.incidentId === incidentId
     ? graphState
-    : { incidentId, selectedNodeId: nodes[0]?.id || null, collapsedNodeIds: new Set<string>(), expanded: false };
-  const selectedNodeId = activeGraphState.selectedNodeId || nodes[0]?.id || null;
+    : { incidentId, selectedNodeId: preferredGraphNodeId(nodes), collapsedNodeIds: new Set<string>(), expanded: false };
+  const selectedNodeId = activeGraphState.selectedNodeId || preferredGraphNodeId(nodes);
   const collapsedNodeIds = activeGraphState.collapsedNodeIds;
   const expanded = activeGraphState.expanded;
 
@@ -1172,9 +1175,16 @@ const graphStateForIncident = (
 ): GraphState => {
   const base = current.incidentId === incidentId
     ? current
-    : { incidentId, selectedNodeId: nodes[0]?.id || null, collapsedNodeIds: new Set<string>(), expanded: false };
+    : { incidentId, selectedNodeId: preferredGraphNodeId(nodes), collapsedNodeIds: new Set<string>(), expanded: false };
   return { ...base, ...patch, incidentId };
 };
+
+const preferredGraphNodeId = (nodes: DashboardDependencyNode[]) => (
+  nodes.find((node) => /helmrelease/i.test(`${node.label} ${node.kind}`))?.id
+  || nodes.find((node) => /helm/i.test(`${node.label} ${node.kind}`))?.id
+  || nodes[0]?.id
+  || null
+);
 
 const FlowNodeLabel = ({ node }: { node: DashboardDependencyNode }) => {
   const color = graphNodeColor(node.kind || node.label);

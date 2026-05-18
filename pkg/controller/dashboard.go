@@ -2154,6 +2154,17 @@ func worldDashboardGraph(world *WorldSnapshot, namespace, podName string, worklo
 		edges = append(edges, [2]string{from, to})
 	}
 
+	if helm := dashboardHelmOwnershipFromWorkload(w); helm.ReleaseName != "" || helm.Chart != "" {
+		releaseID := addNode("helm-release:"+helm.Namespace+":"+helm.ReleaseName, "HelmRelease", firstNonEmpty(helm.ReleaseName, "Helm release"), "helm", 58, 30)
+		if helm.Chart != "" {
+			chartID := addNode("helm-chart:"+helm.Namespace+":"+helm.Chart, "Helm Chart", helm.Chart, "helm", 58, 88)
+			addEdge(releaseID, chartID)
+			addEdge(chartID, "workload")
+		} else {
+			addEdge(releaseID, "workload")
+		}
+	}
+
 	serviceIDs := append([]string(nil), w.Services...)
 	sort.Strings(serviceIDs)
 	for i, serviceID := range serviceIDs {
@@ -2249,6 +2260,44 @@ func worldDashboardGraph(world *WorldSnapshot, namespace, podName string, worklo
 	return nodes, edges, true
 }
 
+type dashboardHelmOwnership struct {
+	ReleaseName string
+	Namespace   string
+	Chart       string
+}
+
+func dashboardHelmOwnershipFromWorkload(w *WorldWorkload) dashboardHelmOwnership {
+	if w == nil {
+		return dashboardHelmOwnership{}
+	}
+	labels := w.Labels
+	annotations := w.Annotations
+	managedByHelm := strings.EqualFold(labels["app.kubernetes.io/managed-by"], "Helm")
+	release := firstNonBlankDashboard(
+		annotations["meta.helm.sh/release-name"],
+		labels["app.kubernetes.io/instance"],
+		labels["release"],
+	)
+	chart := firstNonBlankDashboard(labels["helm.sh/chart"], labels["chart"])
+	if !managedByHelm && release == "" && chart == "" {
+		return dashboardHelmOwnership{}
+	}
+	return dashboardHelmOwnership{
+		ReleaseName: release,
+		Namespace:   firstNonBlankDashboard(annotations["meta.helm.sh/release-namespace"], w.Namespace),
+		Chart:       chart,
+	}
+}
+
+func firstNonBlankDashboard(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func fallbackDashboardGraph(workload DashboardWorkload, clusterContext string) ([]DashboardDependencyNode, [][2]string) {
 	nodes := []DashboardDependencyNode{{
 		ID: "workload", Label: firstNonEmpty(workload.Kind, "Pod"), Detail: workload.Name, X: 58, Y: 126, Kind: "active",
@@ -2319,17 +2368,12 @@ func dashboardHelmGraph(gitops *DashboardGitOpsMapping, pr *DashboardRecommended
 	}
 	values = nonEmptyDashboard(values...)
 
-	helmReleaseID := ""
-	if strings.Contains(strings.ToLower(gitops.ManifestType), "flux-helmrelease") {
-		helmReleaseID = "helmrelease"
-		label := "HelmRelease"
-		detail := firstNonEmpty(gitops.App, "release")
-		if helm != nil {
-			detail = firstNonEmpty(helm.ReleaseName, detail)
-		}
-		addNode(DashboardDependencyNode{ID: helmReleaseID, Label: label, Detail: detail, Kind: "helm", X: 60, Y: 42})
-		addEdge(helmReleaseID, "workload")
+	helmReleaseID := "helmrelease"
+	releaseDetail := firstNonEmpty(gitops.App, "release")
+	if helm != nil {
+		releaseDetail = firstNonEmpty(helm.ReleaseName, releaseDetail)
 	}
+	addNode(DashboardDependencyNode{ID: helmReleaseID, Label: "HelmRelease", Detail: releaseDetail, Kind: "helm", X: 60, Y: 42})
 
 	chartID := "helm-chart"
 	chartDetail := "Chart"
@@ -2340,11 +2384,7 @@ func dashboardHelmGraph(gitops *DashboardGitOpsMapping, pr *DashboardRecommended
 		}
 	}
 	addNode(DashboardDependencyNode{ID: chartID, Label: "Helm Chart", Detail: chartDetail, Kind: "helm", X: 60, Y: 86})
-	if helmReleaseID != "" {
-		addEdge(helmReleaseID, chartID)
-	} else {
-		addEdge(chartID, "workload")
-	}
+	addEdge(helmReleaseID, chartID)
 
 	for i, valueFile := range values {
 		if i >= 4 {

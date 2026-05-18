@@ -162,6 +162,71 @@ func TestWorldDashboardGraphUsesLiveSnapshot(t *testing.T) {
 	}
 }
 
+func TestWorldDashboardGraphPromotesHelmReleaseRoot(t *testing.T) {
+	world := &WorldSnapshot{
+		Cluster:   "prod",
+		Workloads: map[string]*WorldWorkload{},
+		Pods:      map[string]*WorldPod{},
+		Services:  map[string]*WorldService{},
+		Ingresses: map[string]*WorldIngress{},
+		Nodes:     map[string]*WorldNode{},
+	}
+	workloadID := worldID("prod", "checkout", "Deployment", "api")
+	podID := worldID("prod", "checkout", "Pod", "api-123")
+	world.Workloads[workloadID] = &WorldWorkload{
+		ID:        workloadID,
+		Namespace: "checkout",
+		Kind:      "Deployment",
+		Name:      "api",
+		Pods:      []string{podID},
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "Helm",
+			"app.kubernetes.io/instance":   "checkout-api",
+			"helm.sh/chart":                "api-1.2.3",
+		},
+		Annotations: map[string]string{
+			"meta.helm.sh/release-name":      "checkout-api",
+			"meta.helm.sh/release-namespace": "checkout",
+		},
+	}
+	world.Pods[podID] = &WorldPod{ID: podID, Namespace: "checkout", Name: "api-123", Phase: "Running", WorkloadID: workloadID}
+
+	nodes, edges, ok := worldDashboardGraph(world, "checkout", "api-123", DashboardWorkload{Kind: "Deployment", Name: "api", Namespace: "checkout"})
+	if !ok {
+		t.Fatalf("expected world graph")
+	}
+	var helmReleaseID, chartID string
+	for _, node := range nodes {
+		switch node.Label {
+		case "HelmRelease":
+			helmReleaseID = node.ID
+			if node.Detail != "checkout-api" {
+				t.Fatalf("HelmRelease detail = %q, want checkout-api", node.Detail)
+			}
+		case "Helm Chart":
+			chartID = node.ID
+			if node.Detail != "api-1.2.3" {
+				t.Fatalf("Helm Chart detail = %q, want api-1.2.3", node.Detail)
+			}
+		}
+	}
+	if helmReleaseID == "" || chartID == "" {
+		t.Fatalf("expected HelmRelease and Helm Chart nodes, got %#v", nodes)
+	}
+	if !dashboardGraphHasEdge(edges, helmReleaseID, chartID) || !dashboardGraphHasEdge(edges, chartID, "workload") {
+		t.Fatalf("expected HelmRelease -> Helm Chart -> workload edges, got %#v", edges)
+	}
+}
+
+func dashboardGraphHasEdge(edges [][2]string, from, to string) bool {
+	for _, edge := range edges {
+		if edge[0] == from && edge[1] == to {
+			return true
+		}
+	}
+	return false
+}
+
 func TestIngressServiceNamesIncludesDefaultAndRuleBackends(t *testing.T) {
 	ingress := networkingv1.Ingress{Spec: networkingv1.IngressSpec{
 		DefaultBackend: &networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
