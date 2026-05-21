@@ -200,6 +200,8 @@ export interface DashboardWorkloadView {
   id: string;
   cluster?: string;
   workload: DashboardWorkload;
+  helm?: DashboardHelmMapping;
+  children?: DashboardWorkload[];
   health: string;
   status: string;
   desired?: number;

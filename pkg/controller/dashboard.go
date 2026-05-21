@@ -155,6 +155,8 @@ type DashboardWorkloadView struct {
 	ID                  string                   `json:"id"`
 	Cluster             string                   `json:"cluster,omitempty"`
 	Workload            DashboardWorkload        `json:"workload"`
+	Helm                *DashboardHelmMapping    `json:"helm,omitempty"`
+	Children            []DashboardWorkload      `json:"children,omitempty"`
 	Health              string                   `json:"health"`
 	Status              string                   `json:"status"`
 	Desired             int32                    `json:"desired,omitempty"`
@@ -1096,6 +1098,9 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 		for _, workload := range world.Workloads {
 			view := ensure(DashboardWorkload{Kind: workload.Kind, Name: workload.Name, Namespace: workload.Namespace})
 			view.Cluster = workload.Cluster
+			if helm := dashboardHelmMappingFromOwnership(dashboardHelmOwnershipFromWorkload(workload)); helm != nil {
+				view.Helm = helm
+			}
 			view.Status = firstNonEmpty(workload.Status, view.Status)
 			view.Desired = workload.Desired
 			view.Ready = workload.Ready
@@ -1119,11 +1124,17 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 			view.RCA = incident.RCA
 			view.PolicyState = incident.PolicyState
 			view.GitOps = incident.GitOps
+			if incident.GitOps != nil && incident.GitOps.Helm != nil {
+				view.Helm = incident.GitOps.Helm
+			}
 			view.Status = firstNonEmpty(incident.Status, view.Status)
 			view.Health = incident.Severity
 		}
 		if view.GitOps == nil {
 			view.GitOps = incident.GitOps
+		}
+		if view.Helm == nil && incident.GitOps != nil && incident.GitOps.Helm != nil {
+			view.Helm = incident.GitOps.Helm
 		}
 	}
 
@@ -1135,6 +1146,9 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 		}
 		if view.GitOps == nil {
 			view.GitOps = remediation.GitOps
+		}
+		if view.Helm == nil && remediation.GitOps != nil && remediation.GitOps.Helm != nil {
+			view.Helm = remediation.GitOps.Helm
 		}
 	}
 
@@ -1153,9 +1167,14 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 				if view.GitOps == nil && dashboardGitOpsSourceMatchesWorkload(source, view.Workload) {
 					view.GitOps = dashboardGitOpsMappingFromSource(source)
 				}
+				if view.Helm == nil && view.GitOps != nil && view.GitOps.Helm != nil {
+					view.Helm = view.GitOps.Helm
+				}
 			}
 		}
 	}
+
+	records = collapseDashboardHelmWorkloads(records, policy, availabilitySLO, burnRateThreshold)
 
 	out := make([]DashboardWorkloadView, 0, len(records))
 	for _, record := range records {
@@ -1176,6 +1195,187 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 		return out[:250]
 	}
 	return out
+}
+
+func collapseDashboardHelmWorkloads(records map[string]*DashboardWorkloadView, policy DashboardPolicy, availabilitySLO, burnRateThreshold float64) map[string]*DashboardWorkloadView {
+	collapsed := make(map[string]*DashboardWorkloadView, len(records))
+	for key, record := range records {
+		if record == nil {
+			continue
+		}
+		helm := record.Helm
+		if helm == nil || helm.ReleaseName == "" {
+			collapsed[key] = record
+			continue
+		}
+		namespace := firstNonBlankDashboard(helm.Namespace, record.Workload.Namespace)
+		parentWorkload := DashboardWorkload{Kind: "HelmRelease", Name: helm.ReleaseName, Namespace: namespace}
+		parentKey := dashboardWorkloadKey(parentWorkload)
+		parent := collapsed[parentKey]
+		if parent == nil {
+			parent = &DashboardWorkloadView{
+				ID:          parentKey,
+				Cluster:     record.Cluster,
+				Workload:    parentWorkload,
+				Helm:        cloneDashboardHelmMapping(helm),
+				Health:      "healthy",
+				Status:      "Helm-managed release containing rendered Kubernetes workloads.",
+				PolicyState: dashboardWorkloadPolicy(policy, dashboardRemediationRow{}, availabilitySLO, burnRateThreshold),
+			}
+			collapsed[parentKey] = parent
+		}
+		mergeDashboardHelmChild(parent, record)
+	}
+	return collapsed
+}
+
+func mergeDashboardHelmChild(parent, child *DashboardWorkloadView) {
+	parent.Children = appendDashboardWorkload(parent.Children, child.Workload)
+	parent.Incidents += child.Incidents
+	parent.Remediations += child.Remediations
+	parent.Predictions += child.Predictions
+	parent.Desired += child.Desired
+	parent.Ready += child.Ready
+	parent.Pods = appendUniqueStrings(parent.Pods, child.Pods...)
+	parent.Services = appendUniqueStrings(parent.Services, child.Services...)
+	parent.Ingresses = appendUniqueStrings(parent.Ingresses, child.Ingresses...)
+	parent.Nodes = appendUniqueStrings(parent.Nodes, child.Nodes...)
+	if parent.Cluster == "" {
+		parent.Cluster = child.Cluster
+	}
+	if parent.GitOps == nil {
+		parent.GitOps = child.GitOps
+	}
+	if parent.Evidence == nil {
+		parent.Evidence = child.Evidence
+	}
+	if parent.LogPatterns == nil {
+		parent.LogPatterns = child.LogPatterns
+	}
+	if parent.RCA == nil {
+		parent.RCA = child.RCA
+	}
+	if child.PolicyState != nil {
+		parent.PolicyState = child.PolicyState
+	}
+	if parent.Cost.MonthlyCost == 0 {
+		parent.Cost = child.Cost
+	}
+	if parent.LatestIncidentID == "" {
+		parent.LatestIncidentID = child.LatestIncidentID
+	}
+	if parent.ActiveRemediationID == 0 {
+		parent.ActiveRemediationID = child.ActiveRemediationID
+	}
+	parent.Health = dashboardRollupHealth(parent.Health, child.Health)
+	if child.Status != "" && child.Status != "No live workload status has been captured yet." {
+		parent.Status = fmt.Sprintf("%d rendered workloads; latest child status: %s", len(parent.Children), child.Status)
+	}
+	sortDashboardWorkloads(parent.Children)
+	sort.Strings(parent.Pods)
+	sort.Strings(parent.Services)
+	sort.Strings(parent.Ingresses)
+	sort.Strings(parent.Nodes)
+}
+
+func appendDashboardWorkload(items []DashboardWorkload, item DashboardWorkload) []DashboardWorkload {
+	key := dashboardWorkloadKey(item)
+	for _, existing := range items {
+		if dashboardWorkloadKey(existing) == key {
+			return items
+		}
+	}
+	return append(items, item)
+}
+
+func appendUniqueStrings(items []string, values ...string) []string {
+	seen := make(map[string]bool, len(items)+len(values))
+	out := make([]string, 0, len(items)+len(values))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func sortDashboardWorkloads(items []DashboardWorkload) {
+	sort.Slice(items, func(i, j int) bool {
+		return dashboardWorkloadKey(items[i]) < dashboardWorkloadKey(items[j])
+	})
+}
+
+func dashboardRollupHealth(current, next string) string {
+	rank := func(value string) int {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "critical":
+			return 5
+		case "degraded", "high":
+			return 4
+		case "warning", "medium":
+			return 3
+		case "unknown", "":
+			return 2
+		case "healthy", "low":
+			return 1
+		default:
+			return 2
+		}
+	}
+	if rank(next) > rank(current) {
+		return next
+	}
+	return current
+}
+
+func dashboardHelmMappingFromOwnership(ownership dashboardHelmOwnership) *DashboardHelmMapping {
+	if ownership.ReleaseName == "" && ownership.Chart == "" {
+		return nil
+	}
+	chart, version := splitDashboardHelmChartLabel(ownership.Chart)
+	return &DashboardHelmMapping{
+		ReleaseName:  ownership.ReleaseName,
+		Namespace:    ownership.Namespace,
+		Chart:        chart,
+		ChartVersion: version,
+	}
+}
+
+func cloneDashboardHelmMapping(helm *DashboardHelmMapping) *DashboardHelmMapping {
+	if helm == nil {
+		return nil
+	}
+	clone := *helm
+	clone.ValueFiles = append([]string(nil), helm.ValueFiles...)
+	clone.ValuesFrom = append([]string(nil), helm.ValuesFrom...)
+	return &clone
+}
+
+func splitDashboardHelmChartLabel(label string) (string, string) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "", ""
+	}
+	index := strings.LastIndex(label, "-")
+	if index <= 0 || index >= len(label)-1 {
+		return label, ""
+	}
+	version := label[index+1:]
+	if version == "" || !strings.ContainsAny(version, "0123456789") {
+		return label, ""
+	}
+	return label[:index], version
 }
 
 func dashboardWorkloadKey(workload DashboardWorkload) string {

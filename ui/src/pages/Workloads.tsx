@@ -38,6 +38,8 @@ type WorkloadRecord = {
   key: string;
   cluster?: string;
   workload: DashboardWorkload;
+  helm?: DashboardGitOpsMapping['helm'];
+  children?: DashboardWorkload[];
   incidents: DashboardIncident[];
   remediations: DashboardRemediation[];
   predictions: DashboardPrediction[];
@@ -83,8 +85,12 @@ export const Workloads = () => {
       item.gitops?.repo,
       item.gitops?.path,
       item.gitops?.helm?.chart,
+      item.helm?.releaseName,
+      item.helm?.chart,
+      item.helm?.chartVersion,
       item.health,
       item.status,
+      ...(item.children || []).map((child) => `${child.kind} ${child.name} ${child.namespace}`),
       ...(item.pods || []),
       ...(item.services || []),
       ...(item.ingresses || []),
@@ -126,9 +132,9 @@ export const Workloads = () => {
         </div>
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <SummaryCard label="Workloads tracked" value={`${filtered.length}`} detail={`${workloads.length} total discovered`} icon={<Boxes className="h-4 w-4" />} tone="blue" />
+          <SummaryCard label="Workloads tracked" value={`${filtered.length}`} detail={`${workloads.length} top-level apps discovered`} icon={<Boxes className="h-4 w-4" />} tone="blue" />
           <SummaryCard label="Active incidents" value={`${filtered.reduce((sum, item) => sum + workloadIncidentCount(item), 0)}`} detail="controller-level issue grouping" icon={<TriangleAlert className="h-4 w-4" />} tone="red" />
-          <SummaryCard label="GitOps mapped" value={`${filtered.filter((item) => item.gitops).length}`} detail="ArgoCD, Flux, Helm, or repo source" icon={<FileCode2 className="h-4 w-4" />} tone="green" />
+          <SummaryCard label="GitOps mapped" value={`${filtered.filter((item) => item.gitops || item.helm).length}`} detail="ArgoCD, Flux, Helm, or repo source" icon={<FileCode2 className="h-4 w-4" />} tone="green" />
         </div>
 
         <div className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
@@ -157,7 +163,9 @@ export const Workloads = () => {
                           <WorkloadIcon workload={item.workload} />
                           <div className="min-w-0">
                             <div className="truncate font-semibold text-[#111827]">{item.workload.kind}/{item.workload.name}</div>
-                            {item.workload.podName && <div className="truncate text-[11px] text-[#647084]">Pod signal: {item.workload.podName}</div>}
+                            {item.children?.length ? (
+                              <div className="truncate text-[11px] text-[#647084]">{item.children.length} rendered workloads</div>
+                            ) : item.workload.podName && <div className="truncate text-[11px] text-[#647084]">Pod signal: {item.workload.podName}</div>}
                           </div>
                         </div>
                       </td>
@@ -168,6 +176,11 @@ export const Workloads = () => {
                           <div className="max-w-[280px]">
                             <div className="truncate font-medium text-[#111827]">{item.gitops.controller} · {item.gitops.app || item.gitops.repo}</div>
                             <div className="truncate text-[11px] text-[#647084]">{readableManifestType(item.gitops.manifestType)} · {item.gitops.path || item.gitops.repo}</div>
+                          </div>
+                        ) : item.helm ? (
+                          <div className="max-w-[280px]">
+                            <div className="truncate font-medium text-[#111827]">Helm · {item.helm.releaseName || item.workload.name}</div>
+                            <div className="truncate text-[11px] text-[#647084]">{helmChartLabel(item.helm)} · live release metadata</div>
                           </div>
                         ) : <span className="text-[#94a3b8]">Not mapped</span>}
                       </td>
@@ -214,6 +227,11 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
           <MetricBox label="PRs" value={`${workloadRemediationCount(record)}`} tone="blue" />
           <MetricBox label="Predictions" value={`${workloadPredictionCount(record)}`} tone="green" />
         </div>
+        {!!record.children?.length && (
+          <div className="mt-3 rounded-md border border-[#dbeafe] bg-[#eff6ff] px-3 py-2 text-[12px] text-[#1d4ed8]">
+            Helm release view: {record.children.length} rendered Kubernetes workloads are grouped under this release.
+          </div>
+        )}
         {(record.desired || record.ready) !== undefined && (
           <div className="mt-3 rounded-md border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2 text-[12px] text-[#475569]">
             Ready {record.ready ?? 0} / Desired {record.desired ?? 0}
@@ -270,7 +288,7 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
       </DetailCard>
 
       <DetailCard icon={<FileCode2 className="h-4 w-4" />} title="GitOps Topology">
-        {record.gitops ? <GitOpsSummary gitops={record.gitops} /> : <MiniEmpty message="No GitOps source has been mapped for this workload." />}
+        {record.gitops ? <GitOpsSummary gitops={record.gitops} /> : record.helm ? <HelmSummary helm={record.helm} children={record.children || []} /> : <MiniEmpty message="No GitOps source has been mapped for this workload." />}
       </DetailCard>
 
       <DetailCard icon={<GitPullRequestArrow className="h-4 w-4" />} title="Remediation Flow">
@@ -335,6 +353,7 @@ const buildWorkloadRecords = (dashboard: DashboardState | null): WorkloadRecord[
     const workload = { kind: source.helm ? 'HelmRelease' : readableManifestType(source.manifestType), name: source.app || source.path || source.repo, namespace: source.namespace || source.helm?.namespace || 'unknown' };
     const record = ensure(workload);
     record.gitops = record.gitops || source;
+    record.helm = record.helm || source.helm;
   });
 
   return Array.from(records.values()).sort(sortWorkloadRecords);
@@ -348,6 +367,8 @@ const workloadRecordFromBackend = (view: DashboardWorkloadView, dashboard: Dashb
     key: view.id,
     cluster: view.cluster,
     workload: view.workload,
+    helm: view.helm,
+    children: view.children,
     incidents: incident ? [incident] : [],
     remediations,
     predictions,
@@ -414,6 +435,33 @@ const GitOpsSummary = ({ gitops }: { gitops: DashboardGitOpsMapping }) => (
         <KeyValue label="Chart" value={gitops.helm.chartVersion ? `${gitops.helm.chart}@${gitops.helm.chartVersion}` : gitops.helm.chart || 'Unknown'} />
         <KeyValue label="Values" value={(gitops.helm.valueFiles || []).join(' -> ') || 'Not reported'} />
       </>
+    )}
+  </div>
+);
+
+const HelmSummary = ({ helm, children }: { helm: NonNullable<DashboardGitOpsMapping['helm']>; children: DashboardWorkload[] }) => (
+  <div className="space-y-3 p-3 text-[12px]">
+    <div className="flex items-center gap-2">
+      <SourceNode label="HelmRelease" detail={helm.releaseName || 'release'} />
+      <span className="h-px flex-1 bg-[#cbd5e1]" />
+      <SourceNode label="Rendered workloads" detail={`${children.length} resources`} />
+    </div>
+    <KeyValue label="Release" value={helm.releaseName || 'Unknown'} />
+    <KeyValue label="Namespace" value={helm.namespace || 'Unknown'} />
+    <KeyValue label="Chart" value={helmChartLabel(helm)} />
+    {!!children.length && (
+      <div className="pt-1">
+        <div className="mb-2 text-[11px] font-semibold uppercase text-[#647084]">Rendered workloads</div>
+        <div className="space-y-1.5">
+          {children.slice(0, 8).map((child) => (
+            <div key={workloadKey(child)} className="flex min-w-0 items-center gap-2 rounded-md border border-[#e5e7eb] bg-[#f8fafc] px-2 py-1.5">
+              {workloadIcon(child.kind, 'h-3.5 w-3.5')}
+              <span className="truncate text-[#475569]">{child.kind}/{child.name}</span>
+            </div>
+          ))}
+          {children.length > 8 && <div className="text-[11px] text-[#647084]">+{children.length - 8} more</div>}
+        </div>
+      </div>
     )}
   </div>
 );
@@ -520,4 +568,9 @@ const readableManifestType = (manifestType?: string) => {
     default:
       return manifestType || 'Unknown';
   }
+};
+
+const helmChartLabel = (helm: NonNullable<DashboardGitOpsMapping['helm']>) => {
+  const chart = helm.chart || 'Unknown chart';
+  return helm.chartVersion ? `${chart}@${helm.chartVersion}` : chart;
 };

@@ -123,6 +123,51 @@ func TestDashboardWorkloadViewsExposeIncidentRCAAndPolicy(t *testing.T) {
 	}
 }
 
+func TestDashboardWorkloadViewsCollapseHelmChildren(t *testing.T) {
+	workloadID := worldID("prod", "checkout", "Deployment", "api")
+	world := &WorldSnapshot{
+		Cluster: "prod",
+		Workloads: map[string]*WorldWorkload{
+			workloadID: {
+				ID:        workloadID,
+				Cluster:   "prod",
+				Namespace: "checkout",
+				Kind:      "Deployment",
+				Name:      "api",
+				Status:    "desired=2 ready=1 available=1 updated=2",
+				Desired:   2,
+				Ready:     1,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "Helm",
+					"app.kubernetes.io/instance":   "checkout-api",
+					"helm.sh/chart":                "api-1.2.3",
+				},
+				Annotations: map[string]string{
+					"meta.helm.sh/release-name":      "checkout-api",
+					"meta.helm.sh/release-namespace": "checkout",
+				},
+			},
+		},
+	}
+
+	got := dashboardWorkloadViews(world, nil, nil, nil, nil, nil, DashboardPolicy{Mode: "Dry-run"}, 0.99, 14.4)
+	if len(got) != 1 {
+		t.Fatalf("workload view count = %d, want one HelmRelease row: %#v", len(got), got)
+	}
+	if got[0].Workload.Kind != "HelmRelease" || got[0].Workload.Name != "checkout-api" {
+		t.Fatalf("workload = %#v, want HelmRelease/checkout-api", got[0].Workload)
+	}
+	if got[0].Helm == nil || got[0].Helm.Chart != "api" || got[0].Helm.ChartVersion != "1.2.3" {
+		t.Fatalf("helm = %#v, want api@1.2.3", got[0].Helm)
+	}
+	if len(got[0].Children) != 1 || got[0].Children[0].Kind != "Deployment" || got[0].Children[0].Name != "api" {
+		t.Fatalf("children = %#v, want Deployment/api", got[0].Children)
+	}
+	if got[0].Desired != 2 || got[0].Ready != 1 || got[0].Health != "degraded" {
+		t.Fatalf("rollup = desired %d ready %d health %q, want 2/1/degraded", got[0].Desired, got[0].Ready, got[0].Health)
+	}
+}
+
 func TestFallbackDashboardGraphUsesRelatedResources(t *testing.T) {
 	nodes, edges := fallbackDashboardGraph(DashboardWorkload{Kind: "Deployment", Name: "api"}, `Related Resources:
 - ConfigMap/api-env
