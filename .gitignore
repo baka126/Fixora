@@ -15,3 +15,5 @@ charts/fixora/test-values.yaml
 demo/
 docs/repo-context.md
 coroot/
+.antigravitycli/
+OpenSRE/
