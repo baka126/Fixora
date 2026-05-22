@@ -90,6 +90,10 @@ func (h *historyCache) initDB() {
 			namespace VARCHAR(255) NOT NULL,
 			pod_name VARCHAR(255) NOT NULL,
 			timestamp TIMESTAMP NOT NULL,
+			incident_window_start TIMESTAMP,
+			incident_window_end TIMESTAMP,
+			incident_window_source VARCHAR(128),
+			incident_window_confidence DOUBLE PRECISION,
 			reason TEXT NOT NULL,
 			metric_proof TEXT,
 			cluster_context TEXT,
@@ -102,6 +106,8 @@ func (h *historyCache) initDB() {
 			finops_details TEXT,
 			ai_prompt TEXT,
 			ai_response TEXT,
+			validated_claims JSONB,
+			unvalidated_claims JSONB,
 			evidence_hash VARCHAR(64),
 			category VARCHAR(50),
 			symptom TEXT,
@@ -112,7 +118,13 @@ func (h *historyCache) initDB() {
 		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS confidence INTEGER;`,
 		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS ai_prompt TEXT;`,
 		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS ai_response TEXT;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS validated_claims JSONB;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS unvalidated_claims JSONB;`,
 		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS evidence_hash VARCHAR(64);`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS incident_window_start TIMESTAMP;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS incident_window_end TIMESTAMP;`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS incident_window_source VARCHAR(128);`,
+		`ALTER TABLE investigations ADD COLUMN IF NOT EXISTS incident_window_confidence DOUBLE PRECISION;`,
 		`CREATE INDEX IF NOT EXISTS idx_investigations_hash ON investigations (evidence_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_investigations_pod ON investigations (namespace, pod_name);`,
 		`CREATE TABLE IF NOT EXISTS incident_history (
@@ -363,17 +375,21 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 			namespace, pod_name, timestamp, reason, metric_proof, cluster_context,
 			historical_pattern, event_timeline, stack_trace, root_cause,
 			ai_confidence, finops_impact, finops_details, ai_prompt, ai_response,
-			evidence_hash, category, symptom, confidence
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			validated_claims, unvalidated_claims, evidence_hash, category, symptom, confidence,
+			incident_window_start, incident_window_end, incident_window_source, incident_window_confidence
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 		RETURNING id
 	`
 	var id int64
+	validatedClaims, _ := json.Marshal(evidence.ValidatedClaims)
+	unvalidatedClaims, _ := json.Marshal(evidence.UnvalidatedClaims)
 	err := h.db.QueryRowContext(ctx, query,
 		evidence.Namespace, evidence.PodName, time.Now(), reason, evidence.MetricProof, evidence.ClusterContext,
 		evidence.HistoricalPattern, evidence.EventTimeline, evidence.StackTrace, evidence.RootCause,
 		evidence.AIConfidence, evidence.FinOpsImpact, evidence.FinOpsDetails,
 		security.ScrubPII(evidence.AIPrompt), security.ScrubPII(evidence.AIResponse),
-		hash, category, symptom, confidence,
+		validatedClaims, unvalidatedClaims, hash, category, symptom, confidence,
+		nullableTime(evidence.IncidentWindowStart), nullableTime(evidence.IncidentWindowEnd), evidence.IncidentWindowSource, evidence.IncidentWindowConfidence,
 	).Scan(&id)
 
 	if err != nil {
@@ -381,6 +397,13 @@ func (h *historyCache) SaveInvestigation(ctx context.Context, evidence notificat
 		return 0
 	}
 	return id
+}
+
+func nullableTime(t time.Time) interface{} {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 func (h *historyCache) LookupInvestigationByHash(ctx context.Context, hash string, maxAge time.Duration) (notifications.EvidenceChain, bool) {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"fixora/pkg/auth"
 	"fixora/pkg/config"
 	"fixora/pkg/controller"
 	"fixora/pkg/notifications"
@@ -37,6 +38,9 @@ func New(ctrl *controller.Controller, cfg *config.Config) *Server {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	if err := auth.RequireConfiguredSecret(); err != nil {
+		return fmt.Errorf("authentication secret is not safely configured: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.Handle("/metrics", promhttp.Handler())
@@ -44,6 +48,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/slack/interactions", s.handleSlackInteraction)
 	mux.HandleFunc("/googlechat/interactions", s.handleGoogleChatInteraction)
 	mux.HandleFunc("/api/v1/dashboard", s.handleDashboard)
+	mux.HandleFunc("/api/v1/integrations/health", s.handleIntegrationHealth)
 	mux.HandleFunc("/api/v1/alerts/active", s.handleGetActiveAlerts)
 	mux.HandleFunc("/api/v1/alerts/active/", s.handleActiveAlertAction)
 	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
@@ -115,6 +120,28 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Error("Failed to encode dashboard snapshot", "error", err)
+	}
+}
+
+func (s *Server) handleIntegrationHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, ok := requireBearerAuth(w, r); !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if err := json.NewEncoder(w).Encode(s.controller.DashboardIntegrationHealth(r.Context())); err != nil {
+		if r.Context().Err() != nil || isClientDisconnect(err) {
+			slog.Debug("Integration health client disconnected before response completed", "error", err)
+			return
+		}
+		slog.Error("Failed to encode integration health response", "error", err)
 	}
 }
 

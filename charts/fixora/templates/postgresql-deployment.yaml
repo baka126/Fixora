@@ -41,6 +41,28 @@ spec:
               mountPath: /var/lib/postgresql/data
               subPath: data
           {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/pg_isready
+                - -U
+                - {{ default "fixora" .Values.features.database.user | quote }}
+                - -d
+                - {{ .Values.features.database.name | quote }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/pg_isready
+                - -U
+                - {{ default "fixora" .Values.features.database.user | quote }}
+                - -d
+                - {{ .Values.features.database.name | quote }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
           resources:
             {{- toYaml .Values.features.database.embedded.resources | nindent 12 }}
       {{- if .Values.features.database.embedded.storage.enabled }}
@@ -49,4 +71,10 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "fixora.fullname" . }}-postgresql
       {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
 {{- end }}

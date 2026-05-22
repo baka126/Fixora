@@ -44,6 +44,11 @@ spec:
               value: {{ .Values.service.targetPort | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fixora.fullname" . }}
+                  key: jwt-secret
             {{- if .Values.clusterName }}
             - name: FIXORA_CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
@@ -282,6 +287,14 @@ spec:
               value: {{ .Values.features.database.sslMode | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
           volumeMounts:
             - name: tmp
               mountPath: /tmp

@@ -237,7 +237,12 @@ func TestValidatePROptionsFreshRejectsChangedSource(t *testing.T) {
 
 func TestTargetedPRBodyIncludesDiagnosisAndFiles(t *testing.T) {
 	body := targetedPRBody(
-		notifications.EvidenceChain{RootCause: "Probe path is wrong.", MetricProof: "No metrics."},
+		notifications.EvidenceChain{
+			RootCause:         "Probe path is wrong.",
+			MetricProof:       "No metrics.",
+			ValidatedClaims:   []string{"Kubernetes events were collected."},
+			UnvalidatedClaims: []string{"Patch strategy needs review."},
+		},
 		Diagnosis{
 			Symptom:       "Health probe is failing",
 			Category:      CategoryRuntime,
@@ -249,7 +254,7 @@ func TestTargetedPRBodyIncludesDiagnosisAndFiles(t *testing.T) {
 		[]vcs.FileChange{{FilePath: "charts/api/values.yaml"}},
 	)
 
-	for _, want := range []string{"Patch Strategy", "Health probe", "AI Confidence", "charts/api/values.yaml"} {
+	for _, want := range []string{"Patch Strategy", "Health probe", "AI Confidence", "charts/api/values.yaml", "Validated Claims", "Kubernetes events were collected.", "Claims Requiring Review"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
 		}

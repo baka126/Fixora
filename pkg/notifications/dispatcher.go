@@ -4,31 +4,38 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"fixora/pkg/config"
 	"fixora/pkg/security"
 )
 
 type EvidenceChain struct {
-	Namespace              string
-	PodName                string
-	MetricProof            string
-	ClusterContext         string
-	HistoricalPattern      string
-	EventTimeline          string
-	RootCause              string
-	FinOpsImpact           string
-	PredictiveWarning      bool
-	EstimatedHoursToOOM    float64
-	AIConfidence           int
-	AIPrompt               string
-	AIResponse             string
+	Namespace                string
+	PodName                  string
+	IncidentWindowStart      time.Time
+	IncidentWindowEnd        time.Time
+	IncidentWindowSource     string
+	IncidentWindowConfidence float64
+	MetricProof              string
+	ClusterContext           string
+	HistoricalPattern        string
+	EventTimeline            string
+	RootCause                string
+	FinOpsImpact             string
+	PredictiveWarning        bool
+	EstimatedHoursToOOM      float64
+	AIConfidence             int
+	AIPrompt                 string
+	AIResponse               string
+	ValidatedClaims          []string
+	UnvalidatedClaims        []string
 
 	// New fields for interactive triage
-	StackTrace    string
-	FinOpsDetails string
-	ShowFixButton bool
-	ShowPRButton  bool
+	StackTrace      string
+	FinOpsDetails   string
+	ShowFixButton   bool
+	ShowPRButton    bool
 	ShowEventButton bool
 }
 
@@ -46,6 +53,8 @@ func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 	evidence.FinOpsDetails = security.ScrubPII(evidence.FinOpsDetails)
 	evidence.AIPrompt = security.ScrubPII(evidence.AIPrompt)
 	evidence.AIResponse = security.ScrubPII(evidence.AIResponse)
+	evidence.ValidatedClaims = scrubNotificationStrings(evidence.ValidatedClaims)
+	evidence.UnvalidatedClaims = scrubNotificationStrings(evidence.UnvalidatedClaims)
 
 	var errs []string
 
@@ -71,6 +80,14 @@ func SendEvidenceChain(cfg *config.Config, evidence EvidenceChain) error {
 		return fmt.Errorf("failed to send evidence chain: %s", strings.Join(errs, ", "))
 	}
 	return nil
+}
+
+func scrubNotificationStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, security.ScrubPII(value))
+	}
+	return out
 }
 
 func SendNotification(cfg *config.Config, message string) error {

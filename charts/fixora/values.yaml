@@ -129,6 +129,11 @@ auditWebhook:
   url: ""
   token: ""
 
+auth:
+  # JWT signing secret for UI/API sessions. Leave empty to let the Helm chart
+  # generate and preserve a 32-character secret in the release Secret.
+  jwtSecret: ""
+
 rbac:
   clusterScoped: true
   allowDeploymentMutations: false
@@ -263,3 +268,25 @@ service:
   type: ClusterIP
   port: 80
   targetPort: 8080
+
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  additionalLabels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+  relabelings: []
+
+networkPolicy:
+  enabled: false

@@ -39,7 +39,33 @@ Fixora requires permissions to watch the K8s Event stream and inspect resources.
 
 ---
 
-## 3. Configuration Parameters
+## 3. Dashboard UI Access
+
+To access the Fixora web dashboard, you can expose the service via Ingress or LoadBalancer.
+
+### Ingress (Recommended)
+Add the following to your `values.yaml`:
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: fixora.your-domain.com
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+```
+
+### Port-Forwarding (Testing)
+```bash
+kubectl port-forward svc/fixora 8080:8080 -n fixora
+```
+The dashboard will be available at `http://localhost:8080`. The first time you visit, you will be prompted to create an administrator account.
+
+---
+
+## 4. Configuration Parameters
 
 | Helm Value | Environment Variable | Type | Description |
 | :--- | :--- | :--- | :--- |

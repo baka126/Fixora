@@ -3,13 +3,27 @@ package auth
 import (
 	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"fixora/pkg/models"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var JWTSecret = []byte(os.Getenv("JWT_SECRET"))
+const minJWTSecretLength = 32
+
+var (
+	ErrJWTSecretNotConfigured = errors.New("JWT_SECRET must be configured with at least 32 characters")
+	ErrJWTSecretInsecure      = errors.New("JWT_SECRET uses a known insecure default")
+)
+
+var insecureJWTSecrets = map[string]bool{
+	"default-development-secret-do-not-use-in-prod": true,
+	"changeme":  true,
+	"change-me": true,
+	"secret":    true,
+	"password":  true,
+}
 
 type Claims struct {
 	UserID   string      `json:"user_id"`
@@ -18,13 +32,27 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-func init() {
-	if len(JWTSecret) == 0 {
-		JWTSecret = []byte("default-development-secret-do-not-use-in-prod")
+func signingSecret() ([]byte, error) {
+	secret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	if secret == "" || len(secret) < minJWTSecretLength {
+		return nil, ErrJWTSecretNotConfigured
 	}
+	if insecureJWTSecrets[strings.ToLower(secret)] {
+		return nil, ErrJWTSecretInsecure
+	}
+	return []byte(secret), nil
+}
+
+func RequireConfiguredSecret() error {
+	_, err := signingSecret()
+	return err
 }
 
 func GenerateToken(user *models.User) (string, error) {
+	secret, err := signingSecret()
+	if err != nil {
+		return "", err
+	}
 	claims := Claims{
 		UserID:   user.ID,
 		Username: user.Username,
@@ -37,15 +65,19 @@ func GenerateToken(user *models.User) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(JWTSecret)
+	return token.SignedString(secret)
 }
 
 func ValidateToken(tokenString string) (*Claims, error) {
+	secret, err := signingSecret()
+	if err != nil {
+		return nil, err
+	}
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
-		return JWTSecret, nil
+		return secret, nil
 	})
 
 	if err != nil {

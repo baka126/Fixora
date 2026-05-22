@@ -21,6 +21,9 @@ export interface DashboardIntegration {
   name: string;
   status: 'ok' | 'neutral' | 'empty' | 'error' | string;
   detail?: string;
+  configured?: boolean;
+  capability?: string;
+  lastCheckedAt?: string;
 }
 
 export interface DashboardAvailability {
@@ -46,6 +49,13 @@ export interface DashboardWorkload {
   podName?: string;
 }
 
+export interface DashboardIncidentWindow {
+  since: string;
+  until: string;
+  source: string;
+  confidence: number;
+}
+
 export interface DashboardEvidence {
   icon: string;
   label: string;
@@ -69,6 +79,8 @@ export interface DashboardRCA {
   risk: string;
   recommendedAction?: string;
   evidenceUsed?: string[];
+  validatedClaims?: string[];
+  unvalidatedClaims?: string[];
   negativeFeedback?: string;
 }
 
@@ -146,6 +158,7 @@ export interface DashboardIncident {
   id: string;
   cluster?: string;
   workload: DashboardWorkload;
+  window?: DashboardIncidentWindow;
   status: string;
   cause: string;
   confidence: number;

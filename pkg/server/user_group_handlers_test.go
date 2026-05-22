@@ -13,6 +13,7 @@ import (
 
 func adminRequest(t *testing.T, method, path, body string) *http.Request {
 	t.Helper()
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
 	token, err := auth.GenerateToken(&models.User{
 		ID:       "admin-id",
 		Username: "admin",

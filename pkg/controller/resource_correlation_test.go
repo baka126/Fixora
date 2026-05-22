@@ -111,7 +111,8 @@ func TestCorrelatePodResourcesIncludesOwnersServiceAndConfig(t *testing.T) {
 	)
 	ctrl := &Controller{clientset: client}
 
-	got := ctrl.correlatePodResources(context.Background(), pod).Summary()
+	corr := ctrl.correlatePodResources(context.Background(), pod)
+	got := corr.Summary()
 	for _, want := range []string{
 		"Owner chain: Pod/api-abc -> ReplicaSet/api-rs -> Deployment/api",
 		"Deployment api rollout: desired=2 updated=1 available=1 unavailable=1",
@@ -125,6 +126,16 @@ func TestCorrelatePodResourcesIncludesOwnersServiceAndConfig(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected summary to contain %q, got:\n%s", want, got)
 		}
+	}
+	top := corr.TopCorrelations(3)
+	if len(top) == 0 {
+		t.Fatal("expected scored correlations")
+	}
+	if top[0].Ref != "Deployment/api" {
+		t.Fatalf("top correlation = %#v, want Deployment/api", top[0])
+	}
+	if !strings.Contains(got, "Top correlated resources:") {
+		t.Fatalf("expected scored correlation summary, got:\n%s", got)
 	}
 }
 

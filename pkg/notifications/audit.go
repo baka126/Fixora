@@ -97,7 +97,17 @@ func scrubAuditEvidence(evidence EvidenceChain, scrubbers []*regexp.Regexp) Evid
 	evidence.FinOpsImpact = security.ScrubPII(evidence.FinOpsImpact, scrubbers...)
 	evidence.StackTrace = security.ScrubPII(evidence.StackTrace, scrubbers...)
 	evidence.FinOpsDetails = security.ScrubPII(evidence.FinOpsDetails, scrubbers...)
+	evidence.ValidatedClaims = scrubAuditStringSlice(evidence.ValidatedClaims, scrubbers)
+	evidence.UnvalidatedClaims = scrubAuditStringSlice(evidence.UnvalidatedClaims, scrubbers)
 	return evidence
+}
+
+func scrubAuditStringSlice(values []string, scrubbers []*regexp.Regexp) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, security.ScrubPII(value, scrubbers...))
+	}
+	return out
 }
 
 func auditScrubbers(cfg *config.Config) []*regexp.Regexp {

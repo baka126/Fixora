@@ -60,9 +60,12 @@ type DashboardPolicy struct {
 }
 
 type DashboardIntegration struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
+	Name          string `json:"name"`
+	Status        string `json:"status"`
+	Detail        string `json:"detail,omitempty"`
+	Configured    bool   `json:"configured"`
+	Capability    string `json:"capability,omitempty"`
+	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
 }
 
 type DashboardAvailability struct {
@@ -84,6 +87,7 @@ type DashboardKPI struct {
 type DashboardIncident struct {
 	ID          string                    `json:"id"`
 	Workload    DashboardWorkload         `json:"workload"`
+	Window      *DashboardIncidentWindow  `json:"window,omitempty"`
 	Status      string                    `json:"status"`
 	Cause       string                    `json:"cause"`
 	Confidence  int                       `json:"confidence"`
@@ -101,6 +105,13 @@ type DashboardIncident struct {
 	PolicyState *DashboardWorkloadPolicy  `json:"policyState,omitempty"`
 	Graph       []DashboardDependencyNode `json:"graph,omitempty"`
 	Edges       [][2]string               `json:"edges,omitempty"`
+}
+
+type DashboardIncidentWindow struct {
+	Since      string  `json:"since"`
+	Until      string  `json:"until"`
+	Source     string  `json:"source"`
+	Confidence float64 `json:"confidence"`
 }
 
 type DashboardWorkload struct {
@@ -133,6 +144,8 @@ type DashboardRCA struct {
 	Risk              string   `json:"risk"`
 	RecommendedAction string   `json:"recommendedAction,omitempty"`
 	EvidenceUsed      []string `json:"evidenceUsed,omitempty"`
+	ValidatedClaims   []string `json:"validatedClaims,omitempty"`
+	UnvalidatedClaims []string `json:"unvalidatedClaims,omitempty"`
 	NegativeFeedback  string   `json:"negativeFeedback,omitempty"`
 }
 
@@ -361,6 +374,10 @@ type dashboardInvestigationRow struct {
 	Namespace         string
 	PodName           string
 	Timestamp         time.Time
+	WindowStart       time.Time
+	WindowEnd         time.Time
+	WindowSource      string
+	WindowConfidence  float64
 	Reason            string
 	MetricProof       string
 	ClusterContext    string
@@ -371,6 +388,8 @@ type dashboardInvestigationRow struct {
 	AIConfidence      int
 	FinOpsImpact      string
 	FinOpsDetails     string
+	ValidatedClaims   []string
+	UnvalidatedClaims []string
 }
 
 type dashboardRemediationRow struct {
@@ -494,7 +513,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 		GeneratedAt:   time.Now(),
 		Metadata:      dashboardMetadata(),
 		Policy:        dashboardPolicy(string(c.config.Mode)),
-		Integrations:  c.dashboardIntegrations(),
+		Integrations:  c.DashboardIntegrationHealth(ctx),
 		Availability:  []DashboardAvailability{},
 		KPIs:          []DashboardKPI{},
 		Incidents:     []DashboardIncident{},
@@ -728,13 +747,29 @@ func dashboardPolicy(mode string) DashboardPolicy {
 	}
 }
 
-func (c *Controller) dashboardIntegrations() []DashboardIntegration {
+func (c *Controller) DashboardIntegrationHealth(ctx context.Context) []DashboardIntegration {
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	dbConfigured := c.history != nil && c.history.HasDB()
+	dbStatus := integrationStatus(dbConfigured)
+	dbDetail := "not configured"
+	if dbConfigured {
+		dbDetail = "connected"
+		pingCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+		defer cancel()
+		if err := c.history.DB().PingContext(pingCtx); err != nil {
+			dbStatus = "error"
+			dbDetail = "ping failed"
+		}
+	}
+	promConfigured := c.config.PrometheusURL != "" && c.promClient != nil
+	alertmanagerConfigured := c.config.AlertmanagerEnabled && c.config.AlertmanagerURL != "" && c.amClient != nil
+	argoConfigured := c.config.ArgoCDEnabled && c.dynamicClient != nil
 	return []DashboardIntegration{
-		{Name: "PostgreSQL", Status: integrationStatus(c.history != nil && c.history.HasDB())},
-		{Name: "Prometheus", Status: integrationStatus(c.config.PrometheusURL != "")},
-		{Name: "Alertmanager", Status: integrationStatus(c.config.AlertmanagerEnabled && c.config.AlertmanagerURL != "")},
-		{Name: "ArgoCD", Status: integrationStatus(c.config.ArgoCDEnabled), Detail: c.config.ArgoCDNamespace},
-		{Name: "Flux", Status: "neutral", Detail: "detected from cluster objects"},
+		{Name: "PostgreSQL", Status: dbStatus, Detail: dbDetail, Configured: dbConfigured, Capability: "history, audit, dashboard state", LastCheckedAt: checkedAt},
+		{Name: "Prometheus", Status: integrationStatus(promConfigured), Detail: c.config.PrometheusURL, Configured: promConfigured, Capability: "metrics and predictive signals", LastCheckedAt: checkedAt},
+		{Name: "Alertmanager", Status: integrationStatus(alertmanagerConfigured), Detail: c.config.AlertmanagerURL, Configured: alertmanagerConfigured, Capability: "active alert ingestion", LastCheckedAt: checkedAt},
+		{Name: "ArgoCD", Status: integrationStatus(argoConfigured), Detail: c.config.ArgoCDNamespace, Configured: argoConfigured, Capability: "GitOps source resolution", LastCheckedAt: checkedAt},
+		{Name: "Flux", Status: "neutral", Detail: "detected from cluster objects", Configured: c.dynamicClient != nil, Capability: "GitOps inventory discovery", LastCheckedAt: checkedAt},
 	}
 }
 
@@ -852,9 +887,12 @@ func dashboardPipelineItemDetail(row dashboardRemediationRow) string {
 func queryDashboardInvestigations(ctx context.Context, db *sql.DB, limit int) []dashboardInvestigationRow {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, namespace, pod_name, timestamp, reason,
+		       COALESCE(incident_window_start, timestamp), COALESCE(incident_window_end, timestamp),
+		       COALESCE(incident_window_source, ''), COALESCE(incident_window_confidence, 0),
 		       COALESCE(metric_proof, ''), COALESCE(cluster_context, ''), COALESCE(historical_pattern, ''),
 		       COALESCE(event_timeline, ''), COALESCE(stack_trace, ''), COALESCE(root_cause, ''),
-		       COALESCE(ai_confidence, 0), COALESCE(finops_impact, ''), COALESCE(finops_details, '')
+		       COALESCE(ai_confidence, 0), COALESCE(finops_impact, ''), COALESCE(finops_details, ''),
+		       COALESCE(validated_claims, '[]'::jsonb), COALESCE(unvalidated_claims, '[]'::jsonb)
 		FROM investigations
 		ORDER BY timestamp DESC
 		LIMIT $1
@@ -867,7 +905,10 @@ func queryDashboardInvestigations(ctx context.Context, db *sql.DB, limit int) []
 	var out []dashboardInvestigationRow
 	for rows.Next() {
 		var row dashboardInvestigationRow
-		if err := rows.Scan(&row.ID, &row.Namespace, &row.PodName, &row.Timestamp, &row.Reason, &row.MetricProof, &row.ClusterContext, &row.HistoricalPattern, &row.EventTimeline, &row.StackTrace, &row.RootCause, &row.AIConfidence, &row.FinOpsImpact, &row.FinOpsDetails); err == nil {
+		var validatedClaims, unvalidatedClaims []byte
+		if err := rows.Scan(&row.ID, &row.Namespace, &row.PodName, &row.Timestamp, &row.Reason, &row.WindowStart, &row.WindowEnd, &row.WindowSource, &row.WindowConfidence, &row.MetricProof, &row.ClusterContext, &row.HistoricalPattern, &row.EventTimeline, &row.StackTrace, &row.RootCause, &row.AIConfidence, &row.FinOpsImpact, &row.FinOpsDetails, &validatedClaims, &unvalidatedClaims); err == nil {
+			row.ValidatedClaims = dashboardStringList(validatedClaims)
+			row.UnvalidatedClaims = dashboardStringList(unvalidatedClaims)
 			out = append(out, row)
 		}
 	}
@@ -1668,6 +1709,7 @@ func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, i
 		incident := DashboardIncident{
 			ID:          fmt.Sprintf("investigation-%d", inv.ID),
 			Workload:    dashboardWorkload(inv, rem),
+			Window:      dashboardIncidentWindow(inv),
 			Status:      firstNonEmpty(contextValue(inv.ClusterContext, "Reason"), inv.Reason),
 			Cause:       firstNonEmpty(shortRootCause(inv.RootCause), contextValue(inv.ClusterContext, "Diagnosis"), inv.Reason),
 			Confidence:  inv.AIConfidence,
@@ -1721,6 +1763,22 @@ func dashboardIncidentSource(inv dashboardInvestigationRow) string {
 	return strings.Join(sources, " + ")
 }
 
+func dashboardIncidentWindow(inv dashboardInvestigationRow) *DashboardIncidentWindow {
+	if inv.WindowStart.IsZero() || inv.WindowEnd.IsZero() {
+		return nil
+	}
+	source := strings.TrimSpace(inv.WindowSource)
+	if source == "" {
+		source = incidentWindowSourceDefault
+	}
+	return &DashboardIncidentWindow{
+		Since:      inv.WindowStart.UTC().Format(time.RFC3339),
+		Until:      inv.WindowEnd.UTC().Format(time.RFC3339),
+		Source:     source,
+		Confidence: inv.WindowConfidence,
+	}
+}
+
 func dashboardSeverity(inv dashboardInvestigationRow) string {
 	text := strings.ToLower(inv.Reason + " " + inv.RootCause + " " + inv.ClusterContext)
 	if strings.Contains(text, "crash") || strings.Contains(text, "oom") || strings.Contains(text, "failed") || strings.Contains(text, "error") {
@@ -1751,6 +1809,9 @@ func dashboardRisk(rem dashboardRemediationRow) string {
 
 func dashboardEvidence(inv dashboardInvestigationRow) []DashboardEvidence {
 	evidence := []DashboardEvidence{}
+	if window := dashboardIncidentWindow(inv); window != nil {
+		evidence = append(evidence, DashboardEvidence{Icon: "icon-clock", Label: "Incident window", Value: fmt.Sprintf("%s to %s (%s)", window.Since, window.Until, window.Source)})
+	}
 	if inv.MetricProof != "" {
 		evidence = append(evidence, DashboardEvidence{Icon: "icon-chart", Label: "Metric proof", Value: truncateDashboard(inv.MetricProof, 180)})
 	}
@@ -1817,6 +1878,8 @@ func dashboardRCA(inv dashboardInvestigationRow, rem dashboardRemediationRow) *D
 		Risk:              dashboardRisk(rem),
 		RecommendedAction: dashboardPatchReason(rem),
 		EvidenceUsed:      evidenceUsed,
+		ValidatedClaims:   inv.ValidatedClaims,
+		UnvalidatedClaims: inv.UnvalidatedClaims,
 		NegativeFeedback:  dashboardNegativeFeedback(inv, rem),
 	}
 }

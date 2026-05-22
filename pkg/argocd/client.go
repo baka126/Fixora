@@ -25,6 +25,13 @@ type AppInfo struct {
 	RepoURL        string
 	Path           string
 	TargetRevision string
+	Name           string
+	Namespace      string
+	HealthStatus   string
+	SyncStatus     string
+	Revision       string
+	OperationPhase string
+	ResourceCount  int
 }
 
 type Client struct {
@@ -113,6 +120,7 @@ func (c *Client) getAppViaAPI(ctx context.Context, namespace, name, kind string)
 }
 
 func (c *Client) extractMatch(app map[string]interface{}, namespace, name, kind string) *AppInfo {
+	appName, appNamespace := metadataNameNamespace(app)
 	spec, ok := app["spec"].(map[string]interface{})
 	if !ok {
 		return nil
@@ -149,13 +157,81 @@ func (c *Client) extractMatch(app map[string]interface{}, namespace, name, kind 
 			repoURL, _ := source["repoURL"].(string)
 			path, _ := source["path"].(string)
 			targetRevision, _ := source["targetRevision"].(string)
+			healthStatus, syncStatus, revision, operationPhase := argoStatusSummary(status)
 			return &AppInfo{
 				RepoURL:        repoURL,
 				Path:           path,
 				TargetRevision: targetRevision,
+				Name:           appName,
+				Namespace:      appNamespace,
+				HealthStatus:   healthStatus,
+				SyncStatus:     syncStatus,
+				Revision:       revision,
+				OperationPhase: operationPhase,
+				ResourceCount:  len(resources),
 			}
 		}
 	}
 
 	return nil
+}
+
+func (a AppInfo) Summary() string {
+	var parts []string
+	if a.Name != "" {
+		if a.Namespace != "" {
+			parts = append(parts, fmt.Sprintf("app=%s/%s", a.Namespace, a.Name))
+		} else {
+			parts = append(parts, "app="+a.Name)
+		}
+	}
+	if a.RepoURL != "" {
+		parts = append(parts, "repo="+a.RepoURL)
+	}
+	if a.Path != "" {
+		parts = append(parts, "path="+a.Path)
+	}
+	if a.TargetRevision != "" {
+		parts = append(parts, "targetRevision="+a.TargetRevision)
+	}
+	if a.Revision != "" {
+		parts = append(parts, "liveRevision="+a.Revision)
+	}
+	if a.SyncStatus != "" {
+		parts = append(parts, "sync="+a.SyncStatus)
+	}
+	if a.HealthStatus != "" {
+		parts = append(parts, "health="+a.HealthStatus)
+	}
+	if a.OperationPhase != "" {
+		parts = append(parts, "operation="+a.OperationPhase)
+	}
+	if a.ResourceCount > 0 {
+		parts = append(parts, fmt.Sprintf("resources=%d", a.ResourceCount))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func metadataNameNamespace(obj map[string]interface{}) (string, string) {
+	metadata, ok := obj["metadata"].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+	name, _ := metadata["name"].(string)
+	namespace, _ := metadata["namespace"].(string)
+	return name, namespace
+}
+
+func argoStatusSummary(status map[string]interface{}) (healthStatus, syncStatus, revision, operationPhase string) {
+	if health, ok := status["health"].(map[string]interface{}); ok {
+		healthStatus, _ = health["status"].(string)
+	}
+	if sync, ok := status["sync"].(map[string]interface{}); ok {
+		syncStatus, _ = sync["status"].(string)
+		revision, _ = sync["revision"].(string)
+	}
+	if operation, ok := status["operationState"].(map[string]interface{}); ok {
+		operationPhase, _ = operation["phase"].(string)
+	}
+	return healthStatus, syncStatus, revision, operationPhase
 }

@@ -16,6 +16,13 @@ import (
 type ResourceCorrelation struct {
 	lines   []string
 	Related []string
+	Scores  map[string]CorrelationScore
+}
+
+type CorrelationScore struct {
+	Ref     string
+	Score   int
+	Reasons []string
 }
 
 type workloadIdentity struct {
@@ -28,7 +35,15 @@ func (r ResourceCorrelation) Summary() string {
 	if len(r.lines) == 0 {
 		return "Resource Correlation: no related resource context found."
 	}
-	return "Resource Correlation:\n- " + strings.Join(r.lines, "\n- ")
+	lines := append([]string{}, r.lines...)
+	if top := r.TopCorrelations(5); len(top) > 0 {
+		var parts []string
+		for _, item := range top {
+			parts = append(parts, fmt.Sprintf("%s=%d (%s)", item.Ref, item.Score, strings.Join(item.Reasons, "; ")))
+		}
+		lines = append(lines, "Top correlated resources: "+strings.Join(parts, " | "))
+	}
+	return "Resource Correlation:\n- " + strings.Join(lines, "\n- ")
 }
 
 func (r *ResourceCorrelation) add(line string) {
@@ -42,7 +57,49 @@ func (r *ResourceCorrelation) relate(kind, name string) {
 	if kind == "" || name == "" {
 		return
 	}
+	r.score(kind, name, 25, "topology neighbor")
 	r.Related = append(r.Related, kind+"/"+name)
+}
+
+func (r *ResourceCorrelation) score(kind, name string, score int, reason string) {
+	if kind == "" || name == "" || score <= 0 {
+		return
+	}
+	if r.Scores == nil {
+		r.Scores = map[string]CorrelationScore{}
+	}
+	ref := kind + "/" + name
+	current := r.Scores[ref]
+	current.Ref = ref
+	current.Score += score
+	if current.Score > 100 {
+		current.Score = 100
+	}
+	reason = strings.TrimSpace(reason)
+	if reason != "" && !stringSliceContains(current.Reasons, reason) {
+		current.Reasons = append(current.Reasons, reason)
+	}
+	r.Scores[ref] = current
+}
+
+func (r ResourceCorrelation) TopCorrelations(limit int) []CorrelationScore {
+	if len(r.Scores) == 0 || limit <= 0 {
+		return nil
+	}
+	out := make([]CorrelationScore, 0, len(r.Scores))
+	for _, score := range r.Scores {
+		out = append(out, score)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].Ref < out[j].Ref
+		}
+		return out[i].Score > out[j].Score
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func (c *Controller) correlatePodResources(ctx context.Context, pod *v1.Pod) ResourceCorrelation {
@@ -151,32 +208,39 @@ func (c *Controller) correlateOwners(ctx context.Context, pod *v1.Pod, corr *Res
 			if err != nil {
 				chain = append(chain, "ReplicaSet/"+owner.Name)
 				corr.relate("ReplicaSet", owner.Name)
+				corr.score("ReplicaSet", owner.Name, 35, "pod owner reference")
 				continue
 			}
 			chain = append(chain, "ReplicaSet/"+rs.Name)
 			corr.relate("ReplicaSet", rs.Name)
+			corr.score("ReplicaSet", rs.Name, 35, "pod owner reference")
 			for _, rsOwner := range rs.OwnerReferences {
 				if rsOwner.Kind == "Deployment" {
 					chain = append(chain, "Deployment/"+rsOwner.Name)
 					corr.relate("Deployment", rsOwner.Name)
+					corr.score("Deployment", rsOwner.Name, 50, "controller owner of ReplicaSet")
 					c.correlateDeployment(ctx, pod.Namespace, rsOwner.Name, corr)
 				}
 			}
 		case "Deployment":
 			chain = append(chain, "Deployment/"+owner.Name)
 			corr.relate("Deployment", owner.Name)
+			corr.score("Deployment", owner.Name, 50, "pod owner reference")
 			c.correlateDeployment(ctx, pod.Namespace, owner.Name, corr)
 		case "StatefulSet":
 			chain = append(chain, "StatefulSet/"+owner.Name)
 			corr.relate("StatefulSet", owner.Name)
+			corr.score("StatefulSet", owner.Name, 50, "pod owner reference")
 			c.correlateStatefulSet(ctx, pod.Namespace, owner.Name, corr)
 		case "DaemonSet":
 			chain = append(chain, "DaemonSet/"+owner.Name)
 			corr.relate("DaemonSet", owner.Name)
+			corr.score("DaemonSet", owner.Name, 50, "pod owner reference")
 			c.correlateDaemonSet(ctx, pod.Namespace, owner.Name, corr)
 		case "Job":
 			chain = append(chain, "Job/"+owner.Name)
 			corr.relate("Job", owner.Name)
+			corr.score("Job", owner.Name, 50, "pod owner reference")
 		}
 	}
 	corr.add("Owner chain: " + strings.Join(chain, " -> "))
@@ -192,9 +256,13 @@ func (c *Controller) correlateDeployment(ctx context.Context, namespace, name st
 		desired = *deploy.Spec.Replicas
 	}
 	corr.add(fmt.Sprintf("Deployment %s rollout: desired=%d updated=%d available=%d unavailable=%d", name, desired, deploy.Status.UpdatedReplicas, deploy.Status.AvailableReplicas, deploy.Status.UnavailableReplicas))
+	if deploy.Status.UnavailableReplicas > 0 || deploy.Status.AvailableReplicas < desired {
+		corr.score("Deployment", name, 30, "rollout availability mismatch")
+	}
 	for _, cond := range deploy.Status.Conditions {
 		if cond.Status != v1.ConditionTrue {
 			corr.add(fmt.Sprintf("Deployment %s condition %s=%s reason=%s", name, cond.Type, cond.Status, cond.Reason))
+			corr.score("Deployment", name, 20, "deployment condition "+string(cond.Type)+"="+string(cond.Status))
 		}
 	}
 }
@@ -205,6 +273,9 @@ func (c *Controller) correlateStatefulSet(ctx context.Context, namespace, name s
 		return
 	}
 	corr.add(fmt.Sprintf("StatefulSet %s rollout: replicas=%d ready=%d updated=%d", name, sts.Status.Replicas, sts.Status.ReadyReplicas, sts.Status.UpdatedReplicas))
+	if sts.Status.ReadyReplicas < sts.Status.Replicas {
+		corr.score("StatefulSet", name, 30, "statefulset ready replicas below desired")
+	}
 }
 
 func (c *Controller) correlateDaemonSet(ctx context.Context, namespace, name string, corr *ResourceCorrelation) {
@@ -213,6 +284,9 @@ func (c *Controller) correlateDaemonSet(ctx context.Context, namespace, name str
 		return
 	}
 	corr.add(fmt.Sprintf("DaemonSet %s rollout: desired=%d ready=%d unavailable=%d", name, ds.Status.DesiredNumberScheduled, ds.Status.NumberReady, ds.Status.NumberUnavailable))
+	if ds.Status.NumberUnavailable > 0 || ds.Status.NumberReady < ds.Status.DesiredNumberScheduled {
+		corr.score("DaemonSet", name, 30, "daemonset ready count below desired")
+	}
 }
 
 func (c *Controller) correlateServices(ctx context.Context, pod *v1.Pod, corr *ResourceCorrelation) {
@@ -228,12 +302,15 @@ func (c *Controller) correlateServices(ctx context.Context, pod *v1.Pod, corr *R
 		endpoints, err := c.clientset.CoreV1().Endpoints(pod.Namespace).Get(ctx, svc.Name, metav1.GetOptions{})
 		if err != nil {
 			corr.add(fmt.Sprintf("Service %s selects pod labels but endpoints are missing: %v", svc.Name, err))
+			corr.score("Service", svc.Name, 40, "service endpoints missing")
 			continue
 		}
 		if endpointsIncludePod(endpoints, pod.Name) {
 			corr.add(fmt.Sprintf("Service %s selects this pod and has an endpoint for it", svc.Name))
+			corr.score("Service", svc.Name, 20, "service selector matches pod")
 		} else {
 			corr.add(fmt.Sprintf("Service %s selects this pod but endpoints do not include it", svc.Name))
+			corr.score("Service", svc.Name, 55, "service endpoint excludes failing pod")
 		}
 		c.correlateIngressesForService(ctx, pod.Namespace, svc.Name, corr)
 	}
@@ -249,6 +326,7 @@ func (c *Controller) correlateIngressesForService(ctx context.Context, namespace
 			continue
 		}
 		corr.relate("Ingress", ingress.Name)
+		corr.score("Ingress", ingress.Name, 20, "ingress routes to selected service")
 		corr.add(fmt.Sprintf("Ingress %s routes traffic to Service %s", ingress.Name, serviceName))
 	}
 }
@@ -282,10 +360,14 @@ func (c *Controller) correlateStorage(ctx context.Context, pod *v1.Pod, corr *Re
 		pvc, err := c.clientset.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			corr.add(fmt.Sprintf("PVC %s is referenced but missing", name))
+			corr.score("PersistentVolumeClaim", name, 65, "referenced PVC is missing")
 			continue
 		}
 		if err == nil {
 			corr.add(fmt.Sprintf("PVC %s phase=%s volume=%s", name, pvc.Status.Phase, pvc.Spec.VolumeName))
+			if pvc.Status.Phase != v1.ClaimBound {
+				corr.score("PersistentVolumeClaim", name, 55, "PVC is not bound")
+			}
 		}
 	}
 }
@@ -298,22 +380,26 @@ func (c *Controller) correlateConfigRefs(ctx context.Context, pod *v1.Pod, corr 
 			secret, err := c.clientset.CoreV1().Secrets(pod.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				corr.add(fmt.Sprintf("Secret %s is referenced but missing", ref.Name))
+				corr.score("Secret", ref.Name, 70, "referenced Secret is missing")
 				continue
 			}
 			if err == nil && ref.Key != "" {
 				if _, ok := secret.Data[ref.Key]; !ok {
 					corr.add(fmt.Sprintf("Secret %s is missing referenced key %s", ref.Name, ref.Key))
+					corr.score("Secret", ref.Name, 70, "referenced Secret key is missing")
 				}
 			}
 		case "ConfigMap":
 			cm, err := c.clientset.CoreV1().ConfigMaps(pod.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				corr.add(fmt.Sprintf("ConfigMap %s is referenced but missing", ref.Name))
+				corr.score("ConfigMap", ref.Name, 70, "referenced ConfigMap is missing")
 				continue
 			}
 			if err == nil && ref.Key != "" {
 				if _, ok := cm.Data[ref.Key]; !ok {
 					corr.add(fmt.Sprintf("ConfigMap %s is missing referenced key %s", ref.Name, ref.Key))
+					corr.score("ConfigMap", ref.Name, 70, "referenced ConfigMap key is missing")
 				}
 			}
 		}
@@ -334,10 +420,12 @@ func (c *Controller) correlateNode(ctx context.Context, pod *v1.Pod, corr *Resou
 		case v1.NodeReady:
 			if cond.Status != v1.ConditionTrue {
 				corr.add(fmt.Sprintf("Node %s Ready=%s reason=%s", node.Name, cond.Status, cond.Reason))
+				corr.score("Node", node.Name, 60, "node not ready")
 			}
 		case v1.NodeMemoryPressure, v1.NodeDiskPressure, v1.NodePIDPressure, v1.NodeNetworkUnavailable:
 			if cond.Status == v1.ConditionTrue {
 				corr.add(fmt.Sprintf("Node %s has %s reason=%s", node.Name, cond.Type, cond.Reason))
+				corr.score("Node", node.Name, 55, "node condition "+string(cond.Type))
 			}
 		}
 	}
@@ -353,6 +441,7 @@ func (c *Controller) correlateNetworkPolicies(ctx context.Context, pod *v1.Pod, 
 		if networkPolicySelectsPod(policy, pod.Labels) {
 			selected = append(selected, policy.Name)
 			corr.relate("NetworkPolicy", policy.Name)
+			corr.score("NetworkPolicy", policy.Name, 15, "network policy selects pod")
 		}
 	}
 	sort.Strings(selected)
@@ -435,4 +524,13 @@ func uniqueSorted(values []string) []string {
 		}
 	}
 	return sortedKeys(seen)
+}
+
+func stringSliceContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

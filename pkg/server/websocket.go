@@ -5,20 +5,14 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
+	"fixora/pkg/auth"
 	"github.com/gorilla/websocket"
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// In production, you would want to restrict this
-		return true
-	},
-}
 
 type Client struct {
 	hub  *Hub
@@ -134,13 +128,19 @@ func (c *Client) readPump() {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Require Auth
-	// (In a real implementation, you'd extract the token from query param or header)
 	if !websocket.IsWebSocketUpgrade(r) {
 		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
 		return
 	}
+	if _, ok := s.authenticateWebSocket(w, r); !ok {
+		return
+	}
 
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     s.checkWebSocketOrigin,
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("Failed to upgrade to websocket", "error", err)
@@ -154,6 +154,52 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// new goroutines.
 	go client.writePump()
 	go client.readPump()
+}
+
+func (s *Server) authenticateWebSocket(w http.ResponseWriter, r *http.Request) (*auth.Claims, bool) {
+	token := websocketToken(r)
+	if token == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return nil, false
+	}
+	claims, err := auth.ValidateToken(token)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return nil, false
+	}
+	return claims, true
+}
+
+func websocketToken(r *http.Request) string {
+	if token := r.URL.Query().Get("token"); token != "" {
+		return strings.TrimSpace(token)
+	}
+	return bearerToken(r.Header.Get("Authorization"))
+}
+
+func bearerToken(header string) string {
+	const prefix = "Bearer "
+	header = strings.TrimSpace(header)
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(header[len(prefix):])
+}
+
+func (s *Server) checkWebSocketOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Host == "" {
+		return false
+	}
+	return equalHost(originURL.Host, r.Host)
+}
+
+func equalHost(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 func (s *Server) BroadcastDashboardState() {

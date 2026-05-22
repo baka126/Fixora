@@ -1016,6 +1016,7 @@ func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
 func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string) {
 	slog.Info("Starting full forensics investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 
+	incidentWindow := ResolveIncidentWindow(pod, time.Now(), defaultIncidentLookback)
 	diagnosis := c.classifyPodIssue(ctx, pod, reason)
 	correlation := c.correlatePodResources(ctx, pod)
 	workload := c.workloadIdentityForPod(ctx, pod)
@@ -1040,11 +1041,15 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	}
 
 	evidence := notifications.EvidenceChain{
-		Namespace:         pod.Namespace,
-		PodName:           pod.Name,
-		ClusterContext:    fmt.Sprintf("Namespace: %s, Pod: %s, Workload Kind: %s, Workload Name: %s, Reason: %s\n%s\n%s\n%s", pod.Namespace, pod.Name, workload.Kind, workload.Name, reason, diagnosis.Summary(), correlation.Summary(), orchestration.Summary()),
-		HistoricalPattern: historySummary,
-		ShowEventButton:   true,
+		Namespace:                pod.Namespace,
+		PodName:                  pod.Name,
+		IncidentWindowStart:      incidentWindow.Since,
+		IncidentWindowEnd:        incidentWindow.Until,
+		IncidentWindowSource:     incidentWindow.Source,
+		IncidentWindowConfidence: incidentWindow.Confidence,
+		ClusterContext:           fmt.Sprintf("Namespace: %s, Pod: %s, Workload Kind: %s, Workload Name: %s, Reason: %s\n%s\n%s\n%s\n%s", pod.Namespace, pod.Name, workload.Kind, workload.Name, reason, incidentWindow.Summary(), diagnosis.Summary(), correlation.Summary(), orchestration.Summary()),
+		HistoricalPattern:        historySummary,
+		ShowEventButton:          true,
 	}
 	if c.history != nil {
 		c.history.SaveDependencyRefs(ctx, pod.Namespace, "Pod", pod.Name, orchestration.Related)
@@ -1061,49 +1066,29 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			evidence.ClusterContext += fmt.Sprintf("\nActive Alerts: %s", strings.Join(alertDetails, ", "))
 		}
 	}
-
-	// Gathers memory metrics for proof
-	if c.promClient != nil {
-		slog.Debug("Gathering metric proof from Prometheus", "ns", pod.Namespace, "pod", pod.Name)
-		usage, _ := c.promClient.GetPodUsage(pod.Namespace, pod.Name)
-		request, limit, _ := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
-
-		rss, cache := c.getGranularMetrics(pod.Namespace, pod.Name)
-
-		metricSource := "Prometheus"
-		_, err := c.promClient.GetHistory(pod.Namespace, pod.Name, time.Hour)
-		if err != nil {
-			metricSource = "K8s API (Historical trend unavailable)"
+	if c.argoClient != nil && workload.Kind != "" && workload.Name != "" {
+		if app, err := c.argoClient.GetAppForResource(ctx, pod.Namespace, workload.Name, workload.Kind); err == nil && app != nil {
+			evidence.ClusterContext += "\nArgoCD Source: " + security.ScrubPII(app.Summary(), c.customScrubbers...)
 		}
-
-		evidence.MetricProof = fmt.Sprintf("Metric Source: %s\nMemory Usage: %.2f MiB (RSS: %.2f, Cache: %.2f)\nLimit: %.2f MiB, Request: %.2f MiB",
-			metricSource, usage/1024/1024, rss/1024/1024, cache/1024/1024, limit/1024/1024, request/1024/1024)
 	}
 
-	// Gathers Kubernetes events
-	slog.Debug("Fetching Kubernetes events", "ns", pod.Namespace, "pod", pod.Name)
-	eventsTimeline, err := c.getPodEvents(ctx, pod)
-	if err == nil {
-		evidence.EventTimeline = eventsTimeline
+	collectedEvidence := c.collectIncidentEvidence(ctx, pod, incidentWindow)
+	evidence.MetricProof = collectedEvidence.MetricProof
+	evidence.EventTimeline = collectedEvidence.EventTimeline
+	evidence.StackTrace = collectedEvidence.StackTrace
+	if len(collectedEvidence.ClusterContextAppend) > 0 {
+		evidence.ClusterContext += "\n" + strings.Join(collectedEvidence.ClusterContextAppend, "\n")
 	}
 
 	// Execute Multi-Modal AI Forensics
 	var rootCause string
-	var logs string
 	var evidenceHash string
 	if c.aiProvider != nil {
 		slog.Info("Requesting AI analysis for investigation", "ns", pod.Namespace, "pod", pod.Name)
-		var err error
-		logs, err = c.getPodLogs(ctx, pod.Namespace, pod.Name)
-		if err != nil {
-			slog.Warn("Error fetching logs during investigation", "ns", pod.Namespace, "pod", pod.Name, "error", err)
-		}
-		if patterns := ClusterLogPatterns(logs, 5); len(patterns) > 0 {
-			evidence.ClusterContext += "\n" + formatLogPatterns(patterns)
-		}
+		logs := collectedEvidence.Logs
 
 		// Calculate Evidence Hash for caching
-		evidenceHash = CalculateEvidenceHash(logs, eventsTimeline, evidence.MetricProof)
+		evidenceHash = CalculateEvidenceHash(logs, evidence.EventTimeline, evidence.MetricProof)
 		if cached, hit := c.history.LookupInvestigationByHash(ctx, evidenceHash, 24*time.Hour); hit {
 			slog.Info("Cache HIT: Reusing previous AI analysis for identical evidence", "ns", pod.Namespace, "pod", pod.Name, "hash", evidenceHash)
 			evidence.RootCause = cached.RootCause
@@ -1112,27 +1097,9 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 			evidence.AIResponse = cached.AIResponse
 			rootCause = cached.RootCause
 		} else {
-			// Basic Stack Trace extraction for the interactive button
-			lines := strings.Split(logs, "\n")
-			var traceLines []string
-			inTrace := false
-			for _, line := range lines {
-				if strings.Contains(line, "stack trace:") || strings.Contains(line, "panic:") || strings.Contains(line, "goroutine") {
-					inTrace = true
-				}
-				if inTrace {
-					traceLines = append(traceLines, line)
-				}
-				if len(traceLines) > 50 {
-					break
-				}
-			}
-			if len(traceLines) > 0 {
-				evidence.StackTrace = strings.Join(traceLines, "\n")
-			}
-
-			// Execution with stateful tokenization for zero-trust security
-			tokenizer := security.NewTokenizer()
+			// Evidence sent to AI uses stable, non-reversible placeholders so
+			// audit trails stay readable without rehydrating sensitive values.
+			masking := security.NewMaskingContext(c.customScrubbers...)
 
 			// Sift logs to pick interesting patterns before tokenization
 			siftedLogs := ai.SiftLogs(logs, 100)
@@ -1155,10 +1122,10 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 				Namespace:  pod.Namespace,
 				PodName:    pod.Name,
 				Reason:     diagnosis.Symptom,
-				Logs:       tokenizer.Tokenize(siftedLogs),
-				Events:     tokenizer.Tokenize(eventsTimeline + "\n\n" + correlation.Summary()),
-				Metrics:    tokenizer.Tokenize(evidence.MetricProof),
-				History:    tokenizer.Tokenize(historyStr),
+				Logs:       masking.Mask(siftedLogs),
+				Events:     masking.Mask(evidence.EventTimeline + "\n\n" + correlation.Summary()),
+				Metrics:    masking.Mask(evidence.MetricProof),
+				History:    masking.Mask(historyStr),
 				PromptType: promptType,
 			}
 
@@ -1167,14 +1134,11 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 				slog.Error("AI Forensics analysis failed", "ns", pod.Namespace, "pod", pod.Name, "error", err)
 				evidence.RootCause = "Forensic analysis failed: " + err.Error()
 			} else {
-				// Detokenize the summary to restore context for the user
-				analysis := tokenizer.Detokenize(aiResp.Analysis)
-
-				evidence.RootCause = analysis
+				evidence.RootCause = masking.Mask(aiResp.Analysis)
 				evidence.AIConfidence = aiResp.Confidence
 				evidence.AIPrompt = aiResp.RawPrompt
-				evidence.AIResponse = analysis
-				rootCause = analysis
+				evidence.AIResponse = evidence.RootCause
+				rootCause = evidence.RootCause
 				slog.Info("AI analysis complete", "ns", pod.Namespace, "pod", pod.Name, "confidence", aiResp.Confidence)
 			}
 		}
@@ -1216,6 +1180,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	if c.config.Mode == config.ClickToFix {
 		evidence.ShowFixButton = true
 	}
+	populateEvidenceClaims(&evidence, diagnosis, correlation)
 
 	// Save the full investigation Evidence Chain to DB
 	invID := c.history.SaveInvestigation(ctx, evidence, reason, evidenceHash, string(diagnosis.Category), diagnosis.Symptom, diagnosis.Confidence)

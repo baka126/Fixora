@@ -23,6 +23,8 @@ func TestBuildAuditPayloadScrubsEvidenceAndActionDetails(t *testing.T) {
 		FinOpsImpact:      "email bob@example.com",
 		StackTrace:        "token: abcdefghijklmnopqrstuvwxyz",
 		FinOpsDetails:     "ticket-456",
+		ValidatedClaims:   []string{"owner alice@example.com proved ticket-321"},
+		UnvalidatedClaims: []string{"token: zyxwvutsrqponmlkjihgfedcba needs review"},
 	}
 
 	payload := buildAuditPayload(cfg, evidence, "fix", "created", "approved by carol@example.com for ticket-777")
@@ -45,6 +47,8 @@ func TestBuildAuditPayloadScrubsEvidenceAndActionDetails(t *testing.T) {
 		"ticket-456",
 		"ticket-777",
 		"ticket-999",
+		"ticket-321",
+		"zyxwvutsrqponmlkjihgfedcba",
 	} {
 		if strings.Contains(body, leaked) {
 			t.Fatalf("audit payload leaked %q: %s", leaked, body)

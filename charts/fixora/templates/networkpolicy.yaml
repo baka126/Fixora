@@ -1,0 +1,73 @@
+{{- if .Values.networkPolicy.enabled -}}
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: {{ include "fixora.fullname" . }}
+  labels:
+    {{- include "fixora.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fixora.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "fixora.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: ui
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+    # Allow Alertmanager and other webhooks
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+  egress:
+    # Allow access to Kubernetes API
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0 # Simplification, in production should be more restricted
+    # Allow access to Postgres
+    {{- if include "fixora.databaseEnabled" . }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "fixora.fullname" . }}-postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    # Allow access to AI providers and VCS
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+---
+{{- if and .Values.features.predictive.enabled .Values.features.database.embedded.enabled }}
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: {{ include "fixora.fullname" . }}-postgresql
+  labels:
+    {{- include "fixora.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fixora.fullname" . }}-postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "fixora.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+{{- end }}

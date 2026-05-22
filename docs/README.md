@@ -7,7 +7,10 @@ Fixora is an "Omni-Aware" diagnostics platform and Slack/Google Chat bot tailore
 ## 🚀 Quick Links
 
 * [**Deployment Guide**](deployment.md) - Get Fixora running in your cluster.
-* [**Architecture & Philosophy**](#core-architecture--philosophy) - Understand the design principles.
+* [**Dashboard UI**](ui-dashboard.md) - Learn how to use the web interface.
+* [**API Reference**](api-reference.md) - Documentation for REST endpoints and webhooks.
+* [**Troubleshooting**](troubleshooting.md) - Solutions for common issues.
+* [**Developer Guide**](developer-onboarding.md) - Setting up your local dev environment.
 
 ## Core Architecture & Philosophy
 
