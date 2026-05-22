@@ -87,6 +87,97 @@ func TestDashboardWorkloadPrefersOwnerFromContext(t *testing.T) {
 	}
 }
 
+func TestDashboardIncidentsSkipHealthyCurrentWorkloadsAndDedupe(t *testing.T) {
+	world := &WorldSnapshot{
+		Cluster: "prod",
+		Workloads: map[string]*WorldWorkload{
+			worldID("prod", "checkout", "Deployment", "api"): {
+				Cluster:   "prod",
+				Namespace: "checkout",
+				Kind:      "Deployment",
+				Name:      "api",
+				Desired:   1,
+				Ready:     1,
+			},
+			worldID("prod", "checkout", "Deployment", "worker"): {
+				Cluster:   "prod",
+				Namespace: "checkout",
+				Kind:      "Deployment",
+				Name:      "worker",
+				Desired:   1,
+				Ready:     0,
+			},
+		},
+		Pods: map[string]*WorldPod{
+			worldID("prod", "checkout", "Pod", "api-abc"): {
+				Cluster:    "prod",
+				Namespace:  "checkout",
+				Name:       "api-abc",
+				Phase:      "Running",
+				Ready:      true,
+				WorkloadID: worldID("prod", "checkout", "Deployment", "api"),
+			},
+			worldID("prod", "checkout", "Pod", "worker-abc"): {
+				Cluster:    "prod",
+				Namespace:  "checkout",
+				Name:       "worker-abc",
+				Phase:      "Pending",
+				Reason:     "ImagePullBackOff",
+				Ready:      false,
+				WorkloadID: worldID("prod", "checkout", "Deployment", "worker"),
+			},
+			worldID("prod", "checkout", "Pod", "worker-def"): {
+				Cluster:    "prod",
+				Namespace:  "checkout",
+				Name:       "worker-def",
+				Phase:      "Pending",
+				Reason:     "ImagePullBackOff",
+				Ready:      false,
+				WorkloadID: worldID("prod", "checkout", "Deployment", "worker"),
+			},
+		},
+	}
+	world.Workloads[worldID("prod", "checkout", "Deployment", "api")].Pods = []string{worldID("prod", "checkout", "Pod", "api-abc")}
+	world.Workloads[worldID("prod", "checkout", "Deployment", "worker")].Pods = []string{
+		worldID("prod", "checkout", "Pod", "worker-abc"),
+		worldID("prod", "checkout", "Pod", "worker-def"),
+	}
+
+	got := dashboardIncidents(context.Background(), nil, world, []dashboardInvestigationRow{
+		{
+			ID:             3,
+			Namespace:      "checkout",
+			PodName:        "api-abc",
+			Timestamp:      time.Now(),
+			Reason:         "CrashLoopBackOff",
+			ClusterContext: "Workload Kind: Deployment, Workload Name: api, Reason: CrashLoopBackOff",
+		},
+		{
+			ID:             2,
+			Namespace:      "checkout",
+			PodName:        "worker-abc",
+			Timestamp:      time.Now(),
+			Reason:         "ImagePullBackOff",
+			ClusterContext: "Workload Kind: Deployment, Workload Name: worker, Reason: ImagePullBackOff",
+		},
+		{
+			ID:             1,
+			Namespace:      "checkout",
+			PodName:        "worker-def",
+			Timestamp:      time.Now().Add(-time.Minute),
+			Reason:         "ImagePullBackOff",
+			ClusterContext: "Workload Kind: Deployment, Workload Name: worker, Reason: ImagePullBackOff",
+		},
+	}, nil, nil, DashboardPolicy{Mode: "Auto-fix"}, 0.99, 14.4)
+
+	if len(got) != 1 {
+		t.Fatalf("incident count = %d, want only one active deduped incident", len(got))
+	}
+	if got[0].Workload.Name != "worker" || got[0].Workload.PodName != "worker-abc" {
+		t.Fatalf("incident = %#v, want latest worker incident", got[0].Workload)
+	}
+}
+
 func TestDashboardWorkloadViewsExposeIncidentRCAAndPolicy(t *testing.T) {
 	incidents := []DashboardIncident{{
 		ID:          "investigation-7",

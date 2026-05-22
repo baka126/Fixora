@@ -183,9 +183,7 @@ func (r *Resolver) ResolvePod(ctx context.Context, pod *v1.Pod) ([]WorkloadSourc
 	}
 
 	if len(sources) == 0 {
-		if src, ok := r.resolveAnnotations(pod); ok {
-			sources = append(sources, src)
-		}
+		sources = append(sources, r.resolveAnnotationSources(ctx, pod)...)
 	}
 
 	sources = dedupeSources(sources)
@@ -312,9 +310,41 @@ func (r *Resolver) resolveFluxHelmReleases(ctx context.Context, pod *v1.Pod) []W
 	return sources
 }
 
-func (r *Resolver) resolveAnnotations(pod *v1.Pod) (WorkloadSource, bool) {
-	repoURL := pod.Annotations[r.annotationPrefix+"/repo-url"]
-	filePath := pod.Annotations[r.annotationPrefix+"/repo-path"]
+func (r *Resolver) resolveAnnotationSources(ctx context.Context, pod *v1.Pod) []WorkloadSource {
+	if src, ok := r.sourceFromAnnotations(pod.Annotations, "matched Fixora pod annotations"); ok {
+		return []WorkloadSource{src}
+	}
+	if r.clientset == nil {
+		return nil
+	}
+
+	var sources []WorkloadSource
+	seen := map[string]bool{}
+	for _, ref := range workloadRefsForPod(ctx, r.clientset, pod) {
+		if ref.Kind == "Pod" {
+			continue
+		}
+		annotations := r.workloadAnnotations(ctx, ref)
+		if len(annotations) == 0 {
+			continue
+		}
+		src, ok := r.sourceFromAnnotations(annotations, fmt.Sprintf("matched Fixora %s annotations", ref.Kind))
+		if !ok {
+			continue
+		}
+		key := strings.Join([]string{string(src.Controller), src.RepoURL, src.TargetRevision, src.Path}, "\x00")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		sources = append(sources, src)
+	}
+	return sources
+}
+
+func (r *Resolver) sourceFromAnnotations(annotations map[string]string, reason string) (WorkloadSource, bool) {
+	repoURL := annotations[r.annotationPrefix+"/repo-url"]
+	filePath := annotations[r.annotationPrefix+"/repo-path"]
 	if repoURL == "" || filePath == "" {
 		return WorkloadSource{}, false
 	}
@@ -326,12 +356,48 @@ func (r *Resolver) resolveAnnotations(pod *v1.Pod) (WorkloadSource, bool) {
 		Controller:     ControllerAnnotation,
 		RepoURL:        repoURL,
 		Path:           cleanPath,
-		TargetRevision: pod.Annotations[r.annotationPrefix+"/target-revision"],
+		TargetRevision: annotations[r.annotationPrefix+"/target-revision"],
 		ManifestType:   inferManifestType(ManifestUnknown, cleanPath, repoURL),
-		Reason:         "matched Fixora pod annotations",
+		Reason:         reason,
 	}
 	enrichOverlay(&source)
 	return source, true
+}
+
+func (r *Resolver) workloadAnnotations(ctx context.Context, ref workloadRef) map[string]string {
+	switch ref.Kind {
+	case "Deployment":
+		obj, err := r.clientset.AppsV1().Deployments(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err == nil {
+			return obj.Annotations
+		}
+	case "StatefulSet":
+		obj, err := r.clientset.AppsV1().StatefulSets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err == nil {
+			return obj.Annotations
+		}
+	case "DaemonSet":
+		obj, err := r.clientset.AppsV1().DaemonSets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err == nil {
+			return obj.Annotations
+		}
+	case "ReplicaSet":
+		obj, err := r.clientset.AppsV1().ReplicaSets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err == nil {
+			return obj.Annotations
+		}
+	case "Job":
+		obj, err := r.clientset.BatchV1().Jobs(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err == nil {
+			return obj.Annotations
+		}
+	case "CronJob":
+		obj, err := r.clientset.BatchV1().CronJobs(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err == nil {
+			return obj.Annotations
+		}
+	}
+	return nil
 }
 
 func (r *Resolver) sourceFromFluxKustomization(ctx context.Context, obj unstructured.Unstructured) WorkloadSource {

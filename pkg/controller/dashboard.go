@@ -585,9 +585,9 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 
 	world, allPods := c.CachedWorldSnapshot(ctx)
 
-	snapshot.KPIs = dashboardKPIs(investigations, predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Pipeline = defaultDashboardPipeline(statusCounts, dashboardPipelineItems(remediations))
 	snapshot.Incidents = dashboardIncidents(ctx, db, world, investigations, remByInvestigation, remByPod, snapshot.Policy, c.config.SLOAvailabilityObjective, c.config.SLOBurnRateThreshold)
+	snapshot.KPIs = dashboardKPIs(len(snapshot.Incidents), predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Remediations = dashboardRemediations(remediations)
 	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
 	snapshot.Predictions = dashboardPredictions(predictions)
@@ -797,7 +797,7 @@ func emptyDashboardKPIs() []DashboardKPI {
 	}
 }
 
-func dashboardKPIs(investigations []dashboardInvestigationRow, predictions []dashboardPredictionRow, alertCount, predictionCount int, statusCounts map[string]int) []DashboardKPI {
+func dashboardKPIs(activeIncidentCount int, predictions []dashboardPredictionRow, alertCount, predictionCount int, statusCounts map[string]int) []DashboardKPI {
 	succeeded := statusCounts["succeeded"]
 	failed := statusCounts["production_failed"] + statusCounts["revert_failed"] + statusCounts["reverted"]
 	successValue := "n/a"
@@ -817,7 +817,7 @@ func dashboardKPIs(investigations []dashboardInvestigationRow, predictions []das
 		riskDetail = "estimated hourly risk"
 	}
 	return []DashboardKPI{
-		{Label: "Open incidents", Value: fmt.Sprintf("%d", len(investigations)), Detail: fmt.Sprintf("%d alerts in 24h", alertCount), Icon: "icon-alert", Tone: severityTone(len(investigations)), Delta: fmt.Sprintf("%d active", len(investigations)), Trend: dashboardTrend(len(investigations), 7)},
+		{Label: "Open incidents", Value: fmt.Sprintf("%d", activeIncidentCount), Detail: fmt.Sprintf("%d alerts in 24h", alertCount), Icon: "icon-alert", Tone: severityTone(activeIncidentCount), Delta: fmt.Sprintf("%d active", activeIncidentCount), Trend: dashboardTrend(activeIncidentCount, 7)},
 		{Label: "PRs awaiting review", Value: fmt.Sprintf("%d", statusCounts["pending_approval"]), Detail: "approval queue", Icon: "icon-branch", Tone: "warning", Delta: fmt.Sprintf("%d awaiting review", statusCounts["pending_approval"]), Trend: dashboardTrend(statusCounts["pending_approval"], 5)},
 		{Label: "Auto-fix success", Value: successValue, Detail: "closed-loop outcomes", Icon: "icon-check", Tone: "success", Trend: dashboardTrend(succeeded, 6)},
 		{Label: "Reverts", Value: fmt.Sprintf("%d", statusCounts["revert_opened"]+statusCounts["reverted"]+statusCounts["revert_failed"]), Detail: "safety actions", Icon: "icon-clock", Tone: "warning", Trend: dashboardTrend(statusCounts["revert_opened"]+statusCounts["reverted"]+statusCounts["revert_failed"], 4)},
@@ -1701,6 +1701,7 @@ func dashboardStringList(raw []byte) []string {
 
 func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, investigations []dashboardInvestigationRow, remByInvestigation map[int64]dashboardRemediationRow, remByPod map[string]dashboardRemediationRow, policy DashboardPolicy, availabilitySLO, burnRateThreshold float64) []DashboardIncident {
 	out := make([]DashboardIncident, 0, len(investigations))
+	seen := map[string]bool{}
 	for _, inv := range investigations {
 		rem, ok := remByInvestigation[inv.ID]
 		if !ok {
@@ -1734,9 +1735,38 @@ func dashboardIncidents(ctx context.Context, db *sql.DB, world *WorldSnapshot, i
 		if incident.GitOps != nil && dashboardManifestIsHelm(incident.GitOps.ManifestType) {
 			incident.Graph, incident.Edges = dashboardHelmGraph(incident.GitOps, incident.PR, incident.Graph, incident.Edges)
 		}
+		if dashboardIncidentResolved(world, incident) {
+			continue
+		}
+		key := dashboardWorkloadKey(incident.Workload)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		out = append(out, incident)
 	}
 	return out
+}
+
+func dashboardIncidentResolved(world *WorldSnapshot, incident DashboardIncident) bool {
+	if world == nil {
+		return false
+	}
+	workload := incident.Workload
+	if strings.EqualFold(workload.Kind, "Pod") {
+		podName := firstNonEmpty(workload.PodName, workload.Name)
+		pod, ok := world.Pods[worldID(world.Cluster, workload.Namespace, "Pod", podName)]
+		if !ok {
+			return false
+		}
+		phase := strings.ToLower(pod.Phase)
+		return pod.Ready && phase == "running" || phase == "succeeded"
+	}
+	current, ok := world.Workloads[worldID(world.Cluster, workload.Namespace, workload.Kind, workload.Name)]
+	if !ok {
+		return false
+	}
+	return dashboardWorkloadHealth(current) == "healthy"
 }
 
 func dashboardWorkload(inv dashboardInvestigationRow, rem dashboardRemediationRow) DashboardWorkload {
@@ -2315,6 +2345,9 @@ func queryDashboardGraph(ctx context.Context, db *sql.DB, world *WorldSnapshot, 
 	if nodes, edges, ok := worldDashboardGraph(world, namespace, podName, workload); ok {
 		return nodes, edges
 	}
+	if db == nil {
+		return fallbackDashboardGraph(workload, clusterContext)
+	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT source_kind, source_name
 		FROM dependency_graph
@@ -2848,8 +2881,15 @@ func sortedMapKeys(values map[string]string) []string {
 func contextValue(context, key string) string {
 	prefix := key + ":"
 	for _, line := range strings.Split(context, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), prefix))
+		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		if line == "" {
+			continue
+		}
+		for _, part := range strings.Split(line, ",") {
+			part = strings.TrimSpace(part)
+			if strings.HasPrefix(strings.ToLower(part), strings.ToLower(prefix)) {
+				return strings.TrimSpace(part[len(prefix):])
+			}
 		}
 	}
 	return ""

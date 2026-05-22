@@ -9,14 +9,14 @@ declare global {
   }
 }
 
-const getBaseURL = () => {
+export const getApiBaseURL = () => {
   const configBase = window.FIXORA_CONFIG?.apiBaseUrl || '/api';
   // Ensure it ends with /v1
   return configBase.endsWith('/v1') ? configBase : `${configBase.replace(/\/$/, '')}/v1`;
 };
 
 export const apiClient = axios.create({
-  baseURL: getBaseURL(),
+  baseURL: getApiBaseURL(),
   headers: {
     'Content-Type': 'application/json',
   },

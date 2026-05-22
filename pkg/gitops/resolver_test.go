@@ -87,6 +87,55 @@ func TestResolveAnnotationFallback(t *testing.T) {
 	}
 }
 
+func TestResolveAnnotationFallbackFromOwnerDeployment(t *testing.T) {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "api-7d9f9d7f6f-x2abc",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet",
+				Name: "api-7d9f9d7f6f",
+			}},
+		},
+	}
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "api-7d9f9d7f6f",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "Deployment",
+				Name: "api",
+			}},
+		},
+	}
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "api",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"fixora.io/repo-url":        "https://github.com/acme/app.git",
+				"fixora.io/repo-path":       "deploy/prod/deployment.yaml",
+				"fixora.io/target-revision": "release",
+			},
+		},
+	}
+	resolver := NewResolver(fake.NewSimpleClientset(pod, rs, deployment), nil, ResolverConfig{})
+
+	got, err := resolver.ResolvePod(context.Background(), pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 owner annotation source, got %d", len(got))
+	}
+	if got[0].Controller != ControllerAnnotation || got[0].Path != "deploy/prod" || got[0].TargetRevision != "release" {
+		t.Fatalf("unexpected owner annotation source: %+v", got[0])
+	}
+	if got[0].Reason != "matched Fixora Deployment annotations" {
+		t.Fatalf("unexpected source reason %q", got[0].Reason)
+	}
+}
+
 func TestResolveArgoCDHelmSourceMetadata(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "nginx-abc", Namespace: "prod", Labels: map[string]string{"app.kubernetes.io/instance": "edge"}}}
 	app := appWithSource("edge", map[string]interface{}{
