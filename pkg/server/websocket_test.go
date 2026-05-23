@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"fixora/pkg/auth"
+	"fixora/pkg/config"
 	"fixora/pkg/models"
 )
 
@@ -47,7 +48,7 @@ func TestWebSocketTokenAcceptsQueryToken(t *testing.T) {
 }
 
 func TestCheckWebSocketOriginRequiresSameHost(t *testing.T) {
-	server := &Server{}
+	server := &Server{config: &config.Config{}}
 	req := websocketUpgradeRequest("http://fixora.example.com/api/v1/ws")
 	req.Host = "fixora.example.com"
 	req.Header.Set("Origin", "https://fixora.example.com")
@@ -58,5 +59,36 @@ func TestCheckWebSocketOriginRequiresSameHost(t *testing.T) {
 	req.Header.Set("Origin", "https://evil.example.com")
 	if server.checkWebSocketOrigin(req) {
 		t.Fatal("cross-origin websocket request was accepted")
+	}
+}
+
+func TestCheckWebSocketOriginAllowsConfiguredOrigins(t *testing.T) {
+	server := &Server{
+		config: &config.Config{
+			AllowedOrigins: []string{"trusted.example.com", "other.example.com"},
+		},
+	}
+
+	req := websocketUpgradeRequest("http://fixora.example.com/api/v1/ws")
+	req.Host = "fixora.example.com"
+
+	// Trusted origin
+	req.Header.Set("Origin", "https://trusted.example.com")
+	if !server.checkWebSocketOrigin(req) {
+		t.Fatal("explicitly allowed origin was rejected")
+	}
+
+	// Wildcard
+	server.config.AllowedOrigins = []string{"*"}
+	req.Header.Set("Origin", "https://anything.example.com")
+	if !server.checkWebSocketOrigin(req) {
+		t.Fatal("wildcard allowed origin was rejected")
+	}
+
+	// Still rejected if not in list
+	server.config.AllowedOrigins = []string{"trusted.example.com"}
+	req.Header.Set("Origin", "https://untrusted.example.com")
+	if server.checkWebSocketOrigin(req) {
+		t.Fatal("unauthorized origin was accepted")
 	}
 }

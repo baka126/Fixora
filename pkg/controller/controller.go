@@ -1234,33 +1234,44 @@ func (c *Controller) gatherDependencyContext(ctx context.Context, pod *v1.Pod) m
 		return deps
 	}
 
-	// 1. App Owner (Deployment/StatefulSet)
-	for _, owner := range pod.OwnerReferences {
-		if owner.Kind == "ReplicaSet" {
-			rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err == nil {
-				for _, rsOwner := range rs.OwnerReferences {
-					info, err := c.argoClient.GetAppForResource(ctx, pod.Namespace, rsOwner.Name, rsOwner.Kind)
-					if err == nil {
-						deps[info.RepoURL] = info
-					}
-				}
-			}
-		}
-	}
+	// 1. App Owner Chain (Deployment/StatefulSet/CronJob etc.)
+	c.recursiveGatherArgoContext(ctx, pod.Namespace, pod.OwnerReferences, deps)
 
 	// 2. NetworkPolicies in the same namespace
 	netpols, err := c.clientset.NetworkingV1().NetworkPolicies(pod.Namespace).List(ctx, metav1.ListOptions{})
 	if err == nil {
 		for _, np := range netpols.Items {
-			info, err := c.argoClient.GetAppForResource(ctx, pod.Namespace, np.Name, "NetworkPolicy")
-			if err == nil {
+			if info, err := c.argoClient.GetAppForResource(ctx, pod.Namespace, np.Name, "NetworkPolicy"); err == nil && info != nil {
 				deps[info.RepoURL] = info
 			}
 		}
 	}
 
 	return deps
+}
+
+func (c *Controller) recursiveGatherArgoContext(ctx context.Context, namespace string, owners []metav1.OwnerReference, deps map[string]*argocd.AppInfo) {
+	for _, owner := range owners {
+		if info, err := c.argoClient.GetAppForResource(ctx, namespace, owner.Name, owner.Kind); err == nil && info != nil {
+			deps[info.RepoURL] = info
+		}
+
+		var parentOwners []metav1.OwnerReference
+		switch owner.Kind {
+		case "ReplicaSet":
+			if rs, err := c.clientset.AppsV1().ReplicaSets(namespace).Get(ctx, owner.Name, metav1.GetOptions{}); err == nil {
+				parentOwners = rs.OwnerReferences
+			}
+		case "Job":
+			if job, err := c.clientset.BatchV1().Jobs(namespace).Get(ctx, owner.Name, metav1.GetOptions{}); err == nil {
+				parentOwners = job.OwnerReferences
+			}
+		}
+
+		if len(parentOwners) > 0 {
+			c.recursiveGatherArgoContext(ctx, namespace, parentOwners, deps)
+		}
+	}
 }
 
 // handleRemediation attempts to open Pull Requests with fixes by discovering the pod's source repositories and dependencies.

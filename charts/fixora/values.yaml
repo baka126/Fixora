@@ -11,6 +11,8 @@ image:
 
 _UI: false
 
+allowedOrigins: [] # List of allowed WebSocket origins (e.g., ["dashboard.example.com", "localhost:5173"]). Use ["*"] to allow all (not recommended for production).
+
 ui:
   enabled: false
   replicaCount: 1

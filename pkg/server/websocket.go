@@ -193,9 +193,27 @@ func (s *Server) checkWebSocketOrigin(r *http.Request) bool {
 	}
 	originURL, err := url.Parse(origin)
 	if err != nil || originURL.Host == "" {
+		slog.Warn("WebSocket upgrade rejected: invalid origin", "origin", origin)
 		return false
 	}
-	return equalHost(originURL.Host, r.Host)
+
+	// Check if the origin matches the request host (Same-Origin)
+	if equalHost(originURL.Host, r.Host) {
+		return true
+	}
+
+	// Check against explicitly allowed origins
+	for _, allowed := range s.config.AllowedOrigins {
+		if allowed == "*" || equalHost(originURL.Host, allowed) {
+			return true
+		}
+	}
+
+	slog.Warn("WebSocket upgrade rejected: origin not allowed",
+		"origin_host", originURL.Host,
+		"request_host", r.Host,
+		"allowed_origins", s.config.AllowedOrigins)
+	return false
 }
 
 func equalHost(a, b string) bool {

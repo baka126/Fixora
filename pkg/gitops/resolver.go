@@ -204,7 +204,7 @@ func (r *Resolver) resolveArgoCD(ctx context.Context, pod *v1.Pod) []WorkloadSou
 	}
 
 	var sources []WorkloadSource
-	workloads := workloadRefsForPod(ctx, r.clientset, pod)
+	workloads := workloadRefsForPod(ctx, r, pod)
 	for _, app := range apps.Items {
 		if !argoAppManagesWorkload(app.Object, workloads) {
 			continue
@@ -240,7 +240,7 @@ func (r *Resolver) resolveFluxKustomizations(ctx context.Context, pod *v1.Pod) [
 			continue
 		}
 		for _, item := range items.Items {
-			if !fluxInventoryContains(item.Object, pod.Namespace, pod.Name, "Pod") && !fluxInventoryContainsAny(item.Object, workloadRefsForPod(ctx, r.clientset, pod)) {
+			if !fluxInventoryContains(item.Object, pod.Namespace, pod.Name, "Pod") && !fluxInventoryContainsAny(item.Object, workloadRefsForPod(ctx, r, pod)) {
 				continue
 			}
 			src := r.sourceFromFluxKustomization(ctx, item)
@@ -314,13 +314,13 @@ func (r *Resolver) resolveAnnotationSources(ctx context.Context, pod *v1.Pod) []
 	if src, ok := r.sourceFromAnnotations(pod.Annotations, "matched Fixora pod annotations"); ok {
 		return []WorkloadSource{src}
 	}
-	if r.clientset == nil {
+	if r.clientset == nil && r.dynamicClient == nil {
 		return nil
 	}
 
 	var sources []WorkloadSource
 	seen := map[string]bool{}
-	for _, ref := range workloadRefsForPod(ctx, r.clientset, pod) {
+	for _, ref := range workloadRefsForPod(ctx, r, pod) {
 		if ref.Kind == "Pod" {
 			continue
 		}
@@ -365,6 +365,17 @@ func (r *Resolver) sourceFromAnnotations(annotations map[string]string, reason s
 }
 
 func (r *Resolver) workloadAnnotations(ctx context.Context, ref workloadRef) map[string]string {
+	if r.dynamicClient != nil {
+		gvr := r.gvrForKind(ref.Kind)
+		if gvr.Resource != "" {
+			obj, err := r.dynamicClient.Resource(gvr).Namespace(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+			if err == nil {
+				return obj.GetAnnotations()
+			}
+		}
+	}
+
+	// Fallback to static switch for common types if dynamic fetch fails or client is missing
 	switch ref.Kind {
 	case "Deployment":
 		obj, err := r.clientset.AppsV1().Deployments(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
@@ -398,6 +409,29 @@ func (r *Resolver) workloadAnnotations(ctx context.Context, ref workloadRef) map
 		}
 	}
 	return nil
+}
+
+func (r *Resolver) gvrForKind(kind string) schema.GroupVersionResource {
+	switch kind {
+	case "Deployment":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	case "StatefulSet":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
+	case "DaemonSet":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
+	case "ReplicaSet":
+		return schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	case "Job":
+		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
+	case "CronJob":
+		return schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}
+	case "Pod":
+		return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	case "Rollout": // Argo Rollouts
+		return schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
+	default:
+		return schema.GroupVersionResource{}
+	}
 }
 
 func (r *Resolver) sourceFromFluxKustomization(ctx context.Context, obj unstructured.Unstructured) WorkloadSource {
@@ -508,19 +542,60 @@ func (r *Resolver) resolveFluxSource(ctx context.Context, namespace, name string
 	return url, firstNonEmpty(branch, tag, commit)
 }
 
-func workloadRefsForPod(ctx context.Context, clientset kubernetes.Interface, pod *v1.Pod) []workloadRef {
+func workloadRefsForPod(ctx context.Context, resolver *Resolver, pod *v1.Pod) []workloadRef {
 	refs := []workloadRef{{Namespace: pod.Namespace, Name: pod.Name, Kind: "Pod"}}
 	for _, owner := range pod.OwnerReferences {
-		refs = append(refs, workloadRef{Namespace: pod.Namespace, Name: owner.Name, Kind: owner.Kind})
-		if owner.Kind == "ReplicaSet" && clientset != nil {
-			rs, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		refs = append(refs, recursiveWorkloadRefs(ctx, resolver, pod.Namespace, owner, pod.Labels)...)
+	}
+	return refs
+}
+
+func recursiveWorkloadRefs(ctx context.Context, resolver *Resolver, namespace string, owner metav1.OwnerReference, podLabels map[string]string) []workloadRef {
+	refs := []workloadRef{{Namespace: namespace, Name: owner.Name, Kind: owner.Kind}}
+
+	foundParent := false
+	// Attempt to find parent owners of this owner
+	if resolver.dynamicClient != nil {
+		gvr := resolver.gvrForKind(owner.Kind)
+		if gvr.Resource != "" {
+			obj, err := resolver.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 			if err == nil {
-				for _, rsOwner := range rs.OwnerReferences {
-					refs = append(refs, workloadRef{Namespace: pod.Namespace, Name: rsOwner.Name, Kind: rsOwner.Kind})
+				foundParent = true
+				for _, parentOwner := range obj.GetOwnerReferences() {
+					refs = append(refs, recursiveWorkloadRefs(ctx, resolver, namespace, parentOwner, podLabels)...)
 				}
 			}
 		}
 	}
+
+	// Static fallback if dynamic client failed or is missing
+	if !foundParent && resolver.clientset != nil {
+		switch owner.Kind {
+		case "ReplicaSet":
+			rs, err := resolver.clientset.AppsV1().ReplicaSets(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err == nil {
+				for _, rsOwner := range rs.OwnerReferences {
+					refs = append(refs, recursiveWorkloadRefs(ctx, resolver, namespace, rsOwner, podLabels)...)
+				}
+			} else if podLabels != nil {
+				// RS is missing but might be a standard deployment name pattern
+				if _, ok := podLabels["pod-template-hash"]; ok {
+					if index := strings.LastIndex(owner.Name, "-"); index > 0 {
+						deploymentName := owner.Name[:index]
+						refs = append(refs, workloadRef{Namespace: namespace, Name: deploymentName, Kind: "Deployment"})
+					}
+				}
+			}
+		case "Job":
+			job, err := resolver.clientset.BatchV1().Jobs(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err == nil {
+				for _, jobOwner := range job.OwnerReferences {
+					refs = append(refs, recursiveWorkloadRefs(ctx, resolver, namespace, jobOwner, podLabels)...)
+				}
+			}
+		}
+	}
+
 	return refs
 }
 

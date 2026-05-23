@@ -120,72 +120,95 @@ func (c *Controller) workloadIdentityForPod(ctx context.Context, pod *v1.Pod) wo
 		Name:     pod.Name,
 		Selector: labels.SelectorFromSet(labels.Set(pod.Labels)).String(),
 	}
-	for _, owner := range pod.OwnerReferences {
-		switch owner.Kind {
-		case "ReplicaSet":
-			rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err != nil {
-				if deploymentName, ok := deploymentNameFromReplicaSetFallback(owner.Name, pod); ok {
-					return workloadIdentity{Kind: "Deployment", Name: deploymentName, Selector: fallback.Selector}
-				}
-				return workloadIdentity{Kind: "ReplicaSet", Name: owner.Name, Selector: fallback.Selector}
-			}
-			for _, rsOwner := range rs.OwnerReferences {
-				if rsOwner.Kind == "Deployment" {
-					deploy, err := c.clientset.AppsV1().Deployments(pod.Namespace).Get(ctx, rsOwner.Name, metav1.GetOptions{})
-					if err == nil {
-						return workloadIdentity{Kind: "Deployment", Name: deploy.Name, Selector: labelSelectorString(deploy.Spec.Selector, fallback.Selector)}
-					}
-					return workloadIdentity{Kind: "Deployment", Name: rsOwner.Name, Selector: fallback.Selector}
-				}
-			}
-			return workloadIdentity{Kind: "ReplicaSet", Name: rs.Name, Selector: labelSelectorString(rs.Spec.Selector, fallback.Selector)}
-		case "Deployment":
-			deploy, err := c.clientset.AppsV1().Deployments(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err == nil {
-				return workloadIdentity{Kind: "Deployment", Name: deploy.Name, Selector: labelSelectorString(deploy.Spec.Selector, fallback.Selector)}
-			}
-			return workloadIdentity{Kind: "Deployment", Name: owner.Name, Selector: fallback.Selector}
-		case "StatefulSet":
-			sts, err := c.clientset.AppsV1().StatefulSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err == nil {
-				return workloadIdentity{Kind: "StatefulSet", Name: sts.Name, Selector: labelSelectorString(sts.Spec.Selector, fallback.Selector)}
-			}
-			return workloadIdentity{Kind: "StatefulSet", Name: owner.Name, Selector: fallback.Selector}
-		case "DaemonSet":
-			ds, err := c.clientset.AppsV1().DaemonSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err == nil {
-				return workloadIdentity{Kind: "DaemonSet", Name: ds.Name, Selector: labelSelectorString(ds.Spec.Selector, fallback.Selector)}
-			}
-			return workloadIdentity{Kind: "DaemonSet", Name: owner.Name, Selector: fallback.Selector}
-		case "Job":
-			job, err := c.clientset.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err == nil {
-				return workloadIdentity{Kind: "Job", Name: job.Name, Selector: labelSelectorString(job.Spec.Selector, fallback.Selector)}
-			}
-			return workloadIdentity{Kind: "Job", Name: owner.Name, Selector: fallback.Selector}
+
+	rootKind, rootName := c.findTopLevelOwner(ctx, pod.Namespace, pod.OwnerReferences, pod.Labels)
+	if rootKind == "" || rootName == "" {
+		return fallback
+	}
+
+	// Try to fetch the selector for the root owner
+	selector := fallback.Selector
+	switch rootKind {
+	case "Deployment":
+		if obj, err := c.clientset.AppsV1().Deployments(pod.Namespace).Get(ctx, rootName, metav1.GetOptions{}); err == nil {
+			selector = labelSelectorString(obj.Spec.Selector, selector)
+		}
+	case "StatefulSet":
+		if obj, err := c.clientset.AppsV1().StatefulSets(pod.Namespace).Get(ctx, rootName, metav1.GetOptions{}); err == nil {
+			selector = labelSelectorString(obj.Spec.Selector, selector)
+		}
+	case "DaemonSet":
+		if obj, err := c.clientset.AppsV1().DaemonSets(pod.Namespace).Get(ctx, rootName, metav1.GetOptions{}); err == nil {
+			selector = labelSelectorString(obj.Spec.Selector, selector)
+		}
+	case "Job":
+		if obj, err := c.clientset.BatchV1().Jobs(pod.Namespace).Get(ctx, rootName, metav1.GetOptions{}); err == nil {
+			selector = labelSelectorString(obj.Spec.Selector, selector)
+		}
+	case "CronJob":
+		if obj, err := c.clientset.BatchV1().CronJobs(pod.Namespace).Get(ctx, rootName, metav1.GetOptions{}); err == nil {
+			selector = labelSelectorString(obj.Spec.JobTemplate.Spec.Selector, selector)
 		}
 	}
-	return fallback
+
+	return workloadIdentity{
+		Kind:     rootKind,
+		Name:     rootName,
+		Selector: selector,
+	}
 }
 
-func deploymentNameFromReplicaSetFallback(replicaSetName string, pod *v1.Pod) (string, bool) {
-	replicaSetName = strings.TrimSpace(replicaSetName)
-	if replicaSetName == "" || pod == nil {
-		return "", false
+func (c *Controller) findTopLevelOwner(ctx context.Context, namespace string, owners []metav1.OwnerReference, podLabels map[string]string) (string, string) {
+	for _, owner := range owners {
+		parentKind, parentName := c.findTopLevelOwnerForResource(ctx, namespace, owner.Kind, owner.Name, podLabels)
+		if parentKind != "" {
+			return parentKind, parentName
+		}
 	}
-	if _, ok := pod.Labels["pod-template-hash"]; !ok {
-		return "", false
+	return "", ""
+}
+
+func (c *Controller) findTopLevelOwnerForResource(ctx context.Context, namespace, kind, name string, podLabels map[string]string) (string, string) {
+	var parentOwners []metav1.OwnerReference
+
+	switch kind {
+	case "ReplicaSet":
+		rs, err := c.clientset.AppsV1().ReplicaSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			// RS is missing but might be a standard deployment name pattern
+			if podLabels != nil {
+				if _, ok := podLabels["pod-template-hash"]; ok {
+					if index := strings.LastIndex(name, "-"); index > 0 {
+						deploymentName := name[:index]
+						return c.findTopLevelOwnerForResource(ctx, namespace, "Deployment", deploymentName, podLabels)
+					}
+				}
+			}
+			return "ReplicaSet", name
+		}
+		parentOwners = rs.OwnerReferences
+	case "Job":
+		job, err := c.clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			parentOwners = job.OwnerReferences
+		}
+	case "Deployment", "StatefulSet", "DaemonSet", "CronJob":
+		return kind, name
+	default:
+		// Unknown or custom controller, try to see if it has owners
+		return kind, name
 	}
-	index := strings.LastIndex(replicaSetName, "-")
-	if index <= 0 {
-		return "", false
+
+	if len(parentOwners) > 0 {
+		for _, parent := range parentOwners {
+			pk, pn := c.findTopLevelOwnerForResource(ctx, namespace, parent.Kind, parent.Name, podLabels)
+			if pk != "" {
+				return pk, pn
+			}
+		}
 	}
-	deploymentName := strings.TrimSpace(replicaSetName[:index])
-	if deploymentName == "" {
-		return "", false
-	}
-	return deploymentName, true
+
+	return kind, name
 }
 
 func labelSelectorString(selector *metav1.LabelSelector, fallback string) string {
@@ -201,49 +224,41 @@ func labelSelectorString(selector *metav1.LabelSelector, fallback string) string
 
 func (c *Controller) correlateOwners(ctx context.Context, pod *v1.Pod, corr *ResourceCorrelation) {
 	chain := []string{"Pod/" + pod.Name}
-	for _, owner := range pod.OwnerReferences {
+	c.recursiveCorrelateOwners(ctx, pod.Namespace, pod.OwnerReferences, &chain, corr)
+	corr.add("Owner chain: " + strings.Join(chain, " -> "))
+}
+
+func (c *Controller) recursiveCorrelateOwners(ctx context.Context, namespace string, owners []metav1.OwnerReference, chain *[]string, corr *ResourceCorrelation) {
+	for _, owner := range owners {
+		*chain = append(*chain, owner.Kind+"/"+owner.Name)
+		corr.relate(owner.Kind, owner.Name)
+		// Higher score for workload owners to ensure they outrank unrelated resources like ConfigMaps
+		corr.score(owner.Kind, owner.Name, 50, "workload owner reference")
+
+		var parentOwners []metav1.OwnerReference
 		switch owner.Kind {
 		case "ReplicaSet":
-			rs, err := c.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-			if err != nil {
-				chain = append(chain, "ReplicaSet/"+owner.Name)
-				corr.relate("ReplicaSet", owner.Name)
-				corr.score("ReplicaSet", owner.Name, 35, "pod owner reference")
-				continue
+			rs, err := c.clientset.AppsV1().ReplicaSets(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err == nil {
+				parentOwners = rs.OwnerReferences
 			}
-			chain = append(chain, "ReplicaSet/"+rs.Name)
-			corr.relate("ReplicaSet", rs.Name)
-			corr.score("ReplicaSet", rs.Name, 35, "pod owner reference")
-			for _, rsOwner := range rs.OwnerReferences {
-				if rsOwner.Kind == "Deployment" {
-					chain = append(chain, "Deployment/"+rsOwner.Name)
-					corr.relate("Deployment", rsOwner.Name)
-					corr.score("Deployment", rsOwner.Name, 50, "controller owner of ReplicaSet")
-					c.correlateDeployment(ctx, pod.Namespace, rsOwner.Name, corr)
-				}
+		case "Job":
+			job, err := c.clientset.BatchV1().Jobs(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err == nil {
+				parentOwners = job.OwnerReferences
 			}
 		case "Deployment":
-			chain = append(chain, "Deployment/"+owner.Name)
-			corr.relate("Deployment", owner.Name)
-			corr.score("Deployment", owner.Name, 50, "pod owner reference")
-			c.correlateDeployment(ctx, pod.Namespace, owner.Name, corr)
+			c.correlateDeployment(ctx, namespace, owner.Name, corr)
 		case "StatefulSet":
-			chain = append(chain, "StatefulSet/"+owner.Name)
-			corr.relate("StatefulSet", owner.Name)
-			corr.score("StatefulSet", owner.Name, 50, "pod owner reference")
-			c.correlateStatefulSet(ctx, pod.Namespace, owner.Name, corr)
+			c.correlateStatefulSet(ctx, namespace, owner.Name, corr)
 		case "DaemonSet":
-			chain = append(chain, "DaemonSet/"+owner.Name)
-			corr.relate("DaemonSet", owner.Name)
-			corr.score("DaemonSet", owner.Name, 50, "pod owner reference")
-			c.correlateDaemonSet(ctx, pod.Namespace, owner.Name, corr)
-		case "Job":
-			chain = append(chain, "Job/"+owner.Name)
-			corr.relate("Job", owner.Name)
-			corr.score("Job", owner.Name, 50, "pod owner reference")
+			c.correlateDaemonSet(ctx, namespace, owner.Name, corr)
+		}
+
+		if len(parentOwners) > 0 {
+			c.recursiveCorrelateOwners(ctx, namespace, parentOwners, chain, corr)
 		}
 	}
-	corr.add("Owner chain: " + strings.Join(chain, " -> "))
 }
 
 func (c *Controller) correlateDeployment(ctx context.Context, namespace, name string, corr *ResourceCorrelation) {

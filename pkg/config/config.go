@@ -110,6 +110,7 @@ type Config struct {
 	PolicyGuardrailsEnabled  bool
 	AllowedImageRegistries   []string
 	AllowedReplacementImages []string
+	AllowedOrigins           []string
 
 	// FinOps Tuning
 	RevenuePerRequest     float64
@@ -209,6 +210,7 @@ func Load() *Config {
 		PolicyGuardrailsEnabled:  getEnvBool("POLICY_GUARDRAILS_ENABLED", true),
 		AllowedImageRegistries:   getEnvSlice("ALLOWED_IMAGE_REGISTRIES", []string{}),
 		AllowedReplacementImages: getEnvSlice("ALLOWED_REPLACEMENT_IMAGES", []string{}),
+		AllowedOrigins:           getEnvSlice("ALLOWED_ORIGINS", []string{}),
 
 		RevenuePerRequest:     getEnvFloat("REVENUE_PER_REQUEST", 0.0),
 		LatencyThresholdMS:    getEnvFloat("LATENCY_THRESHOLD_MS", 500.0),

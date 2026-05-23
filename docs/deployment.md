@@ -70,6 +70,7 @@ The dashboard will be available at `http://localhost:8080`. The first time you v
 | Helm Value | Environment Variable | Type | Description |
 | :--- | :--- | :--- | :--- |
 | `mode` | `FIXORA_MODE` | `string` | `auto-fix`, `click-to-fix`, or `dry-run`. |
+| `allowedOrigins` | `ALLOWED_ORIGINS` | `list` | Comma-separated list of allowed WebSocket origins (e.g., `dashboard.example.com,localhost:5173`). Use `*` to allow all. |
 | `ai.baseUrl`| `AI_BASE_URL` | `string` | (Optional) Custom Base URL for self-hosted AI models (e.g., Ollama). |
 | `privacy.customLogScrubbingPatterns`| `CUSTOM_LOG_SCRUBBING_PATTERNS` | `list` | Custom regex patterns to scrub from logs before AI transmission. |
 | `features.database.host`| `DB_HOST` | `string` | Postgres Database Host (Mandatory for stateful analysis). |
