@@ -30,6 +30,7 @@ const (
 	PatchProbe            = analyzer.PatchProbe
 	PatchServiceSelector  = analyzer.PatchServiceSelector
 	PatchPVC              = analyzer.PatchPVC
+	PatchSecurityContext  = analyzer.PatchSecurityContext
 )
 
 func refineDiagnosisFromEvidence(d Diagnosis, evidence notifications.EvidenceChain) Diagnosis {

@@ -2,7 +2,9 @@ package analyzer
 
 import (
 	"context"
+	"strings"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -61,4 +63,36 @@ func hasAcceptedCondition(conditions []interface{}) bool {
 		}
 	}
 	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func containsAny(s string, keywords ...string) bool {
+	lower := s
+	for _, k := range keywords {
+		if strings.Contains(lower, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+func podOwnerRefs(pod *v1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+	refs := make([]string, 0, len(pod.OwnerReferences))
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind != "" && owner.Name != "" {
+			refs = append(refs, owner.Kind+"/"+owner.Name)
+		}
+	}
+	return refs
 }

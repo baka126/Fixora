@@ -321,6 +321,12 @@ func semanticTargetChanged(beforeDocs, afterDocs []*yaml.Node, target SemanticTa
 			return true, detail, nil
 		}
 		return podSpecFieldsChanged(before, after, []string{"volumes"}, "pod volumes")
+	case "security-context":
+		changed, detail := containerFieldsChangedNoError(before, after, target.ContainerName, []string{"securityContext", "volumeMounts"}, "container security hardening")
+		if changed {
+			return true, detail, nil
+		}
+		return podSpecFieldsChanged(before, after, []string{"securityContext", "volumes"}, "pod security hardening")
 	case "probe":
 		return containerFieldsChanged(before, after, target.ContainerName, []string{"livenessProbe", "readinessProbe", "startupProbe"}, "container probes")
 	case "scheduling-policy":

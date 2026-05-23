@@ -38,6 +38,8 @@ func scorePRRisk(opts vcs.PullRequestOptions, source gitops.WorkloadSource, diag
 		add(15, "changes scheduling policy")
 	case PatchEnvOrVolumeRef, PatchPVC:
 		add(15, "changes runtime dependencies")
+	case PatchSecurityContext:
+		add(30, "changes workload security context or writable mounts")
 	}
 
 	for _, file := range opts.Files {

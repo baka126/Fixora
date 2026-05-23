@@ -74,3 +74,7 @@ type SLOBurnRateProvider interface {
 type TrafficGraphProvider interface {
 	GetTrafficEdges(window time.Duration, minRPS float64) ([]TrafficEdge, error)
 }
+
+type RightSizingProvider interface {
+	GetPodMemoryStats(ns, pod string, d time.Duration) (avgBytes, peakBytes float64, err error)
+}

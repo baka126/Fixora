@@ -221,6 +221,18 @@ spec:
               value: {{ .Values.features.performanceScanner.enabled | quote }}
             - name: LEAK_SCANNER_ENABLED
               value: {{ .Values.features.leakScanner.enabled | quote }}
+            - name: RIGHTSIZING_ENABLED
+              value: {{ .Values.features.rightSizing.enabled | quote }}
+            - name: RIGHTSIZING_SCAN_INTERVAL
+              value: {{ .Values.features.rightSizing.scanInterval | quote }}
+            - name: RIGHTSIZING_LOOKBACK
+              value: {{ .Values.features.rightSizing.lookback | quote }}
+            - name: RIGHTSIZING_PEAK_THRESHOLD
+              value: {{ .Values.features.rightSizing.peakThreshold | quote }}
+            - name: RIGHTSIZING_SAFETY_FACTOR
+              value: {{ .Values.features.rightSizing.safetyFactor | quote }}
+            - name: RIGHTSIZING_MIN_MONTHLY_SAVINGS
+              value: {{ .Values.features.rightSizing.minMonthlySavings | quote }}
             - name: ALERTMANAGER_SCRAPER_ENABLED
               value: {{ .Values.features.alertmanagerScraper.enabled | quote }}
 

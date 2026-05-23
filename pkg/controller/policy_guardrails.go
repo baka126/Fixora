@@ -132,6 +132,9 @@ func enforceManifestGuardrails(source gitops.WorkloadSource, filePath string, co
 		if kind == "Secret" {
 			return fmt.Errorf("Secret manifests are not allowed in %s", filePath)
 		}
+		if err := rejectPrivilegeEscalatingSecurityContext(doc, filePath); err != nil {
+			return err
+		}
 		if isWorkloadKind(kind) && source.ManifestType != gitops.ManifestHelm && source.ManifestType != gitops.ManifestFluxHelmRelease {
 			checkedWorkloadDoc = true
 			if manifestMatchesExpectedTarget(kind, name, incidentNamespace, expectedTargets) {
@@ -188,6 +191,64 @@ func nestedKubernetesObjectPathAt(node interface{}, currentPath string, root boo
 		}
 	}
 	return ""
+}
+
+func rejectPrivilegeEscalatingSecurityContext(doc map[string]interface{}, filePath string) error {
+	if boolPathValue(doc, "spec.hostPID") {
+		return fmt.Errorf("hostPID is not allowed in %s", filePath)
+	}
+	if boolPathValue(doc, "spec.hostIPC") {
+		return fmt.Errorf("hostIPC is not allowed in %s", filePath)
+	}
+	if boolPathValue(doc, "spec.hostNetwork") {
+		return fmt.Errorf("hostNetwork is not allowed in %s", filePath)
+	}
+	var violation string
+	visitManifestContainers(doc, func(container map[string]interface{}) {
+		if violation != "" {
+			return
+		}
+		sc, _ := container["securityContext"].(map[string]interface{})
+		if boolMapValue(sc, "privileged") {
+			violation = "privileged=true"
+			return
+		}
+		if boolMapValue(sc, "allowPrivilegeEscalation") {
+			violation = "allowPrivilegeEscalation=true"
+			return
+		}
+		if caps, ok := sc["capabilities"].(map[string]interface{}); ok {
+			if add, ok := caps["add"].([]interface{}); ok && len(add) > 0 {
+				violation = "capabilities.add"
+			}
+		}
+	})
+	if violation != "" {
+		return fmt.Errorf("privilege-escalating securityContext %s is not allowed in %s", violation, filePath)
+	}
+	return nil
+}
+
+func boolPathValue(doc map[string]interface{}, path string) bool {
+	parts := strings.Split(path, ".")
+	var current interface{} = doc
+	for _, part := range parts {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		current = m[part]
+	}
+	value, _ := current.(bool)
+	return value
+}
+
+func boolMapValue(values map[string]interface{}, key string) bool {
+	if values == nil {
+		return false
+	}
+	value, _ := values[key].(bool)
+	return value
 }
 
 func isWorkloadKind(kind string) bool {

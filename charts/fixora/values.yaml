@@ -7,11 +7,11 @@ replicaCount: 1
 image:
   repository: ghcr.io/baka126/fixora
   pullPolicy: IfNotPresent
-  tag: "v0.4.18"
+  tag: "v0.4.19"
 
 _UI: false
 
-allowedOrigins: [] # List of allowed WebSocket origins (e.g., ["dashboard.example.com", "localhost:5173"]). Use ["*"] to allow all (not recommended for production).
+allowedOrigins: ["*"] # List of allowed WebSocket origins (e.g., ["dashboard.example.com", "localhost:5173"]). Use ["*"] to allow all (not recommended for production).
 
 ui:
   enabled: false
@@ -20,7 +20,7 @@ ui:
   image:
     repository: ghcr.io/baka126/fixora-ui
     pullPolicy: IfNotPresent
-    tag: "v0.4.18"
+    tag: "v0.4.19"
   service:
     type: ClusterIP
     port: 80
@@ -184,11 +184,20 @@ features:
   
   # Scan for memory leak trajectories via Prometheus
   leakScanner:
+    enabled: true
+
+  # Scan for over-provisioned workloads and open right-sizing remediation plans
+  rightSizing:
     enabled: false
+    scanInterval: 6h
+    lookback: 720h # 30 days
+    peakThreshold: 0.35 # peak memory usage must stay below 35% of request
+    safetyFactor: 1.5 # recommended request = peak usage * safety factor
+    minMonthlySavings: 1.0
   
   # Pull firing alerts from Alertmanager API
   alertmanagerScraper:
-    enabled: false
+    enabled: true
     # Optional label filters to reduce noise
     includeLabels: {}
       # fixora: "true"

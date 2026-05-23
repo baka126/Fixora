@@ -94,6 +94,12 @@ type Config struct {
 	PredictiveGrowthThreshold float64
 	PredictiveScanInterval    time.Duration
 	PredictiveMinDataPoints   int
+	RightSizingEnabled        bool
+	RightSizingScanInterval   time.Duration
+	RightSizingLookback       time.Duration
+	RightSizingPeakThreshold  float64
+	RightSizingSafetyFactor   float64
+	RightSizingMinSavings     float64
 
 	InfracostAPIKey   string
 	TrustedVCSDomains []string
@@ -196,6 +202,12 @@ func Load() *Config {
 		PredictiveGrowthThreshold: getEnvFloat("PREDICTIVE_GROWTH_THRESHOLD", 0.20),
 		PredictiveScanInterval:    getEnvDuration("PREDICTIVE_SCAN_INTERVAL", 5*time.Minute),
 		PredictiveMinDataPoints:   getEnvInt("PREDICTIVE_MIN_DATA_POINTS", 10),
+		RightSizingEnabled:        getEnvBool("RIGHTSIZING_ENABLED", false),
+		RightSizingScanInterval:   getEnvDuration("RIGHTSIZING_SCAN_INTERVAL", 6*time.Hour),
+		RightSizingLookback:       getEnvDuration("RIGHTSIZING_LOOKBACK", 30*24*time.Hour),
+		RightSizingPeakThreshold:  getEnvFloat("RIGHTSIZING_PEAK_THRESHOLD", 0.35),
+		RightSizingSafetyFactor:   getEnvFloat("RIGHTSIZING_SAFETY_FACTOR", 1.5),
+		RightSizingMinSavings:     getEnvFloat("RIGHTSIZING_MIN_MONTHLY_SAVINGS", 1.0),
 
 		InfracostAPIKey:   os.Getenv("INFRACOST_API_KEY"),
 		TrustedVCSDomains: getEnvSlice("TRUSTED_VCS_DOMAINS", []string{"github.com", "gitlab.com"}),

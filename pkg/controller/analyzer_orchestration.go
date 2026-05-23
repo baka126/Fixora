@@ -142,6 +142,9 @@ func selectedIncidentAnalyzers(primary Diagnosis, triggerReason string, identity
 	if containsAny(haystack, "node", "taint", "affinity", "selector", "unschedulable") {
 		add("node", "quota")
 	}
+	if containsAny(haystack, "permission denied", "operation not permitted", "read-only file system", "readonly file system", "securitycontext", "runasnonroot") {
+		add("security")
+	}
 
 	delete(selected, "pod")
 	names := make([]string, 0, len(selected))
@@ -152,11 +155,40 @@ func selectedIncidentAnalyzers(primary Diagnosis, triggerReason string, identity
 	return names
 }
 
+func (c *Controller) runSecurityAnalyzerWithEvidence(ctx context.Context, pod *v1.Pod, collected CollectedEvidence) []Diagnosis {
+	if c == nil || c.clientset == nil || pod == nil {
+		return nil
+	}
+	logContext := strings.TrimSpace(strings.Join([]string{collected.Logs, collected.EventTimeline, collected.StackTrace}, "\n"))
+	if logContext == "" {
+		return nil
+	}
+	results, err := (&analyzer.SecurityAnalyzer{}).Analyze(analyzer.Context{
+		Client:        c.clientset,
+		DynamicClient: c.dynamicClient,
+		Context:       ctx,
+		Namespace:     pod.Namespace,
+		LabelSelector: "metadata.name=" + pod.Name,
+		Logs:          logContext,
+	})
+	if err != nil {
+		slog.Debug("Security analyzer failed with runtime evidence", "ns", pod.Namespace, "pod", pod.Name, "error", err)
+		return nil
+	}
+	var findings []Diagnosis
+	for _, result := range results {
+		if result.Kind == "Pod" && result.Name == pod.Name {
+			findings = append(findings, result)
+		}
+	}
+	return dedupeAnalyzerFindings(findings)
+}
+
 func mergeAnalyzerFindings(primary Diagnosis, findings []Diagnosis) Diagnosis {
 	if len(findings) == 0 {
 		return primary
 	}
-	if primary.Category == CategoryUnknown || (primary.PatchStrategy == PatchNone && primary.Confidence < 70) {
+	if primary.Category == CategoryUnknown || (primary.PatchStrategy == PatchNone && primary.Confidence <= 70) {
 		best := findings[0]
 		for _, finding := range findings[1:] {
 			if finding.Confidence > best.Confidence && finding.PatchStrategy != PatchNone {

@@ -34,6 +34,7 @@ const (
 	PatchProbe            PatchStrategy = "probe"
 	PatchServiceSelector  PatchStrategy = "service-selector"
 	PatchPVC              PatchStrategy = "pvc-or-volume"
+	PatchSecurityContext  PatchStrategy = "security-context"
 )
 
 type Result struct {
@@ -81,4 +82,5 @@ type Context struct {
 	LabelSelector string
 	AIClient      ai.Provider
 	MetricsClient metrics.MetricsProvider
+	Logs          string
 }

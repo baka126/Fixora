@@ -37,6 +37,29 @@ metadata:
 	}
 }
 
+func TestEnforcePatchGuardrailsRejectsPrivilegeEscalation(t *testing.T) {
+	err := enforcePatchGuardrails(gitops.WorkloadSource{}, []vcs.FileChange{{
+		FilePath: "deploy/app.yaml",
+		NewContent: []byte(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:1
+        securityContext:
+          privileged: true
+`),
+	}}, nil, nil, "default", nil, nil)
+	if err == nil {
+		t.Fatal("expected privileged securityContext to be rejected")
+	}
+}
+
 func TestEnforcePatchGuardrailsRejectsUnapprovedImageRegistry(t *testing.T) {
 	err := enforcePatchGuardrails(gitops.WorkloadSource{}, []vcs.FileChange{{
 		FilePath: "deploy/app.yaml",

@@ -204,6 +204,57 @@ spec:
 	}
 }
 
+func TestApplyRawManifestPatchUpdatesSecurityContextAndEmptyDir(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
+	pod.Spec.Containers = []v1.Container{{Name: "api"}}
+	original := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v1
+`
+	generated := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      containers:
+      - name: api
+        image: ghcr.io/acme/api:v1
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+`
+
+	got, changed, err := applyRawManifestPatch(original, generated, gitops.WorkloadSource{ManifestType: gitops.ManifestRaw}, Diagnosis{PatchStrategy: PatchSecurityContext}, pod, workloadIdentity{Kind: "Deployment", Name: "api"}, "api")
+	if err != nil {
+		t.Fatalf("apply security patch: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected security patch to be applied")
+	}
+	for _, want := range []string{"emptyDir", "mountPath: /tmp", "readOnlyRootFilesystem: true", "allowPrivilegeEscalation: false"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in patch, got:\n%s", want, got)
+		}
+	}
+}
+
 func TestApplyRawManifestPatchRejectsBarePodForOwnedWorkload(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-7d9f-abc", Namespace: "default"}}
 	pod.Spec.Containers = []v1.Container{{Name: "api"}}

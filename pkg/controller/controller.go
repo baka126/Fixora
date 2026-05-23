@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path"
 	"regexp"
@@ -283,6 +284,11 @@ func (c *Controller) runLeaderWork(stopCh <-chan struct{}) {
 	if c.config.LeakScannerEnabled && c.config.PredictiveEnabled {
 		slog.Info("Leak Scanner Plugin enabled", "interval", c.config.PredictiveScanInterval)
 		go wait.Until(c.scanForLeaks, c.config.PredictiveScanInterval, stopCh)
+	}
+
+	if c.config.RightSizingEnabled {
+		slog.Info("Right-Sizing Scanner Plugin enabled", "interval", c.config.RightSizingScanInterval, "lookback", c.config.RightSizingLookback)
+		go wait.Until(c.scanForRightSizing, c.config.RightSizingScanInterval, stopCh)
 	}
 
 	// Start application failure scanner (5xx and latency)
@@ -574,6 +580,197 @@ func (c *Controller) scanForLeaks() {
 		}
 	}
 	slog.Debug("Memory leak scan finished")
+}
+
+func (c *Controller) scanForRightSizing() {
+	if c.promClient == nil || c.clientset == nil || c.history == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// 1. Determine namespaces to scan
+	var namespaces []string
+	if len(c.config.IncludedNamespaces) > 0 {
+		namespaces = c.config.IncludedNamespaces
+	} else {
+		nsList, err := c.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			slog.Error("Failed to list namespaces for right-sizing scan", "error", err)
+			return
+		}
+		for _, ns := range nsList.Items {
+			if c.isNamespaceScoped(ns.Name) {
+				namespaces = append(namespaces, ns.Name)
+			}
+		}
+	}
+
+	for _, ns := range namespaces {
+		pods, err := c.clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			slog.Error("Failed to list pods for right-sizing scan", "ns", ns, "error", err)
+			continue
+		}
+
+		for _, pod := range pods.Items {
+			if pod.Status.Phase != v1.PodRunning {
+				continue
+			}
+
+			requestBytes, limitBytes, err := c.promClient.GetPodLimits(pod.Namespace, pod.Name)
+			if err != nil || requestBytes <= 0 {
+				continue
+			}
+			avgBytes, peakBytes, err := c.podMemoryStats(pod.Namespace, pod.Name, c.config.RightSizingLookback)
+			if err != nil || peakBytes <= 0 {
+				continue
+			}
+
+			peakRatio := peakBytes / requestBytes
+			if peakRatio > c.rightSizingPeakThreshold() {
+				continue
+			}
+
+			recommendedRequest := roundMemoryBytes(maxFloat(peakBytes*c.rightSizingSafetyFactor(), 64*1024*1024))
+			if recommendedRequest >= requestBytes {
+				continue
+			}
+			recommendedLimit := limitBytes
+			if limitBytes > 0 {
+				recommendedLimit = roundMemoryBytes(maxFloat(recommendedRequest*1.5, recommendedRequest+128*1024*1024))
+				if recommendedLimit >= limitBytes {
+					recommendedLimit = 0
+				}
+			}
+
+			profile := c.getPricingProfile(ctx, &pod)
+			cpuReq, _, _ := c.promClient.GetPodCPULimits(pod.Namespace, pod.Name)
+			replicas := c.getReplicaCount(ctx, &pod)
+			oldMonthly := finops.CalculateMonthlyCost(cpuReq, requestBytes, profile, replicas)
+			newMonthly := finops.CalculateMonthlyCost(cpuReq, recommendedRequest, profile, replicas)
+			savings := oldMonthly - newMonthly
+			if savings < c.rightSizingMinSavings() {
+				continue
+			}
+
+			identity := c.workloadIdentityForPod(ctx, &pod)
+			lockKey := fmt.Sprintf("%s/%s/right-sizing", identity.Kind, identity.Name)
+			if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockKey, c.investigationCooldown()) {
+				slog.Debug("Skipping right-sizing opportunity: workload already in cooldown", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name)
+				continue
+			}
+
+			slog.Info("Right-sizing opportunity detected", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "request_mib", requestBytes/1024/1024, "peak_mib", peakBytes/1024/1024, "recommended_mib", recommendedRequest/1024/1024, "savings", savings)
+			c.reportRightSizingOpportunity(ctx, &pod, identity, requestBytes, limitBytes, avgBytes, peakBytes, recommendedRequest, recommendedLimit, savings, profile.Name)
+		}
+	}
+}
+
+func (c *Controller) podMemoryStats(namespace string, podName string, lookback time.Duration) (float64, float64, error) {
+	if provider, ok := c.promClient.(metrics.RightSizingProvider); ok {
+		return provider.GetPodMemoryStats(namespace, podName, lookback)
+	}
+	matrix, err := c.promClient.GetHistory(namespace, podName, lookback)
+	if err != nil {
+		return 0, 0, err
+	}
+	var sum float64
+	var count int
+	var peak float64
+	for _, stream := range matrix {
+		for _, value := range stream.Values {
+			v := float64(value.Value)
+			sum += v
+			count++
+			if v > peak {
+				peak = v
+			}
+		}
+	}
+	if count == 0 {
+		return 0, 0, fmt.Errorf("no right-sizing memory samples for pod %s/%s", namespace, podName)
+	}
+	return sum / float64(count), peak, nil
+}
+
+func (c *Controller) reportRightSizingOpportunity(ctx context.Context, pod *v1.Pod, identity workloadIdentity, requestBytes, limitBytes, avgBytes, peakBytes, recommendedRequest, recommendedLimit, savings float64, pricingSource string) {
+	metricProof := fmt.Sprintf("Right-sizing opportunity over %s.\nMemory request: %.2f MiB.\nMemory limit: %.2f MiB.\nAverage usage: %.2f MiB.\nPeak usage: %.2f MiB.\nPeak/request ratio: %.1f%%.\nRecommended memory request: %.0f Mi.\nEstimated monthly savings: $%.2f (%s).\n",
+		compactDuration(c.config.RightSizingLookback),
+		requestBytes/1024/1024,
+		limitBytes/1024/1024,
+		avgBytes/1024/1024,
+		peakBytes/1024/1024,
+		(peakBytes/requestBytes)*100,
+		recommendedRequest/1024/1024,
+		savings,
+		pricingSource,
+	)
+	if recommendedLimit > 0 {
+		metricProof += fmt.Sprintf("Recommended memory limit: %.0f Mi.\n", recommendedLimit/1024/1024)
+	}
+	clusterCtx := fmt.Sprintf("Namespace: %s, Workload Kind: %s, Workload Name: %s, Pod: %s, Status: Right-Sizing Opportunity, Recommended Patch Strategy: resources", pod.Namespace, identity.Kind, identity.Name, pod.Name)
+	evidence := notifications.EvidenceChain{
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
+		MetricProof:       metricProof,
+		ClusterContext:    clusterCtx,
+		HistoricalPattern: "Prometheus history shows sustained memory over-provisioning.",
+		RootCause:         fmt.Sprintf("The pod is over-provisioned: peak memory usage is %.1f%% of the current request. Lowering the request to %.0fMi should preserve headroom while saving $%.2f per month.", (peakBytes/requestBytes)*100, recommendedRequest/1024/1024, savings),
+		FinOpsImpact:      fmt.Sprintf("Estimated savings: $%.2f/mo by reducing memory request from %.0fMi to %.0fMi.", savings, requestBytes/1024/1024, recommendedRequest/1024/1024),
+		FinOpsDetails:     fmt.Sprintf("Pricing source: %s. Safety factor: %.2fx peak usage. Limits are only lowered when the computed limit remains below the current limit.", pricingSource, c.rightSizingSafetyFactor()),
+		AIConfidence:      90,
+		ShowEventButton:   true,
+	}
+	populateEvidenceClaims(&evidence, Diagnosis{PatchStrategy: PatchResources}, ResourceCorrelation{})
+	invID := c.history.SaveInvestigation(ctx, evidence, "RightSizingOpportunity", "", string(CategoryRuntime), "Over-provisioned workload", evidence.AIConfidence)
+	c.history.Update(ctx, pod.Namespace, identity.Name, "RightSizingOpportunity", evidence.RootCause, invID)
+	notifications.SendEvidenceChain(c.config, evidence)
+	notifications.SendAuditLog(c.config, evidence, "Diagnostic", "Completed", "Right-Sizing Analysis")
+
+	diagnosis := Diagnosis{
+		Symptom:       "Over-provisioned workload",
+		Category:      CategoryRuntime,
+		LikelyCause:   evidence.RootCause,
+		Confidence:    90,
+		PatchStrategy: PatchResources,
+		Evidence:      []string{metricProof},
+	}
+	c.handleRemediation(ctx, pod, evidence, diagnosis, invID)
+}
+
+func (c *Controller) rightSizingPeakThreshold() float64 {
+	if c != nil && c.config != nil && c.config.RightSizingPeakThreshold > 0 {
+		return c.config.RightSizingPeakThreshold
+	}
+	return 0.35
+}
+
+func (c *Controller) rightSizingSafetyFactor() float64 {
+	if c != nil && c.config != nil && c.config.RightSizingSafetyFactor > 1 {
+		return c.config.RightSizingSafetyFactor
+	}
+	return 1.5
+}
+
+func (c *Controller) rightSizingMinSavings() float64 {
+	if c != nil && c.config != nil && c.config.RightSizingMinSavings > 0 {
+		return c.config.RightSizingMinSavings
+	}
+	return 1.0
+}
+
+func roundMemoryBytes(value float64) float64 {
+	const mib = 1024 * 1024
+	return math.Ceil(value/(16*mib)) * 16 * mib
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // scanForAppFailures checks for cluster-wide performance degradation using efficient bulk queries.
@@ -1023,6 +1220,8 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	orchestration := c.runIncidentAnalyzers(ctx, pod, reason, diagnosis, correlation)
 	diagnosis = mergeAnalyzerFindings(diagnosis, orchestration.Findings)
 	diagnosis.Related = uniqueSorted(append(append(diagnosis.Related, correlation.Related...), orchestration.Related...))
+	diagnosisSummary := diagnosis.Summary()
+	correlationSummary := correlation.Summary()
 	telemetry.IncInvestigation("started", string(diagnosis.Category))
 	slog.Info("Deterministic issue classification complete", "ns", pod.Namespace, "pod", pod.Name, "category", diagnosis.Category, "strategy", diagnosis.PatchStrategy, "confidence", diagnosis.Confidence, "supporting_findings", len(orchestration.Findings))
 
@@ -1047,7 +1246,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		IncidentWindowEnd:        incidentWindow.Until,
 		IncidentWindowSource:     incidentWindow.Source,
 		IncidentWindowConfidence: incidentWindow.Confidence,
-		ClusterContext:           fmt.Sprintf("Namespace: %s, Pod: %s, Workload Kind: %s, Workload Name: %s, Reason: %s\n%s\n%s\n%s\n%s", pod.Namespace, pod.Name, workload.Kind, workload.Name, reason, incidentWindow.Summary(), diagnosis.Summary(), correlation.Summary(), orchestration.Summary()),
+		ClusterContext:           fmt.Sprintf("Namespace: %s, Pod: %s, Workload Kind: %s, Workload Name: %s, Reason: %s\n%s\n%s\n%s\n%s", pod.Namespace, pod.Name, workload.Kind, workload.Name, reason, incidentWindow.Summary(), diagnosisSummary, correlationSummary, orchestration.Summary()),
 		HistoricalPattern:        historySummary,
 		ShowEventButton:          true,
 	}
@@ -1078,6 +1277,34 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	evidence.StackTrace = collectedEvidence.StackTrace
 	if len(collectedEvidence.ClusterContextAppend) > 0 {
 		evidence.ClusterContext += "\n" + strings.Join(collectedEvidence.ClusterContextAppend, "\n")
+	}
+	if suggestion, ok := c.probeCorrectionSuggestion(ctx, pod, diagnosis, collectedEvidence); ok {
+		applyProbeCorrectionSuggestion(&diagnosis, &correlation, suggestion)
+		evidence.ClusterContext = strings.Replace(evidence.ClusterContext, diagnosisSummary, diagnosis.Summary(), 1)
+		evidence.ClusterContext = strings.Replace(evidence.ClusterContext, correlationSummary, correlation.Summary(), 1)
+		diagnosisSummary = diagnosis.Summary()
+		correlationSummary = correlation.Summary()
+		evidence.ClusterContext += "\n" + suggestion.Summary()
+	}
+	if securityFindings := c.runSecurityAnalyzerWithEvidence(ctx, pod, collectedEvidence); len(securityFindings) > 0 {
+		diagnosis = mergeAnalyzerFindings(diagnosis, securityFindings)
+		diagnosis.Related = uniqueSorted(append(diagnosis.Related, securityFindings[0].Related...))
+		for _, finding := range securityFindings {
+			correlation.add(fmt.Sprintf("Security analyzer: %s", finding.Symptom))
+			correlation.score(finding.Kind, finding.Name, finding.Confidence, "runtime security evidence")
+		}
+		evidence.ClusterContext = strings.Replace(evidence.ClusterContext, diagnosisSummary, diagnosis.Summary(), 1)
+		evidence.ClusterContext = strings.Replace(evidence.ClusterContext, correlationSummary, correlation.Summary(), 1)
+		diagnosisSummary = diagnosis.Summary()
+		correlationSummary = correlation.Summary()
+	}
+	if suggestion, ok := c.dependencyEnvSuggestion(ctx, pod, diagnosis, collectedEvidence); ok {
+		applyDependencyEnvSuggestion(&diagnosis, &correlation, suggestion)
+		evidence.ClusterContext = strings.Replace(evidence.ClusterContext, diagnosisSummary, diagnosis.Summary(), 1)
+		evidence.ClusterContext = strings.Replace(evidence.ClusterContext, correlationSummary, correlation.Summary(), 1)
+		diagnosisSummary = diagnosis.Summary()
+		correlationSummary = correlation.Summary()
+		evidence.ClusterContext += "\n" + suggestion.Summary()
 	}
 
 	// Execute Multi-Modal AI Forensics

@@ -64,6 +64,9 @@ func applyRawManifestPatch(original, generated string, source gitops.WorkloadSou
 	originalImage := scalarValue(originalContainer, "image")
 	generatedImage := scalarValue(generatedContainer, "image")
 	changed := copyContainerPatchFields(originalContainer, generatedContainer, diagnosis.PatchStrategy)
+	if diagnosis.PatchStrategy == PatchSecurityContext {
+		changed = copyPodSpecPatchFields(originalDoc, generatedDoc, kind, []string{"volumes", "securityContext"}) || changed
+	}
 	if !changed {
 		return original, false, nil
 	}
@@ -189,11 +192,35 @@ func containerPatchFields(strategy PatchStrategy) []string {
 		return []string{"resources"}
 	case PatchEnvOrVolumeRef:
 		return []string{"env", "envFrom", "volumeMounts", "command", "args"}
+	case PatchSecurityContext:
+		return []string{"securityContext", "volumeMounts"}
 	case PatchProbe:
 		return []string{"livenessProbe", "readinessProbe", "startupProbe"}
 	default:
 		return []string{"image", "imagePullPolicy", "resources", "env", "envFrom", "volumeMounts", "command", "args", "livenessProbe", "readinessProbe", "startupProbe"}
 	}
+}
+
+func copyPodSpecPatchFields(dest, src *yaml.Node, kind string, fields []string) bool {
+	destSpec := workloadPodSpec(dest, kind)
+	srcSpec := workloadPodSpec(src, kind)
+	if destSpec == nil || srcSpec == nil {
+		return false
+	}
+	changed := false
+	for _, key := range fields {
+		srcValue := mappingValue(srcSpec, key)
+		if srcValue == nil {
+			continue
+		}
+		destValue := mappingValue(destSpec, key)
+		if destValue != nil && yamlNodesEqual(destValue, srcValue) {
+			continue
+		}
+		setMappingValue(destSpec, key, cloneYAMLNode(srcValue))
+		changed = true
+	}
+	return changed
 }
 
 func patchYAMLScalar(content, oldValue, newValue string) (string, bool) {
@@ -226,30 +253,41 @@ func workloadContainerMapping(doc *yaml.Node, kind, containerName string) *yaml.
 }
 
 func workloadContainerNodes(doc *yaml.Node, kind string) []*yaml.Node {
+	spec := workloadPodSpec(doc, kind)
+	if spec == nil {
+		return nil
+	}
+	return containerNodesFromSpec(spec)
+}
+
+func workloadPodSpec(doc *yaml.Node, kind string) *yaml.Node {
 	spec := mappingValue(doc, "spec")
 	if spec == nil {
 		return nil
 	}
 	switch kind {
 	case "Pod":
-		return containerNodesFromSpec(spec)
+		return spec
 	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
-		return templateContainerNodes(spec)
+		return templatePodSpec(spec)
 	case "Job":
-		return templateContainerNodes(spec)
+		return templatePodSpec(spec)
 	case "CronJob":
 		jobTemplate := mappingValue(spec, "jobTemplate")
 		jobSpec := mappingValue(jobTemplate, "spec")
-		return templateContainerNodes(jobSpec)
+		return templatePodSpec(jobSpec)
 	default:
 		return nil
 	}
 }
 
 func templateContainerNodes(spec *yaml.Node) []*yaml.Node {
+	return containerNodesFromSpec(templatePodSpec(spec))
+}
+
+func templatePodSpec(spec *yaml.Node) *yaml.Node {
 	template := mappingValue(spec, "template")
-	templateSpec := mappingValue(template, "spec")
-	return containerNodesFromSpec(templateSpec)
+	return mappingValue(template, "spec")
 }
 
 func containerNodesFromSpec(spec *yaml.Node) []*yaml.Node {

@@ -120,6 +120,49 @@ func (c *Client) GetHistory(namespace, pod string, d time.Duration) (model.Matri
 	return matrix, nil
 }
 
+func (c *Client) GetPodMemoryStats(namespace, pod string, d time.Duration) (float64, float64, error) {
+	window := durationPromQL(d)
+	step := "5m"
+	expr := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s", pod="%s", container!=""})`, namespace, pod)
+	avg, err := c.queryScalar(fmt.Sprintf(`avg_over_time((%s)[%s:%s])`, expr, window, step))
+	if err != nil {
+		return 0, 0, err
+	}
+	peak, err := c.queryScalar(fmt.Sprintf(`max_over_time((%s)[%s:%s])`, expr, window, step))
+	if err != nil {
+		return 0, 0, err
+	}
+	return avg, peak, nil
+}
+
+func (c *Client) queryScalar(query string) (float64, error) {
+	result, _, err := c.api.Query(context.TODO(), query, time.Now())
+	if err != nil {
+		return 0, err
+	}
+	vector, ok := result.(model.Vector)
+	if !ok || len(vector) == 0 {
+		return 0, fmt.Errorf("no data returned for query")
+	}
+	return float64(vector[0].Value), nil
+}
+
+func durationPromQL(d time.Duration) string {
+	if d <= 0 {
+		return "30d"
+	}
+	if d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	return fmt.Sprintf("%ds", int(d/time.Second))
+}
+
 // Extra methods for granular Prometheus-specific data (not in MetricsProvider but useful)
 
 // GetHTTPErrorRate calculates the 5xx error rate over the last 5 minutes for a given pod or service

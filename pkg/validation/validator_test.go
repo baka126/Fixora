@@ -210,3 +210,49 @@ spec:
 		t.Fatalf("expected semantic scheduling validation to pass, got %#v", got)
 	}
 }
+
+func TestValidateSemanticRenderSecurityContextChangePasses(t *testing.T) {
+	original := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: example/api:v1
+`)
+	changed := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      containers:
+      - name: api
+        image: example/api:v1
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+`)
+
+	got := ValidateSemanticRender(
+		gitops.WorkloadSource{ManifestType: gitops.ManifestRaw},
+		map[string][]byte{"deploy.yaml": original},
+		[]vcs.FileChange{{FilePath: "deploy.yaml", NewContent: changed}},
+		SemanticTarget{Kind: "Deployment", Name: "api", ContainerName: "api", PatchStrategy: "security-context"},
+		SandboxOptions{Enabled: true, Timeout: time.Second},
+	)
+
+	if !got.Valid || got.Skipped {
+		t.Fatalf("expected semantic security validation to pass, got %#v", got)
+	}
+}
