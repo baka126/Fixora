@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,24 @@ func TestDashboardGuardrailsSurfaceValidationFailure(t *testing.T) {
 	got := guardrailStatus(guardrails, "Render validation")
 	if got != "failed" {
 		t.Fatalf("Render validation status = %q, want failed", got)
+	}
+}
+
+func TestDashboardGuardrailsExplainDryRunRemediation(t *testing.T) {
+	guardrails := dashboardGuardrails(dashboardRemediationRow{
+		ID:     42,
+		Status: "dry_run",
+	})
+
+	var detail string
+	for _, guardrail := range guardrails {
+		if guardrail.Label == "Remediation state" {
+			detail = guardrail.Detail
+			break
+		}
+	}
+	if !strings.Contains(detail, "Dry-run mode") {
+		t.Fatalf("Remediation state detail = %q, want dry-run explanation", detail)
 	}
 }
 

@@ -30,6 +30,8 @@ type Config struct {
 	ModeDryRunIncludePatch  bool
 	InvestigationCooldown   time.Duration
 	AlertmanagerDedupWindow time.Duration
+	DiagnosticTimeout       time.Duration
+	RemediationTimeout      time.Duration
 	HAEnabled               bool
 	HALeaseName             string
 	HALeaseNamespace        string
@@ -141,6 +143,8 @@ func Load() *Config {
 		ModeDryRunIncludePatch:  getEnvBool("MODE_DRY_RUN_INCLUDE_PATCH", true),
 		InvestigationCooldown:   getEnvDuration("INVESTIGATION_COOLDOWN", 12*time.Hour),
 		AlertmanagerDedupWindow: getEnvDuration("ALERTMANAGER_DEDUP_WINDOW", 12*time.Hour),
+		DiagnosticTimeout:       getEnvDuration("DIAGNOSTIC_TIMEOUT", 2*time.Minute),
+		RemediationTimeout:      getEnvDuration("REMEDIATION_TIMEOUT", 5*time.Minute),
 		HAEnabled:               getEnvBool("HA_ENABLED", true),
 		HALeaseName:             getEnv("HA_LEASE_NAME", "fixora-leader-election"),
 		HALeaseNamespace:        getEnv("HA_LEASE_NAMESPACE", getEnv("POD_NAMESPACE", "default")),

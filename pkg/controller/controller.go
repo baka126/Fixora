@@ -111,6 +111,7 @@ type Controller struct {
 	autoFixMu       sync.Mutex
 	isLeader        atomic.Bool
 	leaderIdentity  string
+	baseCtx         context.Context
 	customScrubbers []*regexp.Regexp
 	alertWatchMu    sync.RWMutex
 	alertWatches    map[string]time.Time
@@ -242,6 +243,14 @@ func getHostname() string {
 
 // Run starts the controller workers and informers.
 func (c *Controller) Run(stopCh <-chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-stopCh
+		cancel()
+	}()
+	c.baseCtx = ctx
+
 	if c.config.HAEnabled {
 		c.runWithLeaderElection(stopCh)
 		return
@@ -1113,7 +1122,7 @@ func (c *Controller) processNextItem() bool {
 }
 
 func (c *Controller) processDiagnostic(work podWorkItem) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.DiagnosticTimeout)
 	defer cancel()
 
 	pod, err := c.clientset.CoreV1().Pods(work.namespace).Get(ctx, work.name, metav1.GetOptions{})
@@ -1507,6 +1516,14 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		slog.Info("Skipping GitOps remediation: privacy settings prohibit sending Git context to AI", "ns", pod.Namespace, "pod", pod.Name)
 		return
 	}
+
+	parent := c.baseCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	remediationCtx, cancel := context.WithTimeout(parent, c.config.RemediationTimeout)
+	defer cancel()
+	ctx = remediationCtx
 	diagnosis = refineDiagnosisFromEvidence(diagnosis, evidence)
 
 	vcsType := pod.Annotations["fixora.io/vcs-type"]
@@ -1888,8 +1905,9 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 		}
 		return
 	case config.DryRun:
+		dryRunReason := "Dry-run mode is enabled; no pull request was created. Set FIXORA_MODE=auto-fix or click-to-fix to create PRs."
 		for _, plan := range prPlans {
-			c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "dry-run generated; no PR created")
+			c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationDryRun, dryRunReason)
 			telemetry.IncRemediation("dry-run", string(diagnosis.PatchStrategy))
 		}
 		slog.Info("Dry-run mode: remediation generated but no PR created", "ns", pod.Namespace, "pod", pod.Name)
@@ -1903,17 +1921,25 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 
 	// Open multiple PRs
 	var createdUrls []string
+	var creationFailures []string
 	for _, plan := range prPlans {
 		opts := plan.Options
 		remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "")
+		if remediationID <= 0 && c.history != nil && c.history.HasDB() {
+			creationFailures = append(creationFailures, fmt.Sprintf("%s/%s: failed to persist remediation workflow", opts.RepoOwner, opts.RepoName))
+			slog.Error("Failed to persist remediation workflow before PR creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head)
+			continue
+		}
 		if err := validatePROptionsFresh(ctx, provider, opts); err != nil {
 			slog.Warn("Skipping stale remediation PR: source changed before creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head, "error", err)
 			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", err.Error())
+			creationFailures = append(creationFailures, fmt.Sprintf("%s/%s: %v", opts.RepoOwner, opts.RepoName, err))
 			continue
 		}
 		if !c.allowAutoFixPR() {
 			slog.Warn("Auto-fix PR rate limit reached, skipping targeted PR creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head)
 			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", "auto-fix PR rate limit reached")
+			creationFailures = append(creationFailures, fmt.Sprintf("%s/%s: auto-fix PR rate limit reached", opts.RepoOwner, opts.RepoName))
 			notifications.SendNotification(c.config, fmt.Sprintf("⏳ Auto-fix rate limit reached; skipped targeted PR creation for %s/%s.", pod.Namespace, pod.Name))
 			break
 		}
@@ -1923,16 +1949,25 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			slog.Error("Failed to create remediation PR", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "error", err)
 			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", err.Error())
 			telemetry.IncRemediation(string(RemediationPRFailed), string(diagnosis.PatchStrategy))
+			creationFailures = append(creationFailures, fmt.Sprintf("%s/%s: %v", opts.RepoOwner, opts.RepoName, err))
 		} else if prURL != "" {
 			slog.Info("Successfully created remediation PR", "ns", pod.Namespace, "pod", pod.Name, "url", prURL)
 			c.markRemediationStatus(ctx, remediationID, RemediationPROpened, prURL, "")
 			telemetry.IncRemediation(string(RemediationPROpened), string(diagnosis.PatchStrategy))
 			createdUrls = append(createdUrls, prURL)
+		} else {
+			reason := fmt.Sprintf("VCS provider returned an empty pull request URL for %s/%s", opts.RepoOwner, opts.RepoName)
+			slog.Error("VCS provider returned empty PR URL", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head)
+			c.markRemediationStatus(ctx, remediationID, RemediationPRFailed, "", reason)
+			telemetry.IncRemediation(string(RemediationPRFailed), string(diagnosis.PatchStrategy))
+			creationFailures = append(creationFailures, reason)
 		}
 	}
 
 	if len(createdUrls) > 0 {
 		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(pod.Namespace, pod.Name, createdUrls))
+	} else if len(creationFailures) > 0 {
+		notifications.SendNotification(c.config, fmt.Sprintf("❌ Fixora generated remediation changes for %s/%s but did not open a PR.\n%s", pod.Namespace, pod.Name, strings.Join(creationFailures, "\n")))
 	}
 }
 
@@ -2097,6 +2132,11 @@ func (c *Controller) SubmitPendingFix(ctx context.Context, callbackID string) {
 		slog.Info("Successfully created approved remediation PR", "ns", fix.PodNamespace, "pod", fix.PodName, "url", prURL)
 		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPROpened, prURL, "")
 		notifications.SendNotification(c.config, notifications.RemediationPROpenedMessage(fix.PodNamespace, fix.PodName, []string{prURL}))
+	} else {
+		reason := "VCS provider returned an empty pull request URL"
+		slog.Error("VCS provider returned empty PR URL for approved remediation", "ns", fix.PodNamespace, "pod", fix.PodName, "head", fix.Options.Head)
+		c.markRemediationStatus(ctx, fix.RemediationID, RemediationPRFailed, "", reason)
+		notifications.SendNotification(c.config, fmt.Sprintf("❌ Remediation PR creation failed for %s/%s: %s", fix.PodNamespace, fix.PodName, reason))
 	}
 }
 

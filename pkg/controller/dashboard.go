@@ -849,7 +849,8 @@ func severityTone(count int) string {
 
 func defaultDashboardPipeline(counts map[string]int, items map[string][]DashboardPipelineItem) []DashboardPipelineStage {
 	return []DashboardPipelineStage{
-		{ID: "generated", Label: "Generated", Count: fmt.Sprintf("%d", counts["generated"]), State: "pending", Note: "AI patch proposals", Icon: "icon-code", Items: items["generated"]},
+		{ID: "dry_run", Label: "Dry-run", Count: fmt.Sprintf("%d", counts["dry_run"]), State: "pending", Note: "Plan only", Icon: "icon-code", Items: items["dry_run"]},
+		{ID: "generated", Label: "Generated", Count: fmt.Sprintf("%d", counts["generated"]), State: "pending", Note: "PR creation started", Icon: "icon-code", Items: items["generated"]},
 		{ID: "approval", Label: "Pending approval", Count: fmt.Sprintf("%d", counts["pending_approval"]), State: "pending", Note: "Slack or UI approval", Icon: "icon-clock", Items: items["pending_approval"]},
 		{ID: "opened", Label: "PR opened", Count: fmt.Sprintf("%d", counts["pr_opened"]), State: "pending", Note: "Targeted PRs", Icon: "icon-branch", Items: items["pr_opened"]},
 		{ID: "observing", Label: "Observing", Count: fmt.Sprintf("%d", counts["observing"]), State: "pending", Note: "Post-merge monitoring", Icon: "icon-chart", Items: items["observing"]},
@@ -1928,7 +1929,7 @@ func dashboardWorkloadPolicy(policy DashboardPolicy, rem dashboardRemediationRow
 	if policy.Mode == "" {
 		return nil
 	}
-	approvalRequired := policy.Mode != "Auto-fix" || rem.Status == "pending_approval" || rem.Status == "generated"
+	approvalRequired := policy.Mode != "Auto-fix" || rem.Status == "pending_approval" || rem.Status == "generated" || rem.Status == "dry_run"
 	return &DashboardWorkloadPolicy{
 		Mode:              policy.Mode,
 		AutoFix:           policy.Mode == "Auto-fix",
@@ -1989,7 +1990,7 @@ func dashboardPR(rem dashboardRemediationRow) *DashboardRecommendedPR {
 		Strategy:         rem.PatchStrategy,
 		Status:           rem.Status,
 		Risk:             dashboardRisk(rem),
-		ApproverRequired: rem.Status == "pending_approval" || rem.Status == "generated",
+		ApproverRequired: rem.Status == "pending_approval" || rem.Status == "generated" || rem.Status == "dry_run",
 		URL:              rem.PRURL,
 		PatchTarget:      dashboardPatchTarget(rem),
 		Reason:           dashboardPatchReason(rem),
@@ -2304,7 +2305,7 @@ func dashboardRemediationGuardrailStatus(status string) string {
 		return "passed"
 	case "pr_failed", "production_failed", "revert_failed":
 		return "failed"
-	case "generated", "pending_approval", "pr_opened", "observing", "revert_opened":
+	case "generated", "dry_run", "pending_approval", "pr_opened", "observing", "revert_opened":
 		return "pending"
 	default:
 		return "pending"
@@ -2316,8 +2317,10 @@ func dashboardRemediationGuardrailDetail(rem dashboardRemediationRow) string {
 		return truncateDashboard(rem.FailureReason, 140)
 	}
 	switch rem.Status {
+	case "dry_run":
+		return "Dry-run mode generated a remediation plan; no pull request was created."
 	case "generated":
-		return "Remediation plan generated; no pull request has been opened yet."
+		return "Remediation PR creation started but has not completed yet."
 	case "pending_approval":
 		return "Waiting for a human approval before opening the PR."
 	case "pr_opened":

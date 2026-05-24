@@ -19,6 +19,7 @@ type RemediationStatus string
 
 const (
 	RemediationGenerated        RemediationStatus = "generated"
+	RemediationDryRun           RemediationStatus = "dry_run"
 	RemediationPendingApproval  RemediationStatus = "pending_approval"
 	RemediationPROpened         RemediationStatus = "pr_opened"
 	RemediationPRFailed         RemediationStatus = "pr_failed"
@@ -190,7 +191,9 @@ func (c *Controller) markRemediationStatus(ctx context.Context, id int64, status
 	if c == nil || c.history == nil {
 		return
 	}
-	c.history.MarkRemediationStatus(ctx, id, status, prURL, failureReason)
+	updateCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c.history.MarkRemediationStatus(updateCtx, id, status, prURL, failureReason)
 }
 
 func (h *historyCache) MarkRemediationStatus(ctx context.Context, id int64, status RemediationStatus, prURL, failureReason string) {
@@ -266,7 +269,7 @@ func (h *historyCache) ActiveRemediationForPlan(ctx context.Context, namespace, 
 		  AND head_branch LIKE $7
 		  AND (
 		    status IN ('pending_approval', 'pr_opened', 'observing')
-		    OR (status IN ('generated', 'pr_failed', 'production_failed', 'revert_opened', 'revert_failed') AND updated_at > $8)
+		    OR (status IN ('generated', 'dry_run', 'pr_failed', 'production_failed', 'revert_opened', 'revert_failed') AND updated_at > $8)
 		  )
 		ORDER BY updated_at DESC
 		LIMIT 1

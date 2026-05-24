@@ -163,7 +163,7 @@ export const DataPage = ({ kind }: { kind: PageKind }) => {
 
 const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: (id: number) => void }) => {
   if (!rows.length) return <Empty title="No remediations recorded yet" message="Generated patches, pending approvals, PR links, and validation outcomes will appear here." />;
-  const open = rows.filter((row) => /generated|pending|pr_opened|observing/.test(row.status)).length;
+  const open = rows.filter((row) => /pending_approval|pr_opened|observing/.test(row.status)).length;
   const failed = rows.filter((row) => /failed/.test(row.status)).length;
   const succeeded = rows.filter((row) => /succeeded|reverted/.test(row.status)).length;
   return (
@@ -176,6 +176,7 @@ const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: 
       <div className="grid gap-3 xl:grid-cols-2">
         {rows.map((row) => {
           const canEdit = row.prUrl && !remediationClosed(row.status);
+          const statusNote = row.failureReason || remediationStatusNote(row.status);
           return (
             <article key={row.id} className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <div className="flex items-start justify-between gap-3">
@@ -188,6 +189,11 @@ const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: 
                   <p className="mt-1 truncate text-[12px] text-[#647084]">{row.repository || 'Repository not mapped'} · {row.strategy || 'strategy pending'}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  {!row.prUrl && remediationNeedsPR(row.status) && (
+                    <span className="rounded-md bg-[#f8fafc] px-2 py-1 text-[11px] font-medium text-[#647084]">
+                      {row.status === 'dry_run' ? 'No PR: dry-run' : 'No PR link'}
+                    </span>
+                  )}
                   {canEdit && (
                     <button
                       onClick={() => onEdit(row.id)}
@@ -212,7 +218,11 @@ const Remediations = ({ rows, onEdit }: { rows: DashboardRemediation[]; onEdit: 
                   </>
                 )}
               </div>
-              {row.failureReason && <p className="mt-3 line-clamp-2 rounded-md bg-[#fef2f2] px-3 py-2 text-[12px] text-[#991b1b]">{row.failureReason}</p>}
+              {statusNote && (
+                <p className={`mt-3 line-clamp-3 rounded-md px-3 py-2 text-[12px] ${remediationNoteClass(row.status, Boolean(row.failureReason))}`}>
+                  {statusNote}
+                </p>
+              )}
             </article>
           );
         })}
@@ -615,6 +625,29 @@ const ageToMinutes = (age: string) => {
 };
 
 const remediationClosed = (status: string) => /merged|closed|succeeded|reverted|production_failed|revert_failed/.test(status || '');
+
+const remediationNeedsPR = (status: string) => /dry_run|generated|pr_failed|pending_approval/.test(status || '');
+
+const remediationStatusNote = (status: string) => {
+  switch (status) {
+    case 'dry_run':
+      return 'Dry-run mode generated a remediation plan; no pull request was created. Enable auto-fix or click-to-fix to create PRs.';
+    case 'generated':
+      return 'Remediation changes were generated, but no pull request has been opened yet.';
+    case 'pending_approval':
+      return 'Waiting for approval before Fixora opens the remediation PR.';
+    case 'pr_failed':
+      return 'Fixora could not open the remediation PR. Check backend logs and VCS configuration.';
+    default:
+      return '';
+  }
+};
+
+const remediationNoteClass = (status: string, hasFailure: boolean) => {
+  if (hasFailure || /failed/.test(status || '')) return 'bg-[#fef2f2] text-[#991b1b]';
+  if (status === 'dry_run') return 'bg-[#eff6ff] text-[#1d4ed8]';
+  return 'bg-[#f8fafc] text-[#475569]';
+};
 
 const readableManifestType = (manifestType?: string) => {
   switch ((manifestType || '').toLowerCase()) {
