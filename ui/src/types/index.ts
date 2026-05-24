@@ -189,21 +189,42 @@ export interface DashboardRemediation {
   files: string[];
   strategy: string;
   failureReason?: string;
+  failureFingerprint?: string;
   age: string;
   workload: DashboardWorkload;
   gitops?: DashboardGitOpsMapping;
+  revertPrUrl?: string;
+  timeline?: DashboardTimelineStep[];
+}
+
+export interface DashboardTimelineStep {
+  id: string;
+  label: string;
+  status: string;
+  detail?: string;
+  age?: string;
+  url?: string;
+  current?: boolean;
 }
 
 export interface DashboardGitOpsSource {
   id: string;
   controller: string;
+  controllerNamespace?: string;
+  controllerUrl?: string;
   app: string;
   namespace?: string;
   repo: string;
   revision: string;
+  reconciledRevision?: string;
   path: string;
   manifestType: string;
   overlay?: string;
+  healthStatus?: string;
+  syncStatus?: string;
+  operationStatus?: string;
+  driftStatus?: string;
+  lastSyncAt?: string;
   helm?: DashboardHelmMapping;
   workloads: number;
   workloadRefs?: DashboardWorkload[];

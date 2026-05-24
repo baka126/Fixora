@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -11,6 +12,14 @@ import (
 
 	"fixora/pkg/vcs"
 )
+
+type RemediationActionResult struct {
+	ID          int64  `json:"id"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	PRURL       string `json:"prUrl,omitempty"`
+	RevertPRURL string `json:"revertPrUrl,omitempty"`
+}
 
 type FileDiff struct {
 	FilePath string `json:"filePath"`
@@ -139,6 +148,107 @@ func (c *Controller) AppendCommitToRemediation(ctx context.Context, id int64, fi
 	return provider.AppendCommit(ctx, repoOwner, repoName, headBranch, files, message)
 }
 
+func (c *Controller) MarkRemediationApplied(ctx context.Context, id int64) (RemediationActionResult, error) {
+	rec, err := c.remediationRecordForAction(ctx, id)
+	if err != nil {
+		return RemediationActionResult{}, err
+	}
+	switch rec.Status {
+	case RemediationAwaitingApply, RemediationPROpened, RemediationObserving:
+	default:
+		return RemediationActionResult{}, fmt.Errorf("remediation cannot be marked applied from status %q", rec.Status)
+	}
+	c.saveRemediationWorkloadSnapshot(ctx, rec.ID, "manual_apply", rec.Namespace, firstNonEmpty(rec.WorkloadKind, "Pod"), firstNonEmpty(rec.WorkloadName, rec.PodName))
+	c.markRemediationStatus(ctx, rec.ID, RemediationObserving, rec.PRURL, "Operator marked remediation changes as applied; observing workload health")
+	return RemediationActionResult{ID: rec.ID, Status: string(RemediationObserving), Message: "Remediation marked applied; Fixora is observing workload health.", PRURL: rec.PRURL}, nil
+}
+
+func (c *Controller) RerunRemediationValidation(ctx context.Context, id int64) (RemediationActionResult, error) {
+	rec, err := c.remediationRecordForAction(ctx, id)
+	if err != nil {
+		return RemediationActionResult{}, err
+	}
+	switch rec.Status {
+	case RemediationAwaitingApply:
+		applied, failure := c.remediationAppliedForObservation(ctx, rec)
+		if failure != "" {
+			c.markProductionRemediationFailure(ctx, rec, failure)
+			return RemediationActionResult{ID: rec.ID, Status: string(RemediationProductionFailed), Message: failure, PRURL: rec.PRURL}, nil
+		}
+		if !applied {
+			return RemediationActionResult{}, fmt.Errorf("remediation changes are not detected in the cluster yet")
+		}
+		c.saveRemediationWorkloadSnapshot(ctx, rec.ID, "manual_validation", rec.Namespace, firstNonEmpty(rec.WorkloadKind, "Pod"), firstNonEmpty(rec.WorkloadName, rec.PodName))
+		c.markRemediationStatus(ctx, rec.ID, RemediationObserving, rec.PRURL, "Manual validation detected remediation changes; observing workload health")
+		return RemediationActionResult{ID: rec.ID, Status: string(RemediationObserving), Message: "Remediation changes are live; observation restarted.", PRURL: rec.PRURL}, nil
+	case RemediationObserving:
+		ready, gitOpsFailure := c.gitOpsReadyForObservation(ctx, rec)
+		if gitOpsFailure != "" {
+			c.markProductionRemediationFailure(ctx, rec, gitOpsFailure)
+			return RemediationActionResult{ID: rec.ID, Status: string(RemediationProductionFailed), Message: gitOpsFailure, PRURL: rec.PRURL}, nil
+		}
+		if !ready {
+			return RemediationActionResult{}, fmt.Errorf("GitOps controller has not reported the remediation healthy yet")
+		}
+		if failure := c.workloadRegressionReason(ctx, rec); failure != "" {
+			c.markProductionRemediationFailure(ctx, rec, failure)
+			return RemediationActionResult{ID: rec.ID, Status: string(RemediationProductionFailed), Message: failure, PRURL: rec.PRURL}, nil
+		}
+		c.markRemediationStatus(ctx, rec.ID, RemediationSucceeded, rec.PRURL, "Manual validation completed without regression")
+		return RemediationActionResult{ID: rec.ID, Status: string(RemediationSucceeded), Message: "Manual validation completed without regression.", PRURL: rec.PRURL}, nil
+	default:
+		return RemediationActionResult{}, fmt.Errorf("remediation cannot be revalidated from status %q", rec.Status)
+	}
+}
+
+func (c *Controller) OpenRevertForRemediation(ctx context.Context, id int64) (RemediationActionResult, error) {
+	rec, err := c.remediationRecordForAction(ctx, id)
+	if err != nil {
+		return RemediationActionResult{}, err
+	}
+	switch rec.Status {
+	case RemediationProductionFailed, RemediationRevertFailed:
+	default:
+		return RemediationActionResult{}, fmt.Errorf("revert PR can only be opened after production_failed or revert_failed status")
+	}
+	c.openRevertPR(ctx, rec)
+	updated, err := c.remediationRecordForAction(ctx, id)
+	if err != nil {
+		return RemediationActionResult{}, err
+	}
+	if updated.Status != RemediationRevertOpened {
+		return RemediationActionResult{}, errors.New(firstNonEmpty(updated.FailureReason, "revert PR was not opened"))
+	}
+	return RemediationActionResult{ID: updated.ID, Status: string(updated.Status), Message: "Revert PR opened.", PRURL: updated.PRURL, RevertPRURL: updated.RevertPRURL}, nil
+}
+
+func (c *Controller) DismissRemediation(ctx context.Context, id int64) (RemediationActionResult, error) {
+	rec, err := c.remediationRecordForAction(ctx, id)
+	if err != nil {
+		return RemediationActionResult{}, err
+	}
+	switch rec.Status {
+	case RemediationSucceeded, RemediationReverted, RemediationDismissed:
+		return RemediationActionResult{}, fmt.Errorf("remediation is already closed with status %q", rec.Status)
+	}
+	c.markRemediationStatus(ctx, rec.ID, RemediationDismissed, rec.PRURL, "Operator dismissed remediation workflow")
+	return RemediationActionResult{ID: rec.ID, Status: string(RemediationDismissed), Message: "Remediation dismissed.", PRURL: rec.PRURL, RevertPRURL: rec.RevertPRURL}, nil
+}
+
+func (c *Controller) remediationRecordForAction(ctx context.Context, id int64) (RemediationRecord, error) {
+	if c.history == nil || c.history.db == nil {
+		return RemediationRecord{}, fmt.Errorf("database not configured")
+	}
+	rec, ok, err := c.history.RemediationByID(ctx, id)
+	if err != nil {
+		return RemediationRecord{}, err
+	}
+	if !ok {
+		return RemediationRecord{}, fmt.Errorf("remediation not found")
+	}
+	return rec, nil
+}
+
 func remediationChangedFilePaths(raw []byte) []string {
 	return remediationChangedFilePathsFromChanges(remediationEditableFiles(raw))
 }
@@ -218,7 +328,7 @@ func isSafeRepositoryPath(filePath string) bool {
 
 func remediationStatusClosed(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "merged", "closed", "succeeded", "reverted", "production_failed", "revert_failed":
+	case "merged", "closed", "succeeded", "reverted", "dismissed":
 		return true
 	default:
 		return false

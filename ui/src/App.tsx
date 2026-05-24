@@ -8,6 +8,7 @@ import { Dashboard } from './pages/Dashboard';
 import { DataPage } from './pages/DataPage';
 import { Alerts } from './pages/Alerts';
 import { Workloads } from './pages/Workloads';
+import { FinOps } from './pages/FinOps';
 import { apiClient } from './api/client';
 import { Loader2 } from 'lucide-react';
 
@@ -77,6 +78,7 @@ function App() {
             <Route path="remediations" element={<DataPage kind="remediations" />} />
             <Route path="gitops" element={<DataPage kind="gitops" />} />
             <Route path="predictions" element={<DataPage kind="predictions" />} />
+            <Route path="finops" element={<FinOps />} />
             <Route path="audit" element={<DataPage kind="audit" />} />
             <Route path="settings" element={<DataPage kind="settings" />} />
             <Route path="*" element={<Dashboard />} />

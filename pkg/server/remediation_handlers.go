@@ -16,7 +16,7 @@ func (s *Server) handleRemediations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Expecting /api/v1/remediations/{id}/diff or /api/v1/remediations/{id}/commit
+	// Expecting /api/v1/remediations/{id}/diff, /commit, or /actions/{action}
 	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(pathParts) < 5 {
 		http.Error(w, "invalid remediation endpoint", http.StatusBadRequest)
@@ -49,6 +49,20 @@ func (s *Server) handleRemediations(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleRemediationCommit(w, r, id)
+	case "actions":
+		if len(pathParts) < 6 {
+			http.Error(w, "invalid remediation action endpoint", http.StatusBadRequest)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if claims.Role != models.RoleAdmin && claims.Role != models.RoleOperator {
+			http.Error(w, "forbidden: operator role required", http.StatusForbidden)
+			return
+		}
+		s.handleRemediationAction(w, r, id, pathParts[5])
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -119,4 +133,41 @@ func (s *Server) handleRemediationCommit(w http.ResponseWriter, r *http.Request,
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleRemediationAction(w http.ResponseWriter, r *http.Request, id int64, action string) {
+	var (
+		result interface{}
+		err    error
+	)
+	switch action {
+	case "mark-applied":
+		result, err = s.controller.MarkRemediationApplied(r.Context(), id)
+	case "rerun-validation":
+		result, err = s.controller.RerunRemediationValidation(r.Context(), id)
+	case "open-revert":
+		result, err = s.controller.OpenRevertForRemediation(r.Context(), id)
+	case "dismiss":
+		result, err = s.controller.DismissRemediation(r.Context(), id)
+	default:
+		http.Error(w, "unknown remediation action", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		if err.Error() == "remediation not found" {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if strings.Contains(err.Error(), "cannot") || strings.Contains(err.Error(), "only") || strings.Contains(err.Error(), "not detected") || strings.Contains(err.Error(), "not reported") || strings.Contains(err.Error(), "already closed") {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		slog.Error("Failed to run remediation action", "id", id, "action", action, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		slog.Error("Failed to encode remediation action response", "id", id, "action", action, "error", err)
+	}
 }

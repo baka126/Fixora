@@ -20,6 +20,8 @@ import (
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type DashboardSnapshot struct {
@@ -239,34 +241,55 @@ type DashboardRecommendedPR struct {
 }
 
 type DashboardRemediation struct {
-	ID            int64                   `json:"id"`
-	Status        string                  `json:"status"`
-	Title         string                  `json:"title"`
-	Repository    string                  `json:"repository"`
-	BaseBranch    string                  `json:"baseBranch"`
-	HeadBranch    string                  `json:"headBranch"`
-	PRURL         string                  `json:"prUrl,omitempty"`
-	Files         []string                `json:"files"`
-	Strategy      string                  `json:"strategy"`
-	FailureReason string                  `json:"failureReason,omitempty"`
-	Age           string                  `json:"age"`
-	Workload      DashboardWorkload       `json:"workload"`
-	GitOps        *DashboardGitOpsMapping `json:"gitops,omitempty"`
+	ID                 int64                   `json:"id"`
+	Status             string                  `json:"status"`
+	Title              string                  `json:"title"`
+	Repository         string                  `json:"repository"`
+	BaseBranch         string                  `json:"baseBranch"`
+	HeadBranch         string                  `json:"headBranch"`
+	PRURL              string                  `json:"prUrl,omitempty"`
+	Files              []string                `json:"files"`
+	Strategy           string                  `json:"strategy"`
+	FailureReason      string                  `json:"failureReason,omitempty"`
+	FailureFingerprint string                  `json:"failureFingerprint,omitempty"`
+	Age                string                  `json:"age"`
+	Workload           DashboardWorkload       `json:"workload"`
+	GitOps             *DashboardGitOpsMapping `json:"gitops,omitempty"`
+	RevertPRURL        string                  `json:"revertPrUrl,omitempty"`
+	Timeline           []DashboardTimelineStep `json:"timeline,omitempty"`
+}
+
+type DashboardTimelineStep struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	Status  string `json:"status"`
+	Detail  string `json:"detail,omitempty"`
+	Age     string `json:"age,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Current bool   `json:"current,omitempty"`
 }
 
 type DashboardGitOpsSource struct {
-	ID           string                `json:"id"`
-	Controller   string                `json:"controller"`
-	App          string                `json:"app"`
-	Namespace    string                `json:"namespace,omitempty"`
-	Repo         string                `json:"repo"`
-	Revision     string                `json:"revision"`
-	Path         string                `json:"path"`
-	ManifestType string                `json:"manifestType"`
-	Overlay      string                `json:"overlay,omitempty"`
-	Helm         *DashboardHelmMapping `json:"helm,omitempty"`
-	Workloads    int                   `json:"workloads"`
-	WorkloadRefs []DashboardWorkload   `json:"workloadRefs,omitempty"`
+	ID                  string                `json:"id"`
+	Controller          string                `json:"controller"`
+	ControllerNamespace string                `json:"controllerNamespace,omitempty"`
+	ControllerURL       string                `json:"controllerUrl,omitempty"`
+	App                 string                `json:"app"`
+	Namespace           string                `json:"namespace,omitempty"`
+	Repo                string                `json:"repo"`
+	Revision            string                `json:"revision"`
+	ReconciledRevision  string                `json:"reconciledRevision,omitempty"`
+	Path                string                `json:"path"`
+	ManifestType        string                `json:"manifestType"`
+	Overlay             string                `json:"overlay,omitempty"`
+	HealthStatus        string                `json:"healthStatus,omitempty"`
+	SyncStatus          string                `json:"syncStatus,omitempty"`
+	OperationStatus     string                `json:"operationStatus,omitempty"`
+	DriftStatus         string                `json:"driftStatus,omitempty"`
+	LastSyncAt          string                `json:"lastSyncAt,omitempty"`
+	Helm                *DashboardHelmMapping `json:"helm,omitempty"`
+	Workloads           int                   `json:"workloads"`
+	WorkloadRefs        []DashboardWorkload   `json:"workloadRefs,omitempty"`
 }
 
 type DashboardPrediction struct {
@@ -393,42 +416,44 @@ type dashboardInvestigationRow struct {
 }
 
 type dashboardRemediationRow struct {
-	ID                int64
-	InvestigationID   int64
-	Namespace         string
-	PodName           string
-	DiagnosisCategory string
-	PatchStrategy     string
-	Status            string
-	RepoOwner         string
-	RepoName          string
-	BaseBranch        string
-	HeadBranch        string
-	PRURL             string
-	PRTitle           string
-	GitOpsController  string
-	GitOpsApp         string
-	GitOpsNamespace   string
-	GitOpsRepoURL     string
-	GitOpsRevision    string
-	GitOpsPath        string
-	ManifestType      string
-	OverlayRole       string
-	Environment       string
-	Region            string
-	HelmReleaseName   string
-	HelmNamespace     string
-	HelmRepoURL       string
-	HelmChart         string
-	HelmChartVersion  string
-	HelmValueFiles    []string
-	HelmValuesFrom    []string
-	ChangedFiles      []string
-	FailureReason     string
-	WorkloadKind      string
-	WorkloadName      string
-	WorkloadSelector  string
-	UpdatedAt         time.Time
+	ID                 int64
+	InvestigationID    int64
+	Namespace          string
+	PodName            string
+	DiagnosisCategory  string
+	PatchStrategy      string
+	Status             string
+	RepoOwner          string
+	RepoName           string
+	BaseBranch         string
+	HeadBranch         string
+	PRURL              string
+	PRTitle            string
+	GitOpsController   string
+	GitOpsApp          string
+	GitOpsNamespace    string
+	GitOpsRepoURL      string
+	GitOpsRevision     string
+	GitOpsPath         string
+	ManifestType       string
+	OverlayRole        string
+	Environment        string
+	Region             string
+	HelmReleaseName    string
+	HelmNamespace      string
+	HelmRepoURL        string
+	HelmChart          string
+	HelmChartVersion   string
+	HelmValueFiles     []string
+	HelmValuesFrom     []string
+	ChangedFiles       []string
+	FailureReason      string
+	FailureFingerprint string
+	WorkloadKind       string
+	WorkloadName       string
+	WorkloadSelector   string
+	RevertPRURL        string
+	UpdatedAt          time.Time
 }
 
 type dashboardFileChange struct {
@@ -589,7 +614,7 @@ func (c *Controller) DashboardSnapshot(ctx context.Context) DashboardSnapshot {
 	snapshot.Incidents = dashboardIncidents(ctx, db, world, investigations, remByInvestigation, remByPod, snapshot.Policy, c.config.SLOAvailabilityObjective, c.config.SLOBurnRateThreshold)
 	snapshot.KPIs = dashboardKPIs(len(snapshot.Incidents), predictions, alertCount, predictionCount, statusCounts)
 	snapshot.Remediations = dashboardRemediations(remediations)
-	snapshot.GitOpsSources = dashboardGitOpsSources(remediations)
+	snapshot.GitOpsSources = c.dashboardGitOpsSources(ctx, remediations, world)
 	snapshot.Predictions = dashboardPredictions(predictions)
 	snapshot.AuditEvents = dashboardAuditEvents(investigations, remediations, alerts)
 
@@ -853,6 +878,7 @@ func defaultDashboardPipeline(counts map[string]int, items map[string][]Dashboar
 		{ID: "generated", Label: "Generated", Count: fmt.Sprintf("%d", counts["generated"]), State: "pending", Note: "PR creation started", Icon: "icon-code", Items: items["generated"]},
 		{ID: "approval", Label: "Pending approval", Count: fmt.Sprintf("%d", counts["pending_approval"]), State: "pending", Note: "Slack or UI approval", Icon: "icon-clock", Items: items["pending_approval"]},
 		{ID: "opened", Label: "PR opened", Count: fmt.Sprintf("%d", counts["pr_opened"]), State: "pending", Note: "Targeted PRs", Icon: "icon-branch", Items: items["pr_opened"]},
+		{ID: "apply", Label: "Awaiting apply", Count: fmt.Sprintf("%d", counts["awaiting_apply"]), State: "pending", Note: "Waiting for cluster rollout", Icon: "icon-clock", Items: items["awaiting_apply"]},
 		{ID: "observing", Label: "Observing", Count: fmt.Sprintf("%d", counts["observing"]), State: "pending", Note: "Post-merge monitoring", Icon: "icon-chart", Items: items["observing"]},
 		{ID: "succeeded", Label: "Succeeded", Count: fmt.Sprintf("%d", counts["succeeded"]), State: "succeeded", Note: "Validated fixes", Icon: "icon-check", Items: items["succeeded"]},
 		{ID: "failed", Label: "Production failed", Count: fmt.Sprintf("%d", counts["production_failed"]), State: "failed", Note: "Regression detected", Icon: "icon-alert", Items: items["production_failed"]},
@@ -928,7 +954,9 @@ func queryDashboardRemediations(ctx context.Context, db *sql.DB, limit int) []da
 		       COALESCE(helm_repo_url, ''), COALESCE(helm_chart, ''), COALESCE(helm_chart_version, ''),
 		       COALESCE(helm_value_files, '[]'::jsonb), COALESCE(helm_values_from, '[]'::jsonb),
 		       COALESCE(changed_files, '[]'::jsonb), COALESCE(failure_reason, ''),
+		       COALESCE(failure_fingerprint, ''),
 		       COALESCE(workload_kind, ''), COALESCE(workload_name, ''), COALESCE(workload_selector, ''),
+		       COALESCE(revert_pr_url, ''),
 		       updated_at
 		FROM remediation_outcomes
 		ORDER BY updated_at DESC
@@ -945,7 +973,7 @@ func queryDashboardRemediations(ctx context.Context, db *sql.DB, limit int) []da
 		var changedFiles []byte
 		var helmValueFiles []byte
 		var helmValuesFrom []byte
-		if err := rows.Scan(&row.ID, &row.InvestigationID, &row.Namespace, &row.PodName, &row.DiagnosisCategory, &row.PatchStrategy, &row.Status, &row.RepoOwner, &row.RepoName, &row.BaseBranch, &row.HeadBranch, &row.PRURL, &row.PRTitle, &row.GitOpsController, &row.GitOpsApp, &row.GitOpsNamespace, &row.GitOpsRepoURL, &row.GitOpsRevision, &row.GitOpsPath, &row.ManifestType, &row.OverlayRole, &row.Environment, &row.Region, &row.HelmReleaseName, &row.HelmNamespace, &row.HelmRepoURL, &row.HelmChart, &row.HelmChartVersion, &helmValueFiles, &helmValuesFrom, &changedFiles, &row.FailureReason, &row.WorkloadKind, &row.WorkloadName, &row.WorkloadSelector, &row.UpdatedAt); err == nil {
+		if err := rows.Scan(&row.ID, &row.InvestigationID, &row.Namespace, &row.PodName, &row.DiagnosisCategory, &row.PatchStrategy, &row.Status, &row.RepoOwner, &row.RepoName, &row.BaseBranch, &row.HeadBranch, &row.PRURL, &row.PRTitle, &row.GitOpsController, &row.GitOpsApp, &row.GitOpsNamespace, &row.GitOpsRepoURL, &row.GitOpsRevision, &row.GitOpsPath, &row.ManifestType, &row.OverlayRole, &row.Environment, &row.Region, &row.HelmReleaseName, &row.HelmNamespace, &row.HelmRepoURL, &row.HelmChart, &row.HelmChartVersion, &helmValueFiles, &helmValuesFrom, &changedFiles, &row.FailureReason, &row.FailureFingerprint, &row.WorkloadKind, &row.WorkloadName, &row.WorkloadSelector, &row.RevertPRURL, &row.UpdatedAt); err == nil {
 			row.HelmValueFiles = dashboardStringList(helmValueFiles)
 			row.HelmValuesFrom = dashboardStringList(helmValuesFrom)
 			row.ChangedFiles = dashboardChangedFilePaths(changedFiles)
@@ -1012,35 +1040,108 @@ func dashboardRemediations(rows []dashboardRemediationRow) []DashboardRemediatio
 	out := make([]DashboardRemediation, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, DashboardRemediation{
-			ID:            row.ID,
-			Status:        row.Status,
-			Title:         firstNonEmpty(row.PRTitle, row.FailureReason, "Remediation"),
-			Repository:    dashboardRepository(row),
-			BaseBranch:    row.BaseBranch,
-			HeadBranch:    row.HeadBranch,
-			PRURL:         row.PRURL,
-			Files:         row.ChangedFiles,
-			Strategy:      row.PatchStrategy,
-			FailureReason: row.FailureReason,
-			Age:           humanAge(row.UpdatedAt),
+			ID:                 row.ID,
+			Status:             row.Status,
+			Title:              firstNonEmpty(row.PRTitle, row.FailureReason, "Remediation"),
+			Repository:         dashboardRepository(row),
+			BaseBranch:         row.BaseBranch,
+			HeadBranch:         row.HeadBranch,
+			PRURL:              row.PRURL,
+			Files:              row.ChangedFiles,
+			Strategy:           row.PatchStrategy,
+			FailureReason:      row.FailureReason,
+			FailureFingerprint: row.FailureFingerprint,
+			Age:                humanAge(row.UpdatedAt),
 			Workload: DashboardWorkload{
 				Kind:      firstNonEmpty(row.WorkloadKind, "Pod"),
 				Name:      firstNonEmpty(row.WorkloadName, row.PodName),
 				Namespace: row.Namespace,
 				PodName:   row.PodName,
 			},
-			GitOps: dashboardGitOps(row),
+			GitOps:      dashboardGitOps(row),
+			RevertPRURL: row.RevertPRURL,
+			Timeline:    dashboardRemediationTimeline(row),
 		})
 	}
 	return out
 }
 
-func dashboardGitOpsSources(rows []dashboardRemediationRow) []DashboardGitOpsSource {
-	type aggregate struct {
-		source    DashboardGitOpsSource
-		workloads map[string]bool
+func dashboardRemediationTimeline(row dashboardRemediationRow) []DashboardTimelineStep {
+	steps := []DashboardTimelineStep{
+		{ID: "generated", Label: "Generated", Detail: "Patch plan generated"},
+		{ID: "pr_opened", Label: "PR opened", Detail: "Pull request available", URL: row.PRURL},
+		{ID: "merged", Label: "Merged", Detail: "PR merged into source branch", URL: row.PRURL},
+		{ID: "applied", Label: "Applied", Detail: "Cluster rollout detected"},
+		{ID: "observed", Label: "Observed", Detail: "Post-apply health validation"},
+		{ID: "result", Label: "Result", Detail: "Validation outcome", URL: firstNonEmpty(row.RevertPRURL, row.PRURL)},
 	}
-	aggregates := map[string]*aggregate{}
+	current := dashboardTimelineIndex(row.Status)
+	for i := range steps {
+		switch {
+		case i < current:
+			steps[i].Status = "completed"
+		case i == current:
+			steps[i].Status = dashboardTimelineCurrentStatus(row.Status)
+			steps[i].Current = true
+			steps[i].Age = humanAge(row.UpdatedAt)
+		default:
+			steps[i].Status = "pending"
+		}
+	}
+	if row.Status == string(RemediationProductionFailed) {
+		steps[len(steps)-1].Label = "Production failed"
+		steps[len(steps)-1].Detail = firstNonEmpty(row.FailureReason, "Regression detected after apply")
+	}
+	if row.Status == string(RemediationRevertOpened) {
+		steps[len(steps)-1].Label = "Revert opened"
+		steps[len(steps)-1].Detail = "Rollback pull request opened"
+	}
+	if row.Status == string(RemediationDismissed) {
+		steps[len(steps)-1].Label = "Dismissed"
+		steps[len(steps)-1].Detail = firstNonEmpty(row.FailureReason, "Operator dismissed remediation workflow")
+	}
+	return steps
+}
+
+func dashboardTimelineIndex(status string) int {
+	switch status {
+	case string(RemediationDryRun), string(RemediationGenerated), string(RemediationPendingApproval), string(RemediationPRFailed):
+		return 0
+	case string(RemediationPROpened):
+		return 1
+	case string(RemediationAwaitingApply):
+		return 2
+	case string(RemediationObserving):
+		return 4
+	case string(RemediationSucceeded), string(RemediationProductionFailed), string(RemediationRevertOpened), string(RemediationRevertFailed), string(RemediationReverted), string(RemediationDismissed):
+		return 5
+	default:
+		return 0
+	}
+}
+
+func dashboardTimelineCurrentStatus(status string) string {
+	switch status {
+	case string(RemediationSucceeded), string(RemediationReverted):
+		return "completed"
+	case string(RemediationProductionFailed), string(RemediationRevertFailed), string(RemediationPRFailed):
+		return "failed"
+	case string(RemediationRevertOpened):
+		return "revert"
+	case string(RemediationDismissed):
+		return "dismissed"
+	default:
+		return "active"
+	}
+}
+
+type dashboardGitOpsAggregate struct {
+	source    DashboardGitOpsSource
+	workloads map[string]DashboardWorkload
+}
+
+func (c *Controller) dashboardGitOpsSources(ctx context.Context, rows []dashboardRemediationRow, world *WorldSnapshot) []DashboardGitOpsSource {
+	aggregates := map[string]*dashboardGitOpsAggregate{}
 	for _, row := range rows {
 		gitops := dashboardGitOps(row)
 		if gitops == nil {
@@ -1048,28 +1149,40 @@ func dashboardGitOpsSources(rows []dashboardRemediationRow) []DashboardGitOpsSou
 		}
 		key := strings.Join([]string{gitops.Controller, gitops.App, gitops.Repo, gitops.Revision, gitops.Path, gitops.ManifestType, gitops.Overlay}, "\x00")
 		if _, ok := aggregates[key]; !ok {
-			aggregates[key] = &aggregate{
+			aggregates[key] = &dashboardGitOpsAggregate{
 				source: DashboardGitOpsSource{
-					ID:           fmt.Sprintf("gitops-%d", len(aggregates)+1),
-					Controller:   gitops.Controller,
-					App:          gitops.App,
-					Namespace:    gitops.Namespace,
-					Repo:         gitops.Repo,
-					Revision:     gitops.Revision,
-					Path:         gitops.Path,
-					ManifestType: gitops.ManifestType,
-					Overlay:      gitops.Overlay,
-					Helm:         gitops.Helm,
+					ID:                  fmt.Sprintf("gitops-%d", len(aggregates)+1),
+					Controller:          gitops.Controller,
+					ControllerNamespace: gitops.Namespace,
+					App:                 gitops.App,
+					Namespace:           gitops.Namespace,
+					Repo:                gitops.Repo,
+					Revision:            gitops.Revision,
+					Path:                gitops.Path,
+					ManifestType:        gitops.ManifestType,
+					Overlay:             gitops.Overlay,
+					Helm:                gitops.Helm,
 				},
-				workloads: map[string]bool{},
+				workloads: map[string]DashboardWorkload{},
 			}
 		}
-		aggregates[key].workloads[dashboardPodKey(row.Namespace, firstNonEmpty(row.WorkloadName, row.PodName))] = true
+		workload := DashboardWorkload{
+			Kind:      firstNonEmpty(row.WorkloadKind, "Pod"),
+			Name:      firstNonEmpty(row.WorkloadName, row.PodName),
+			Namespace: row.Namespace,
+			PodName:   row.PodName,
+		}
+		aggregates[key].workloads[dashboardWorkloadKey(workload)] = workload
 	}
+	enrichGitOpsSourcesFromWorld(aggregates, world)
+	c.enrichGitOpsSourcesFromControllers(ctx, aggregates)
 	out := make([]DashboardGitOpsSource, 0, len(aggregates))
 	for _, aggregate := range aggregates {
 		aggregate.source.Workloads = len(aggregate.workloads)
 		aggregate.source.WorkloadRefs = dashboardGitOpsWorkloadRefs(aggregate.workloads)
+		if aggregate.source.DriftStatus == "" {
+			aggregate.source.DriftStatus = dashboardGitOpsDriftStatus(aggregate.source)
+		}
 		out = append(out, aggregate.source)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -1078,22 +1191,255 @@ func dashboardGitOpsSources(rows []dashboardRemediationRow) []DashboardGitOpsSou
 	return out
 }
 
-func dashboardGitOpsWorkloadRefs(workloads map[string]bool) []DashboardWorkload {
+func dashboardGitOpsWorkloadRefs(workloads map[string]DashboardWorkload) []DashboardWorkload {
 	refs := make([]DashboardWorkload, 0, len(workloads))
-	for key := range workloads {
-		parts := strings.SplitN(key, "/", 2)
-		namespace := ""
-		name := key
-		if len(parts) == 2 {
-			namespace = parts[0]
-			name = parts[1]
-		}
-		refs = append(refs, DashboardWorkload{Kind: "Workload", Name: name, Namespace: namespace})
+	for _, workload := range workloads {
+		refs = append(refs, workload)
 	}
 	sort.Slice(refs, func(i, j int) bool {
-		return refs[i].Namespace+"/"+refs[i].Name < refs[j].Namespace+"/"+refs[j].Name
+		return dashboardWorkloadKey(refs[i]) < dashboardWorkloadKey(refs[j])
 	})
 	return refs
+}
+
+func enrichGitOpsSourcesFromWorld(aggregates map[string]*dashboardGitOpsAggregate, world *WorldSnapshot) {
+	if world == nil {
+		return
+	}
+	for _, aggregate := range aggregates {
+		source := &aggregate.source
+		if source.Helm == nil {
+			continue
+		}
+		release := strings.TrimSpace(source.Helm.ReleaseName)
+		namespace := firstNonEmpty(source.Helm.Namespace, source.Namespace)
+		chart := strings.TrimSpace(source.Helm.Chart)
+		for _, workload := range world.Workloads {
+			ownership := dashboardHelmOwnershipFromWorkload(workload)
+			if ownership.ReleaseName == "" && ownership.Chart == "" {
+				continue
+			}
+			if namespace != "" && ownership.Namespace != "" && namespace != ownership.Namespace {
+				continue
+			}
+			if release != "" && ownership.ReleaseName != "" && release != ownership.ReleaseName {
+				continue
+			}
+			if release == "" && chart != "" && ownership.Chart != "" && !strings.HasPrefix(ownership.Chart, chart) {
+				continue
+			}
+			ref := DashboardWorkload{Kind: workload.Kind, Name: workload.Name, Namespace: workload.Namespace}
+			aggregate.workloads[dashboardWorkloadKey(ref)] = ref
+		}
+	}
+}
+
+func (c *Controller) enrichGitOpsSourcesFromControllers(ctx context.Context, aggregates map[string]*dashboardGitOpsAggregate) {
+	if c == nil || c.dynamicClient == nil || len(aggregates) == 0 {
+		return
+	}
+	argoApps := c.dashboardArgoApplications(ctx)
+	fluxApps := c.dashboardFluxApplications(ctx)
+	for _, aggregate := range aggregates {
+		source := &aggregate.source
+		switch strings.ToLower(source.Controller) {
+		case "argocd":
+			if app, ok := matchDashboardControllerState(*source, argoApps); ok {
+				applyDashboardControllerState(source, app)
+			}
+		case "flux":
+			if app, ok := matchDashboardControllerState(*source, fluxApps); ok {
+				applyDashboardControllerState(source, app)
+			}
+		}
+	}
+}
+
+type dashboardControllerState struct {
+	ControllerNamespace string
+	ControllerURL       string
+	App                 string
+	Namespace           string
+	Repo                string
+	Path                string
+	Revision            string
+	ReconciledRevision  string
+	HealthStatus        string
+	SyncStatus          string
+	OperationStatus     string
+	LastSyncAt          string
+}
+
+func applyDashboardControllerState(source *DashboardGitOpsSource, state dashboardControllerState) {
+	source.ControllerNamespace = firstNonEmpty(source.ControllerNamespace, state.ControllerNamespace)
+	source.ControllerURL = firstNonEmpty(source.ControllerURL, state.ControllerURL)
+	source.HealthStatus = firstNonEmpty(source.HealthStatus, state.HealthStatus)
+	source.SyncStatus = firstNonEmpty(source.SyncStatus, state.SyncStatus)
+	source.OperationStatus = firstNonEmpty(source.OperationStatus, state.OperationStatus)
+	source.ReconciledRevision = firstNonEmpty(source.ReconciledRevision, state.ReconciledRevision)
+	source.LastSyncAt = firstNonEmpty(source.LastSyncAt, state.LastSyncAt)
+	source.DriftStatus = dashboardGitOpsDriftStatus(*source)
+}
+
+func matchDashboardControllerState(source DashboardGitOpsSource, states []dashboardControllerState) (dashboardControllerState, bool) {
+	for _, state := range states {
+		if source.App != "" && state.App == source.App && (source.Namespace == "" || state.Namespace == "" || source.Namespace == state.Namespace) {
+			return state, true
+		}
+	}
+	for _, state := range states {
+		if source.Repo != "" && state.Repo == source.Repo && (source.Path == "" || state.Path == "" || source.Path == state.Path) {
+			return state, true
+		}
+	}
+	return dashboardControllerState{}, false
+}
+
+func (c *Controller) dashboardArgoApplications(ctx context.Context) []dashboardControllerState {
+	namespace := firstNonEmpty(c.config.ArgoCDNamespace, "argocd")
+	apps, err := c.dynamicClient.Resource(schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}).Namespace(namespace).List(ctx, metav1.ListOptions{Limit: 500})
+	if err != nil {
+		return nil
+	}
+	out := make([]dashboardControllerState, 0, len(apps.Items))
+	for _, app := range apps.Items {
+		spec, _, _ := unstructured.NestedMap(app.Object, "spec")
+		status, _, _ := unstructured.NestedMap(app.Object, "status")
+		source, _, _ := unstructured.NestedMap(spec, "source")
+		repoURL, _, _ := unstructured.NestedString(source, "repoURL")
+		pathValue, _, _ := unstructured.NestedString(source, "path")
+		targetRevision, _, _ := unstructured.NestedString(source, "targetRevision")
+		health, _, _ := unstructured.NestedString(status, "health", "status")
+		syncStatus, _, _ := unstructured.NestedString(status, "sync", "status")
+		revision, _, _ := unstructured.NestedString(status, "sync", "revision")
+		operation, _, _ := unstructured.NestedString(status, "operationState", "phase")
+		finishedAt, _, _ := unstructured.NestedString(status, "operationState", "finishedAt")
+		out = append(out, dashboardControllerState{
+			ControllerNamespace: app.GetNamespace(),
+			App:                 app.GetName(),
+			Namespace:           app.GetNamespace(),
+			Repo:                repoURL,
+			Path:                pathValue,
+			Revision:            targetRevision,
+			ReconciledRevision:  revision,
+			HealthStatus:        health,
+			SyncStatus:          syncStatus,
+			OperationStatus:     operation,
+			LastSyncAt:          finishedAt,
+		})
+	}
+	return out
+}
+
+func (c *Controller) dashboardFluxApplications(ctx context.Context) []dashboardControllerState {
+	var out []dashboardControllerState
+	for _, version := range []string{"v1", "v1beta2"} {
+		items, err := c.dynamicClient.Resource(schema.GroupVersionResource{Group: "kustomize.toolkit.fluxcd.io", Version: version, Resource: "kustomizations"}).Namespace("").List(ctx, metav1.ListOptions{Limit: 500})
+		if err == nil {
+			for _, item := range items.Items {
+				out = append(out, dashboardFluxStateFromObject(item, "Kustomization"))
+			}
+			break
+		}
+	}
+	for _, version := range []string{"v2", "v2beta2"} {
+		items, err := c.dynamicClient.Resource(schema.GroupVersionResource{Group: "helm.toolkit.fluxcd.io", Version: version, Resource: "helmreleases"}).Namespace("").List(ctx, metav1.ListOptions{Limit: 500})
+		if err == nil {
+			for _, item := range items.Items {
+				out = append(out, dashboardFluxStateFromObject(item, "HelmRelease"))
+			}
+			break
+		}
+	}
+	return out
+}
+
+func dashboardFluxStateFromObject(obj unstructured.Unstructured, kind string) dashboardControllerState {
+	spec, _, _ := unstructured.NestedMap(obj.Object, "spec")
+	status, _, _ := unstructured.NestedMap(obj.Object, "status")
+	readyStatus, readyMessage, readyTime := dashboardFluxReadyCondition(status)
+	lastApplied, _, _ := unstructured.NestedString(status, "lastAppliedRevision")
+	lastAttempted, _, _ := unstructured.NestedString(status, "lastAttemptedRevision")
+	pathValue, _, _ := unstructured.NestedString(spec, "path")
+	repo := dashboardFluxSourceRefLabel(spec)
+	health := "Unknown"
+	sync := "Unknown"
+	if readyStatus == "True" {
+		health = "Healthy"
+		sync = "Synced"
+	} else if readyStatus == "False" {
+		health = "Degraded"
+		sync = "OutOfSync"
+	} else if readyStatus != "" {
+		health = readyStatus
+	}
+	return dashboardControllerState{
+		ControllerNamespace: obj.GetNamespace(),
+		App:                 obj.GetName(),
+		Namespace:           obj.GetNamespace(),
+		Repo:                repo,
+		Path:                pathValue,
+		Revision:            firstNonEmpty(lastAttempted, lastApplied),
+		ReconciledRevision:  firstNonEmpty(lastApplied, lastAttempted),
+		HealthStatus:        health,
+		SyncStatus:          sync,
+		OperationStatus:     firstNonEmpty(readyMessage, kind),
+		LastSyncAt:          readyTime,
+	}
+}
+
+func dashboardFluxReadyCondition(status map[string]interface{}) (conditionStatus, message, timestamp string) {
+	conditions, _, _ := unstructured.NestedSlice(status, "conditions")
+	for _, item := range conditions {
+		condition, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if conditionType, _ := condition["type"].(string); conditionType != "Ready" {
+			continue
+		}
+		conditionStatus, _ = condition["status"].(string)
+		message, _ = condition["message"].(string)
+		timestamp, _ = condition["lastTransitionTime"].(string)
+		return conditionStatus, message, timestamp
+	}
+	return "", "", ""
+}
+
+func dashboardFluxSourceRefLabel(spec map[string]interface{}) string {
+	sourceRef, _, _ := unstructured.NestedMap(spec, "sourceRef")
+	if len(sourceRef) == 0 {
+		chart, _, _ := unstructured.NestedMap(spec, "chart", "spec")
+		sourceRef, _, _ = unstructured.NestedMap(chart, "sourceRef")
+	}
+	kind, _, _ := unstructured.NestedString(sourceRef, "kind")
+	name, _, _ := unstructured.NestedString(sourceRef, "name")
+	namespace, _, _ := unstructured.NestedString(sourceRef, "namespace")
+	if name == "" {
+		return ""
+	}
+	if namespace != "" {
+		return strings.Join(nonEmptyDashboard(kind, namespace, name), "/")
+	}
+	return strings.Join(nonEmptyDashboard(kind, name), "/")
+}
+
+func dashboardGitOpsDriftStatus(source DashboardGitOpsSource) string {
+	syncStatus := strings.ToLower(strings.TrimSpace(source.SyncStatus))
+	healthStatus := strings.ToLower(strings.TrimSpace(source.HealthStatus))
+	if syncStatus == "synced" && (healthStatus == "healthy" || healthStatus == "") {
+		return "in-sync"
+	}
+	if syncStatus == "outofsync" || syncStatus == "out-of-sync" {
+		return "drift-detected"
+	}
+	if healthStatus == "degraded" || healthStatus == "suspended" {
+		return "attention"
+	}
+	if syncStatus == "" && healthStatus == "" {
+		return "unknown"
+	}
+	return "checking"
 }
 
 func dashboardPredictions(rows []dashboardPredictionRow) []DashboardPrediction {
@@ -1216,7 +1562,7 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 		}
 	}
 
-	records = collapseDashboardHelmWorkloads(records, policy, availabilitySLO, burnRateThreshold)
+	records = collapseDashboardHelmWorkloads(records, nodeCosts, policy, availabilitySLO, burnRateThreshold)
 
 	out := make([]DashboardWorkloadView, 0, len(records))
 	for _, record := range records {
@@ -1239,7 +1585,7 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 	return out
 }
 
-func collapseDashboardHelmWorkloads(records map[string]*DashboardWorkloadView, policy DashboardPolicy, availabilitySLO, burnRateThreshold float64) map[string]*DashboardWorkloadView {
+func collapseDashboardHelmWorkloads(records map[string]*DashboardWorkloadView, nodeCosts []DashboardNodeCost, policy DashboardPolicy, availabilitySLO, burnRateThreshold float64) map[string]*DashboardWorkloadView {
 	collapsed := make(map[string]*DashboardWorkloadView, len(records))
 	for key, record := range records {
 		if record == nil {
@@ -1267,6 +1613,12 @@ func collapseDashboardHelmWorkloads(records map[string]*DashboardWorkloadView, p
 			collapsed[parentKey] = parent
 		}
 		mergeDashboardHelmChild(parent, record)
+	}
+	for _, record := range collapsed {
+		if record == nil || record.Helm == nil || len(record.Nodes) == 0 {
+			continue
+		}
+		record.Cost = dashboardWorkloadCost(record.Nodes, nodeCosts)
 	}
 	return collapsed
 }
@@ -1547,7 +1899,7 @@ func dashboardWorkloadCost(nodeNames []string, nodeCosts []DashboardNodeCost) Da
 }
 
 func dashboardRemediationClosed(status string) bool {
-	return strings.Contains(status, "succeeded") || strings.Contains(status, "reverted") || strings.Contains(status, "closed")
+	return strings.Contains(status, "succeeded") || strings.Contains(status, "reverted") || strings.Contains(status, "closed") || strings.Contains(status, "dismissed")
 }
 
 func dashboardWidgets(snapshot DashboardSnapshot) []DashboardWidget {
@@ -2305,7 +2657,7 @@ func dashboardRemediationGuardrailStatus(status string) string {
 		return "passed"
 	case "pr_failed", "production_failed", "revert_failed":
 		return "failed"
-	case "generated", "dry_run", "pending_approval", "pr_opened", "observing", "revert_opened":
+	case "generated", "dry_run", "pending_approval", "pr_opened", "awaiting_apply", "observing", "revert_opened":
 		return "pending"
 	default:
 		return "pending"
@@ -2325,6 +2677,8 @@ func dashboardRemediationGuardrailDetail(rem dashboardRemediationRow) string {
 		return "Waiting for a human approval before opening the PR."
 	case "pr_opened":
 		return "PR opened and waiting for merge."
+	case "awaiting_apply":
+		return "PR merged; waiting until Fixora can confirm the suggested changes are live in the cluster."
 	case "observing":
 		return "PR merged; observing workload health."
 	case "succeeded":

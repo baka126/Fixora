@@ -247,6 +247,7 @@ func TestDashboardWorkloadViewsCollapseHelmChildren(t *testing.T) {
 				Status:    "desired=2 ready=1 available=1 updated=2",
 				Desired:   2,
 				Ready:     1,
+				NodeNames: []string{"node-a"},
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": "Helm",
 					"app.kubernetes.io/instance":   "checkout-api",
@@ -275,6 +276,10 @@ func TestDashboardWorkloadViewsCollapseHelmChildren(t *testing.T) {
 	}
 	if got[0].Desired != 2 || got[0].Ready != 1 || got[0].Health != "degraded" {
 		t.Fatalf("rollup = desired %d ready %d health %q, want 2/1/degraded", got[0].Desired, got[0].Ready, got[0].Health)
+	}
+	got = dashboardWorkloadViews(world, nil, nil, nil, nil, []DashboardNodeCost{{Name: "node-a", MonthlyCost: 42.5, RequestedMonthlyCost: 21.25, PricingSource: "catalog"}}, DashboardPolicy{Mode: "Dry-run"}, 0.99, 14.4)
+	if got[0].Cost.MonthlyCost != 42.5 || got[0].Cost.RequestedMonthlyCost != 21.25 || got[0].Cost.PricingSource != "catalog" {
+		t.Fatalf("cost = %#v, want grouped Helm release node cost", got[0].Cost)
 	}
 }
 

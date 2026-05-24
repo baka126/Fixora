@@ -28,10 +28,10 @@ func TestBuildEvidenceMessageViewCompactsClusterContext(t *testing.T) {
 		AIConfidence:      85,
 	})
 
-	if view.Title != "Fixora Incident Report" {
+	if view.Title != "Fixora Incident: Pod/oom-test-3" {
 		t.Fatalf("unexpected title: %s", view.Title)
 	}
-	if !strings.Contains(view.Summary, "default/oom-test-3") {
+	if !strings.Contains(view.Summary, "Workload: Pod/oom-test-3") || !strings.Contains(view.Summary, "Namespace: default") {
 		t.Fatalf("expected workload summary, got: %s", view.Summary)
 	}
 	if strings.Contains(view.Summary, "Evidence:") || strings.Contains(view.Summary, "Owner chain") {
@@ -45,6 +45,32 @@ func TestBuildEvidenceMessageViewCompactsClusterContext(t *testing.T) {
 	}
 	if !strings.Contains(view.Summary, "Confidence: 85%") {
 		t.Fatalf("expected AI confidence to be used in summary, got: %s", view.Summary)
+	}
+}
+
+func TestBuildEvidenceMessageViewPrefersOwnerWorkload(t *testing.T) {
+	view := buildEvidenceMessageView(EvidenceChain{
+		Namespace: "groov",
+		PodName:   "backend-api-7844c7db7c-bwzk7",
+		ClusterContext: strings.Join([]string{
+			"Namespace: groov, Pod: backend-api-7844c7db7c-bwzk7, Reason: PodFailed:",
+			"Diagnosis: Failed",
+			"Category: runtime",
+			"Confidence: 95%",
+			"Resource Correlation:",
+			"- Owner chain: Pod/backend-api-7844c7db7c-bwzk7 -> ReplicaSet/backend-api-7844c7db7c -> Deployment/backend-api",
+		}, "\n"),
+		RootCause: "The pod failure is caused by a readiness probe timeout during initialization. Extra details should stay off the headline card.",
+	})
+
+	if view.Title != "Fixora Incident: Deployment/backend-api" {
+		t.Fatalf("unexpected title: %s", view.Title)
+	}
+	if view.Workload != "Deployment/backend-api" {
+		t.Fatalf("unexpected workload field: %s", view.Workload)
+	}
+	if strings.Contains(view.RootCause, "Extra details") {
+		t.Fatalf("expected root cause to be shortened to first sentence, got: %s", view.RootCause)
 	}
 }
 

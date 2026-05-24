@@ -20,6 +20,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
+import { InteractiveGraph } from '../components/InteractiveGraph';
 import type {
   DashboardEvidence,
   DashboardGitOpsMapping,
@@ -30,6 +31,7 @@ import type {
   DashboardRemediation,
   DashboardState,
   DashboardWorkload,
+  DashboardWorkloadCost,
   DashboardWorkloadPolicy,
   DashboardWorkloadView,
 } from '../types';
@@ -59,6 +61,7 @@ type WorkloadRecord = {
   services?: string[];
   ingresses?: string[];
   nodes?: string[];
+  cost?: DashboardWorkloadCost;
 };
 
 export const Workloads = () => {
@@ -66,12 +69,20 @@ export const Workloads = () => {
   const globalSearch = useStore((state) => state.searchQuery);
   const selectedCluster = useStore((state) => state.selectedCluster);
   const [kindFilter, setKindFilter] = useState('all');
+  const [scopeFilter, setScopeFilter] = useState('top-level');
   const [localSearch, setLocalSearch] = useState('');
   const workloads = useMemo(() => buildWorkloadRecords(dashboard), [dashboard]);
   const query = `${globalSearch} ${localSearch}`.trim();
-  const kinds = Array.from(new Set(workloads.map((item) => item.workload.kind))).sort();
+  const kinds = Array.from(new Set(workloads.map((item) => displayWorkload(item).kind))).sort();
+  const renderedChildKeys = useMemo(() => {
+    const keys = new Set<string>();
+    workloads.forEach((item) => (item.children || []).forEach((child) => keys.add(workloadKey(child))));
+    return keys;
+  }, [workloads]);
   const filtered = workloads.filter((item) => {
-    if (kindFilter !== 'all' && item.workload.kind !== kindFilter) return false;
+    if (scopeFilter === 'top-level' && renderedChildKeys.has(workloadKey(item.workload)) && !item.helm) return false;
+    if (scopeFilter === 'rendered' && (!renderedChildKeys.has(workloadKey(item.workload)) || item.helm)) return false;
+    if (kindFilter !== 'all' && displayWorkload(item).kind !== kindFilter) return false;
     if (selectedCluster && selectedCluster !== dashboard?.environment) {
       const inCluster = item.cluster === selectedCluster || item.incidents.some((incident) => incident.cluster === selectedCluster);
       if (!inCluster) return false;
@@ -90,6 +101,9 @@ export const Workloads = () => {
       item.helm?.chartVersion,
       item.health,
       item.status,
+      ownerChainText(item),
+      formatWorkloadCost(item.cost),
+      item.cost?.pricingSource,
       ...(item.children || []).map((child) => `${child.kind} ${child.name} ${child.namespace}`),
       ...(item.pods || []),
       ...(item.services || []),
@@ -102,7 +116,7 @@ export const Workloads = () => {
   const selected = filtered.find((item) => item.key === selectedKey) || filtered[0] || null;
 
   return (
-    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_420px]">
+    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 gap-3 p-3 sm:p-4 xl:grid-cols-[minmax(760px,1fr)_minmax(340px,390px)] 2xl:grid-cols-[minmax(960px,1fr)_390px]">
       <section className="min-w-0 space-y-4">
         <div className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -122,6 +136,14 @@ export const Workloads = () => {
               </div>
               <label className="flex h-9 items-center gap-2 rounded-md border border-[#e5e7eb] px-3 text-[12px] font-medium text-[#374151]">
                 <SlidersHorizontal className="h-4 w-4" />
+                <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)} className="bg-transparent outline-none">
+                  <option value="top-level">Top-level apps</option>
+                  <option value="all">All resources</option>
+                  <option value="rendered">Rendered children</option>
+                </select>
+              </label>
+              <label className="flex h-9 items-center gap-2 rounded-md border border-[#e5e7eb] px-3 text-[12px] font-medium text-[#374151]">
+                <Layers3 className="h-4 w-4" />
                 <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)} className="bg-transparent outline-none">
                   <option value="all">All workload types</option>
                   {kinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
@@ -140,53 +162,26 @@ export const Workloads = () => {
         <div className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
           {filtered.length ? (
             <div className="max-h-[calc(100vh-290px)] overflow-auto">
-              <table className="w-full min-w-[920px] text-left text-[12px]">
+              <table className="w-full min-w-[1180px] text-left text-[12px]">
                 <thead className="sticky top-0 z-[1] bg-[#f8fafc] text-[#111827]">
                   <tr>
                     <th className="px-4 py-3 font-semibold">Workload</th>
-                    <th className="px-4 py-3 font-semibold">Namespace</th>
+                    <th className="px-4 py-3 font-semibold">Owner chain</th>
                     <th className="px-4 py-3 font-semibold">Health</th>
+                    <th className="px-4 py-3 font-semibold">Signals</th>
                     <th className="px-4 py-3 font-semibold">GitOps Source</th>
+                    <th className="px-4 py-3 font-semibold">Cost</th>
                     <th className="px-4 py-3 font-semibold">Remediation</th>
-                    <th className="px-4 py-3 font-semibold">Prediction</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.map((item) => (
-                    <tr
+                    <WorkloadRow
                       key={item.key}
-                      onClick={() => setSelectedKey(item.key)}
-                      className={`cursor-pointer border-t border-[#e5e7eb] hover:bg-[#f8fafc] ${selected?.key === item.key ? 'bg-[#eff6ff] shadow-[inset_3px_0_0_#2563eb]' : ''}`}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <WorkloadIcon workload={item.workload} />
-                          <div className="min-w-0">
-                            <div className="truncate font-semibold text-[#111827]">{item.workload.kind}/{item.workload.name}</div>
-                            {item.children?.length ? (
-                              <div className="truncate text-[11px] text-[#647084]">{item.children.length} rendered workloads</div>
-                            ) : item.workload.podName && <div className="truncate text-[11px] text-[#647084]">Pod signal: {item.workload.podName}</div>}
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">{item.workload.namespace}</td>
-                      <td className="px-4 py-3"><HealthPill record={item} /></td>
-                      <td className="px-4 py-3">
-                        {item.gitops ? (
-                          <div className="max-w-[280px]">
-                            <div className="truncate font-medium text-[#111827]">{item.gitops.controller} · {item.gitops.app || item.gitops.repo}</div>
-                            <div className="truncate text-[11px] text-[#647084]">{readableManifestType(item.gitops.manifestType)} · {item.gitops.path || item.gitops.repo}</div>
-                          </div>
-                        ) : item.helm ? (
-                          <div className="max-w-[280px]">
-                            <div className="truncate font-medium text-[#111827]">Helm · {item.helm.releaseName || item.workload.name}</div>
-                            <div className="truncate text-[11px] text-[#647084]">{helmChartLabel(item.helm)} · live release metadata</div>
-                          </div>
-                        ) : <span className="text-[#94a3b8]">Not mapped</span>}
-                      </td>
-                      <td className="px-4 py-3"><RemediationStatus record={item} /></td>
-                      <td className="px-4 py-3"><PredictionStatus record={item} /></td>
-                    </tr>
+                      record={item}
+                      selected={selected?.key === item.key}
+                      onSelect={() => setSelectedKey(item.key)}
+                    />
                   ))}
                 </tbody>
               </table>
@@ -211,15 +206,16 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
   const logPatterns = record.logPatterns?.length ? record.logPatterns : latestIncident?.logPatterns || [];
   const logEvidence = evidence.filter((item) => /log|stack|event|trace|pattern/i.test(`${item.label} ${item.icon}`));
   const activeRemediation = record.remediations[0];
+  const workload = displayWorkload(record);
 
   return (
-    <aside className="min-w-0 space-y-3">
+    <aside className="min-w-0 space-y-3 xl:sticky xl:top-[92px] xl:max-h-[calc(100vh-92px)] xl:overflow-y-auto">
       <section className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
         <div className="flex items-start gap-3">
-          <WorkloadIcon workload={record.workload} large />
+          <WorkloadIcon workload={workload} large />
           <div className="min-w-0">
-            <h2 className="truncate text-[18px] font-semibold text-[#111827]">{record.workload.kind}/{record.workload.name}</h2>
-            <p className="mt-1 text-[12px] text-[#647084]">{record.workload.namespace}{record.workload.podName ? ` · signal pod ${record.workload.podName}` : ''}</p>
+            <h2 className="truncate text-[18px] font-semibold text-[#111827]">{workload.kind}/{workload.name}</h2>
+            <p className="mt-1 text-[12px] text-[#647084]">{workload.namespace}{record.workload.podName ? ` · signal pod ${record.workload.podName}` : ''}</p>
           </div>
         </div>
         <div className="mt-4 grid grid-cols-3 gap-2 text-center text-[12px]">
@@ -238,6 +234,20 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
           </div>
         )}
       </section>
+
+      <DetailCard icon={<Layers3 className="h-4 w-4" />} title="Owner Chain & Runtime">
+        <div className="space-y-3 p-3 text-[12px]">
+          <KeyValue label="Top level" value={`${workload.kind}/${workload.name}`} />
+          <KeyValue label="Namespace" value={workload.namespace || 'Unknown'} />
+          <KeyValue label="Owner chain" value={ownerChainText(record)} />
+          {record.children?.length ? <KeyValue label="Children" value={`${record.children.length} rendered Kubernetes workloads`} /> : null}
+          {record.pods?.length ? <KeyValue label="Pods" value={record.pods.slice(0, 6).join(', ') + overflowSuffix(record.pods.length, 6)} /> : null}
+          {record.services?.length ? <KeyValue label="Services" value={record.services.slice(0, 6).join(', ') + overflowSuffix(record.services.length, 6)} /> : null}
+          {record.ingresses?.length ? <KeyValue label="Ingresses" value={record.ingresses.slice(0, 6).join(', ') + overflowSuffix(record.ingresses.length, 6)} /> : null}
+          {record.nodes?.length ? <KeyValue label="Nodes" value={record.nodes.slice(0, 5).join(', ') + overflowSuffix(record.nodes.length, 5)} /> : null}
+          <KeyValue label="Cost" value={formatWorkloadCost(record.cost) || 'Node pricing unavailable'} />
+        </div>
+      </DetailCard>
 
       <DetailCard icon={<FileText className="h-4 w-4" />} title="Evidence & Log Patterns">
         {evidence.length ? (
@@ -289,6 +299,12 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
 
       <DetailCard icon={<FileCode2 className="h-4 w-4" />} title="GitOps Topology">
         {record.gitops ? <GitOpsSummary gitops={record.gitops} /> : record.helm ? <HelmSummary helm={record.helm} children={record.children || []} /> : <MiniEmpty message="No GitOps source has been mapped for this workload." />}
+      </DetailCard>
+
+      <DetailCard icon={<Network className="h-4 w-4 text-[#2563eb]" />} title="Dependency Topology">
+        <div className="p-3">
+          <InteractiveGraph incident={latestIncident || null} />
+        </div>
       </DetailCard>
 
       <DetailCard icon={<GitPullRequestArrow className="h-4 w-4" />} title="Remediation Flow">
@@ -388,6 +404,7 @@ const workloadRecordFromBackend = (view: DashboardWorkloadView, dashboard: Dashb
     services: view.services,
     ingresses: view.ingresses,
     nodes: view.nodes,
+    cost: view.cost,
   };
 };
 
@@ -401,6 +418,41 @@ const workloadKey = (workload: DashboardWorkload) => `${workload.namespace}/${wo
 const workloadIncidentCount = (record: WorkloadRecord) => record.incidentCount ?? record.incidents.length;
 const workloadRemediationCount = (record: WorkloadRecord) => record.remediationCount ?? record.remediations.length;
 const workloadPredictionCount = (record: WorkloadRecord) => record.predictionCount ?? record.predictions.length;
+
+const ownerChainText = (record: WorkloadRecord) => {
+  const workload = displayWorkload(record);
+  if (record.helm) {
+    const release = `HelmRelease/${record.helm.releaseName || workload.name}`;
+    const chart = record.helm.chart ? `Chart/${record.helm.chart}` : '';
+    const firstChild = record.children?.[0] ? `${record.children[0].kind}/${record.children[0].name}` : '';
+    return [release, chart, firstChild].filter(Boolean).join(' -> ');
+  }
+  if (record.workload.podName && !/pod/i.test(record.workload.kind)) {
+    return `${record.workload.kind}/${record.workload.name} -> Pod/${record.workload.podName}`;
+  }
+  if (record.services?.length) {
+    return `${workload.kind}/${workload.name} -> Service/${record.services[0]}`;
+  }
+  return `${workload.kind}/${workload.name}`;
+};
+
+const renderedChildrenPreview = (children: DashboardWorkload[]) => {
+  const preview = children.slice(0, 2).map((child) => `${child.kind}/${child.name}`).join(', ');
+  return `${preview}${overflowSuffix(children.length, 2)}`;
+};
+
+const overflowSuffix = (count: number, visible: number) => count > visible ? ` +${count - visible} more` : '';
+
+const displayWorkload = (record: WorkloadRecord): DashboardWorkload => {
+  const helmLike = !!record.helm && (Boolean(record.children?.length) || /helm/i.test(record.gitops?.manifestType || '') || /helm/i.test(record.workload.kind));
+  if (!helmLike) return record.workload;
+  return {
+    kind: 'HelmRelease',
+    name: record.helm?.releaseName || record.gitops?.app || record.workload.name,
+    namespace: record.helm?.namespace || record.workload.namespace,
+    podName: record.workload.podName,
+  };
+};
 
 const SummaryCard = ({ label, value, detail, icon, tone }: { label: string; value: string; detail: string; icon: ReactNode; tone: 'blue' | 'red' | 'green' }) => {
   const classes = tone === 'red' ? 'text-[#dc2626] bg-[#fef2f2]' : tone === 'green' ? 'text-[#15803d] bg-[#f0fdf4]' : 'text-[#2563eb] bg-[#eff6ff]';
@@ -419,6 +471,113 @@ const DetailCard = ({ icon, title, children }: { icon: ReactNode; title: string;
     {children}
   </section>
 );
+
+const WorkloadRow = ({ record, selected, onSelect }: { record: WorkloadRecord; selected: boolean; onSelect: () => void }) => {
+  const workload = displayWorkload(record);
+  return (
+    <tr
+      onClick={onSelect}
+      className={`cursor-pointer border-t border-[#e5e7eb] hover:bg-[#f8fafc] ${selected ? 'bg-[#eff6ff] shadow-[inset_3px_0_0_#2563eb]' : ''}`}
+    >
+      <td className="px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <WorkloadIcon workload={workload} />
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-[#111827]" title={`${workload.kind}/${workload.name}`}>{workload.kind}/{workload.name}</div>
+            <div className="truncate text-[11px] text-[#647084]">
+              {workload.namespace}
+              {record.children?.length ? ` · ${record.children.length} rendered workloads` : record.workload.podName ? ` · signal pod ${record.workload.podName}` : ''}
+            </div>
+          </div>
+        </div>
+      </td>
+      <td className="px-4 py-2.5">
+        <OwnerChainCell record={record} />
+      </td>
+      <td className="px-4 py-2.5"><HealthPill record={record} /></td>
+      <td className="px-4 py-2.5"><SignalsCell record={record} /></td>
+      <td className="px-4 py-2.5"><GitOpsCell record={record} /></td>
+      <td className="px-4 py-2.5"><CostCell cost={record.cost} /></td>
+      <td className="px-4 py-2.5"><RemediationStatus record={record} /></td>
+    </tr>
+  );
+};
+
+const OwnerChainCell = ({ record }: { record: WorkloadRecord }) => {
+  const workload = displayWorkload(record);
+  const primary = ownerChainText(record);
+  const secondary = record.children?.length
+    ? renderedChildrenPreview(record.children)
+    : record.pods?.length
+      ? `Pods: ${record.pods.slice(0, 2).join(', ')}${overflowSuffix(record.pods.length, 2)}`
+      : record.services?.length
+        ? `Services: ${record.services.slice(0, 2).join(', ')}${overflowSuffix(record.services.length, 2)}`
+        : '';
+  return (
+    <div className="max-w-[280px]">
+      <div className="truncate font-medium text-[#111827]" title={primary}>{primary || `${workload.kind}/${workload.name}`}</div>
+      {secondary ? <div className="truncate text-[11px] text-[#647084]" title={secondary}>{secondary}</div> : null}
+    </div>
+  );
+};
+
+const SignalsCell = ({ record }: { record: WorkloadRecord }) => (
+  <div className="flex flex-wrap gap-1.5">
+    <SignalPill label="Inc" value={workloadIncidentCount(record)} tone={workloadIncidentCount(record) ? 'red' : 'muted'} />
+    <SignalPill label="PR" value={workloadRemediationCount(record)} tone={workloadRemediationCount(record) ? 'blue' : 'muted'} />
+    <SignalPill label="Pred" value={workloadPredictionCount(record)} tone={workloadPredictionCount(record) ? 'orange' : 'muted'} />
+  </div>
+);
+
+const SignalPill = ({ label, value, tone }: { label: string; value: number; tone: 'red' | 'blue' | 'orange' | 'muted' }) => {
+  const classes = tone === 'red'
+    ? 'bg-[#fee2e2] text-[#dc2626]'
+    : tone === 'blue'
+      ? 'bg-[#dbeafe] text-[#2563eb]'
+      : tone === 'orange'
+        ? 'bg-[#ffedd5] text-[#ea580c]'
+        : 'bg-[#f1f5f9] text-[#647084]';
+  return <span className={`rounded-md px-2 py-1 text-[11px] font-medium ${classes}`}>{label} {value}</span>;
+};
+
+const GitOpsCell = ({ record }: { record: WorkloadRecord }) => {
+  if (record.gitops) {
+    const primary = `${record.gitops.controller} · ${record.gitops.app || record.gitops.repo}`;
+    const secondary = `${readableManifestType(record.gitops.manifestType)} · ${record.gitops.path || record.gitops.repo}`;
+    return (
+      <div className="max-w-[300px]">
+        <div className="truncate font-medium text-[#111827]" title={primary}>{primary}</div>
+        <div className="truncate text-[11px] text-[#647084]" title={secondary}>{secondary}</div>
+        {record.gitops.helm ? <div className="truncate text-[11px] text-[#647084]" title={`Helm ${helmChartLabel(record.gitops.helm)}`}>Helm {helmChartLabel(record.gitops.helm)}</div> : null}
+      </div>
+    );
+  }
+  if (record.helm) {
+    const primary = `Helm · ${record.helm.releaseName || record.workload.name}`;
+    const secondary = `${helmChartLabel(record.helm)} · live release metadata`;
+    return (
+      <div className="max-w-[300px]">
+        <div className="truncate font-medium text-[#111827]" title={primary}>{primary}</div>
+        <div className="truncate text-[11px] text-[#647084]" title={secondary}>{secondary}</div>
+      </div>
+    );
+  }
+  return <span className="text-[#94a3b8]">Not mapped</span>;
+};
+
+const CostCell = ({ cost }: { cost?: DashboardWorkloadCost }) => {
+  if (!cost || (!cost.monthlyCost && !cost.requestedMonthlyCost)) return <span className="text-[#94a3b8]">No pricing</span>;
+  const label = formatWorkloadCost(cost);
+  return (
+    <div className="max-w-[170px]" title={label}>
+      <div className="font-semibold text-[#111827]">{formatCurrency(cost.monthlyCost || cost.requestedMonthlyCost || 0)}/mo</div>
+      <div className="truncate text-[11px] text-[#647084]">
+        {cost.requestedMonthlyCost ? `${formatCurrency(cost.requestedMonthlyCost)} requested` : 'live node cost'}
+        {cost.pricingSource ? ` · ${cost.pricingSource}` : ''}
+      </div>
+    </div>
+  );
+};
 
 const GitOpsSummary = ({ gitops }: { gitops: DashboardGitOpsMapping }) => (
   <div className="space-y-2 p-3 text-[12px]">
@@ -477,26 +636,21 @@ const HealthPill = ({ record }: { record: WorkloadRecord }) => {
   const incidents = workloadIncidentCount(record);
   const critical = record.incidents.some((incident) => incident.severity === 'critical') || /critical|degraded/i.test(record.health || '');
   const label = incidents ? `${incidents} active` : record.health || 'healthy';
-  const classes = incidents ? critical ? 'bg-[#fee2e2] text-[#dc2626]' : 'bg-[#ffedd5] text-[#ea580c]' : /healthy/i.test(record.health || '') ? 'bg-[#dcfce7] text-[#15803d]' : 'bg-[#f1f5f9] text-[#475569]';
-  return <span className={`rounded-md px-2 py-1 text-[11px] font-medium ${classes}`}>{label}</span>;
+  const classes = incidents ? critical ? 'border-[#fecaca] bg-[#fee2e2] text-[#dc2626]' : 'border-[#fed7aa] bg-[#ffedd5] text-[#ea580c]' : /healthy/i.test(record.health || '') ? 'border-[#bbf7d0] bg-[#dcfce7] text-[#15803d]' : 'border-[#e5e7eb] bg-[#f1f5f9] text-[#475569]';
+  return <span className={`inline-flex max-w-[140px] truncate rounded-md border px-2 py-1 text-[11px] font-semibold ${classes}`} title={record.status || label}>{label}</span>;
 };
 
 const RemediationStatus = ({ record }: { record: WorkloadRecord }) => {
   if (!workloadRemediationCount(record)) return <span className="text-[#94a3b8]">No PR workflow</span>;
   const latest = record.remediations[0];
   if (!latest) return <span className="rounded-md bg-[#eff6ff] px-2 py-1 text-[11px] font-medium text-[#2563eb]">{workloadRemediationCount(record)} workflows</span>;
-  return <span className="rounded-md bg-[#eff6ff] px-2 py-1 text-[11px] font-medium text-[#2563eb]">{latest.status}</span>;
-};
-
-const PredictionStatus = ({ record }: { record: WorkloadRecord }) => {
-  if (!workloadPredictionCount(record)) return <span className="text-[#94a3b8]">No prediction</span>;
-  return <span className="rounded-md bg-[#ffedd5] px-2 py-1 text-[11px] font-medium text-[#ea580c]">{record.predictions[0]?.risk || `${workloadPredictionCount(record)} signals`}</span>;
+  return <span className="inline-flex max-w-[150px] truncate rounded-md border border-[#bfdbfe] bg-[#eff6ff] px-2 py-1 text-[11px] font-semibold text-[#2563eb]" title={latest.status}>{latest.status}</span>;
 };
 
 const EvidenceLine = ({ item }: { item: DashboardEvidence }) => (
   <div className="grid grid-cols-[96px_1fr] gap-2 px-3 py-2 text-[12px]">
     <span className="font-semibold text-[#111827]">{item.label}</span>
-    <span className="line-clamp-2 text-[#475569]">{item.value}</span>
+    <span className="line-clamp-2 text-[#475569]" title={item.value}>{item.value}</span>
   </div>
 );
 
@@ -537,8 +691,8 @@ const workloadIcon = (kind: string, className: string) => {
 
 const EmptyState = ({ title, message }: { title: string; message: string }) => (
   <div className="grid min-h-[260px] place-items-center px-6 py-12 text-center">
-    <div className="max-w-md">
-      <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-[#f1f5f9] text-[#94a3b8]">
+    <div className="max-w-md rounded-lg border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-6 py-6">
+      <div className="mx-auto grid h-12 w-12 place-items-center rounded-lg bg-white text-[#94a3b8] shadow-sm">
         <AlertCircle className="h-6 w-6" />
       </div>
       <h2 className="mt-4 text-[15px] font-semibold text-[#111827]">{title}</h2>
@@ -547,12 +701,29 @@ const EmptyState = ({ title, message }: { title: string; message: string }) => (
   </div>
 );
 
-const MiniEmpty = ({ message }: { message: string }) => <div className="p-3 text-[12px] leading-5 text-[#647084]">{message}</div>;
+const MiniEmpty = ({ message }: { message: string }) => <div className="m-3 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-3 text-[12px] leading-5 text-[#647084]">{message}</div>;
 
 const matchesQuery = (query: string, values: Array<string | undefined>) => {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return true;
   return values.filter(Boolean).join(' ').toLowerCase().includes(normalized);
+};
+
+const formatWorkloadCost = (cost?: DashboardWorkloadCost) => {
+  if (!cost || (!cost.monthlyCost && !cost.requestedMonthlyCost)) return '';
+  const live = cost.monthlyCost ? `${formatCurrency(cost.monthlyCost)}/mo live` : '';
+  const requested = cost.requestedMonthlyCost ? `${formatCurrency(cost.requestedMonthlyCost)}/mo requested` : '';
+  const source = cost.pricingSource ? `source ${cost.pricingSource}` : '';
+  return [live, requested, source].filter(Boolean).join(' · ');
+};
+
+const formatCurrency = (value: number) => {
+  if (!Number.isFinite(value)) return '$0';
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: value >= 100 ? 0 : 2,
+  }).format(value);
 };
 
 const readableManifestType = (manifestType?: string) => {

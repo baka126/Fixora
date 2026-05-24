@@ -16,6 +16,7 @@ The full documentation is available at [https://baka126.github.io/Fixora](https:
 ## Features
 
 - **Omni-Aware Diagnostics**: Handles any Kubernetes and application failure scenario, including scheduling/capacity issues (`Pending`, `NodeNotReady`), configuration errors (`ImagePullBackOff`), and application-layer spikes (5xx, latency).
+- **Failure Fingerprinting**: Hashes granular failure states (image, env, resources, termination reason) to deduplicate investigations. Fixora can intelligently reuse existing remediations for repeated failure patterns, saving AI costs and reducing noise.
 - **Real-time Event Streaming**: Actively watches the K8s Event stream to build real-time dependency graphs and contextualize failures.
 - **Evidence Chain**: `[Metric Proof] + [Dependency Graph Context] + [Historical Pattern] = [Root Cause] & [Confidence Score]`.
 - **AI Confidence Scoring**: Intelligent auto-downgrade logic. If AI confidence is below 85%, Fixora automatically switches from Auto-PR to Dry-Run mode to ensure safety.

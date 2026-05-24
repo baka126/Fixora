@@ -23,12 +23,14 @@ const (
 	RemediationPendingApproval  RemediationStatus = "pending_approval"
 	RemediationPROpened         RemediationStatus = "pr_opened"
 	RemediationPRFailed         RemediationStatus = "pr_failed"
+	RemediationAwaitingApply    RemediationStatus = "awaiting_apply"
 	RemediationObserving        RemediationStatus = "observing"
 	RemediationSucceeded        RemediationStatus = "succeeded"
 	RemediationProductionFailed RemediationStatus = "production_failed"
 	RemediationRevertOpened     RemediationStatus = "revert_opened"
 	RemediationRevertFailed     RemediationStatus = "revert_failed"
 	RemediationReverted         RemediationStatus = "reverted"
+	RemediationDismissed        RemediationStatus = "dismissed"
 )
 
 type RemediationRecord struct {
@@ -55,10 +57,19 @@ type RemediationRecord struct {
 }
 
 type remediationChangedFile struct {
-	FilePath        string `json:"file_path"`
-	PreviousContent []byte `json:"previous_content,omitempty"`
-	HasPrevious     bool   `json:"has_previous"`
-	Create          bool   `json:"create"`
+	FilePath        string                 `json:"file_path"`
+	PreviousContent []byte                 `json:"previous_content,omitempty"`
+	HasPrevious     bool                   `json:"has_previous"`
+	Create          bool                   `json:"create"`
+	ApplyHints      []remediationApplyHint `json:"apply_hints,omitempty"`
+}
+
+type remediationApplyHint struct {
+	ContainerName  string            `json:"container_name,omitempty"`
+	Image          string            `json:"image,omitempty"`
+	EnvValueHashes map[string]string `json:"env_value_hashes,omitempty"`
+	Requests       map[string]string `json:"requests,omitempty"`
+	Limits         map[string]string `json:"limits,omitempty"`
 }
 
 func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecord) int64 {
@@ -216,6 +227,51 @@ func (h *historyCache) MarkRemediationStatus(ctx context.Context, id int64, stat
 	}
 }
 
+func (h *historyCache) RemediationByID(ctx context.Context, id int64) (RemediationRecord, bool, error) {
+	if h == nil || h.db == nil || id <= 0 {
+		return RemediationRecord{}, false, nil
+	}
+	query := `
+		SELECT id, COALESCE(investigation_id, 0), namespace, pod_name,
+		       COALESCE(diagnosis_category, ''), COALESCE(patch_strategy, ''),
+		       status, COALESCE(vcs_type, ''), repo_owner, repo_name,
+		       base_branch, head_branch, COALESCE(pr_url, ''), COALESCE(pr_title, ''),
+		       COALESCE(gitops_controller, ''), COALESCE(gitops_app, ''), COALESCE(gitops_namespace, ''),
+		       COALESCE(gitops_repo_url, ''), COALESCE(gitops_revision, ''),
+		       COALESCE(gitops_path, ''), COALESCE(manifest_type, ''),
+		       COALESCE(overlay_role, ''), COALESCE(environment, ''), COALESCE(region, ''),
+		       COALESCE(workload_kind, ''), COALESCE(workload_name, ''), COALESCE(workload_selector, ''),
+		       COALESCE(changed_files::text, '[]'), COALESCE(failure_reason, ''),
+		       COALESCE(failure_fingerprint, ''), COALESCE(revert_pr_url, ''), COALESCE(revert_head_branch, ''),
+		       updated_at
+		FROM remediation_outcomes
+		WHERE id = $1
+	`
+	var rec RemediationRecord
+	var status string
+	var changedFilesJSON string
+	err := h.db.QueryRowContext(ctx, query, id).Scan(
+		&rec.ID, &rec.InvestigationID, &rec.Namespace, &rec.PodName,
+		&rec.DiagnosisCategory, &rec.PatchStrategy, &status, &rec.VCSType,
+		&rec.Options.RepoOwner, &rec.Options.RepoName, &rec.Options.Base, &rec.Options.Head,
+		&rec.PRURL, &rec.Options.Title, &rec.Source.Controller, &rec.Source.AppName, &rec.Source.AppNamespace,
+		&rec.Source.RepoURL, &rec.Source.TargetRevision, &rec.Source.Path, &rec.Source.ManifestType,
+		&rec.Source.OverlayRole, &rec.Source.Environment, &rec.Source.Region,
+		&rec.WorkloadKind, &rec.WorkloadName, &rec.WorkloadSelector,
+		&changedFilesJSON, &rec.FailureReason, &rec.FailureFingerprint, &rec.RevertPRURL, &rec.RevertHeadBranch,
+		&rec.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return RemediationRecord{}, false, nil
+	}
+	if err != nil {
+		return RemediationRecord{}, false, err
+	}
+	rec.Status = RemediationStatus(status)
+	rec.ChangedFiles = parseRemediationChangedFiles(changedFilesJSON)
+	return rec, true, nil
+}
+
 func (h *historyCache) RemediationFeedback(ctx context.Context, namespace, podName string, diagnosis Diagnosis) string {
 	if h == nil || h.db == nil {
 		return ""
@@ -362,7 +418,7 @@ func (h *historyCache) RemediationsForMonitoring(ctx context.Context, limit int)
 		       COALESCE(workload_kind, ''), COALESCE(workload_name, ''), COALESCE(workload_selector, ''),
 		       updated_at
 		FROM remediation_outcomes
-		WHERE status IN ('pr_opened', 'observing')
+		WHERE status IN ('generated', 'pending_approval', 'pr_opened', 'awaiting_apply', 'observing')
 		ORDER BY updated_at ASC
 		LIMIT $1
 	`
@@ -510,6 +566,7 @@ func remediationChangedFiles(files []vcs.FileChange) []remediationChangedFile {
 			PreviousContent: file.PreviousContent,
 			HasPrevious:     !file.Create,
 			Create:          file.Create,
+			ApplyHints:      remediationApplyHintsFromContent(file.NewContent),
 		})
 	}
 	sort.Slice(changed, func(i, j int) bool {

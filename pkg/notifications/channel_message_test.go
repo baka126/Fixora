@@ -76,7 +76,7 @@ func assertProfessionalEvidenceMessage(t *testing.T, body string) {
 			t.Fatalf("expected professional compact message to omit %q: %s", unwanted, body)
 		}
 	}
-	for _, wanted := range []string{"Fixora Incident Report", "Summary", "Root", "Remediation", "Signals"} {
+	for _, wanted := range []string{"Fixora Incident", "Workload", "Status", "Confidence", "Root cause", "Remediation", "Signal"} {
 		if !strings.Contains(body, wanted) {
 			t.Fatalf("expected professional message to include %q: %s", wanted, body)
 		}

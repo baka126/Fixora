@@ -3,6 +3,8 @@ package vcs
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/xanzy/go-gitlab"
@@ -166,6 +168,52 @@ func (g *GitLabProvider) GetPullRequestStatus(ctx context.Context, repoOwner, re
 		MergeCommitSHA: mr.MergeCommitSHA,
 	}
 	return status, nil
+}
+
+func (g *GitLabProvider) GetPullRequestStatusByURL(ctx context.Context, prURL string) (PullRequestStatus, error) {
+	projectID, iid, ok := parseGitLabMergeRequestURL(prURL)
+	if !ok {
+		return PullRequestStatus{State: "not_found"}, nil
+	}
+	mr, _, err := g.client.MergeRequests.GetMergeRequest(projectID, iid, nil)
+	if err != nil {
+		return PullRequestStatus{}, err
+	}
+	return PullRequestStatus{
+		URL:            mr.WebURL,
+		State:          mr.State,
+		Merged:         mr.State == "merged",
+		MergeCommitSHA: mr.MergeCommitSHA,
+	}, nil
+}
+
+func parseGitLabMergeRequestURL(prURL string) (string, int, bool) {
+	parsed, err := url.Parse(prURL)
+	if err != nil {
+		return "", 0, false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for i := 0; i < len(parts)-2; i++ {
+		if parts[i] != "-" || parts[i+1] != "merge_requests" {
+			continue
+		}
+		iid, err := strconv.Atoi(parts[i+2])
+		if err != nil || iid <= 0 || i == 0 {
+			return "", 0, false
+		}
+		return strings.Join(parts[:i], "/"), iid, true
+	}
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] != "merge_requests" {
+			continue
+		}
+		iid, err := strconv.Atoi(parts[i+1])
+		if err != nil || iid <= 0 || i == 0 {
+			return "", 0, false
+		}
+		return strings.Join(parts[:i], "/"), iid, true
+	}
+	return "", 0, false
 }
 
 func (g *GitLabProvider) AppendCommit(ctx context.Context, repoOwner, repoName, branch string, files []FileChange, message string) error {

@@ -15,8 +15,7 @@ export const AuditDetailPanel: React.FC<Props> = ({ eventId, onClose }) => {
 
   useEffect(() => {
     const fetchData = async () => {
-      // eventId is "investigation-123", we need the number
-      const id = eventId.split('-')[1];
+      const id = eventId.replace(/^investigation-/, '');
       if (!id) {
         setError('Invalid investigation ID');
         setLoading(false);

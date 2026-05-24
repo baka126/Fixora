@@ -23,6 +23,7 @@ export const Alerts = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
+  const [decisionFilter, setDecisionFilter] = useState('all');
   const [includingId, setIncludingId] = useState<string | null>(null);
 
   const loadAlerts = (showRefresh = false) => {
@@ -69,7 +70,7 @@ export const Alerts = () => {
     };
   }, []);
 
-  const filtered = useMemo(() => filterAlerts(alerts, searchQuery, timeRange), [alerts, searchQuery, timeRange]);
+  const filtered = useMemo(() => filterAlerts(alerts, searchQuery, timeRange, decisionFilter), [alerts, searchQuery, timeRange, decisionFilter]);
   const used = alerts.filter((alert) => alert.used).length;
   const notUsed = alerts.filter((alert) => !alert.used && alert.decision !== 'deduplicated').length;
   const deduped = alerts.filter((alert) => alert.decision === 'deduplicated').length;
@@ -118,6 +119,28 @@ export const Alerts = () => {
           Refresh
         </button>
       </header>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#e5e7eb] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+        {[
+          ['all', 'All alerts'],
+          ['used', 'Used by Fixora'],
+          ['not_used', 'Not used'],
+          ['deduplicated', 'Deduplicated'],
+          ['includeable', 'Can watch'],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => {
+              setDecisionFilter(value);
+              setPage(1);
+            }}
+            className={`rounded-md px-3 py-2 text-[12px] font-semibold ${decisionFilter === value ? 'bg-[#eff6ff] text-[#2563eb]' : 'text-[#475569] hover:bg-[#f8fafc]'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       <div className="grid gap-3 md:grid-cols-3">
         <StatCard label="Used by Fixora" value={used} tone="text-[#15803d]" />
@@ -235,11 +258,15 @@ export const Alerts = () => {
   );
 };
 
-const filterAlerts = (alerts: DashboardActiveAlert[], query: string, range: string) => {
+const filterAlerts = (alerts: DashboardActiveAlert[], query: string, range: string, decisionFilter: string) => {
   const normalizedQuery = query.trim().toLowerCase();
   const maxAgeMinutes = timeRangeToMinutes(range);
   return alerts.filter((alert) => {
     if (maxAgeMinutes !== Infinity && ageToMinutes(alert.age) > maxAgeMinutes) return false;
+    if (decisionFilter === 'used' && !alert.used) return false;
+    if (decisionFilter === 'not_used' && (alert.used || alert.decision === 'deduplicated')) return false;
+    if (decisionFilter === 'deduplicated' && alert.decision !== 'deduplicated') return false;
+    if (decisionFilter === 'includeable' && !alert.canInclude) return false;
     if (!normalizedQuery) return true;
     const haystack = [
       alert.alertName,

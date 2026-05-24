@@ -34,6 +34,7 @@ These are included in the default Fixora image.
 Fixora requires permissions to watch the K8s Event stream and inspect resources. The Helm chart provisions these, but for manual setups ensure `get`, `list`, and `watch` on:
 * `pods`, `pods/log`
 * `deployments`, `statefulsets`, `daemonsets`, `replicasets`
+* `horizontalpodautoscalers` (For HPA diagnostic analysis)
 * `events` (Critical for Omni-Aware streaming)
 * `nodes` (For node-failure diagnostics)
 
@@ -77,6 +78,8 @@ The dashboard will be available at `http://localhost:8080`. The first time you v
 | `finops.infracostAPIKey`| `INFRACOST_API_KEY` | `secret` | (Optional) Infracost API key for live cloud pricing. |
 | `investigation.cooldown` | `INVESTIGATION_COOLDOWN` | `duration` | Suppresses repeat AI investigations for the same workload and failure scenario. Defaults to `12h`. |
 | `investigation.alertmanagerDedupWindow` | `ALERTMANAGER_DEDUP_WINDOW` | `duration` | Suppresses repeat Alertmanager-triggered diagnostics for the same namespace, pod, and alert. Defaults to `12h`. |
+| `investigation.diagnosticTimeout` | `DIAGNOSTIC_TIMEOUT` | `duration` | Hard timeout for the forensic investigation phase (AI analysis). Defaults to `2m`. |
+| `remediation.timeout` | `REMEDIATION_TIMEOUT` | `duration` | Hard timeout for the remediation phase (GitOps PR creation). Defaults to `5m`. |
 
 ---
 

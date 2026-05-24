@@ -11,10 +11,13 @@ export const useWebSocket = () => {
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
   const reconnectAttempt = useRef(0);
-  const { token, setDashboard } = useStore();
+  const { token, setDashboard, setRealtimeStatus } = useStore();
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      setRealtimeStatus('disconnected');
+      return;
+    }
 
     let closedByEffect = false;
     const refreshDashboard = () => {
@@ -32,6 +35,7 @@ export const useWebSocket = () => {
       if (closedByEffect || reconnectTimer.current !== null) return;
       const delay = Math.min(WS_RECONNECT_INITIAL_MS * 2 ** reconnectAttempt.current, WS_RECONNECT_MAX_MS);
       reconnectAttempt.current += 1;
+      setRealtimeStatus('polling', `Realtime stream unavailable; polling every ${DASHBOARD_REFRESH_INTERVAL_MS / 1000}s and reconnecting in ${Math.round(delay / 1000)}s.`);
       reconnectTimer.current = window.setTimeout(() => {
         reconnectTimer.current = null;
         connect();
@@ -39,11 +43,13 @@ export const useWebSocket = () => {
     };
 
     const connect = () => {
+      setRealtimeStatus('connecting');
       const socket = new WebSocket(webSocketURL(token));
       ws.current = socket;
 
       socket.onopen = () => {
         reconnectAttempt.current = 0;
+        setRealtimeStatus('connected');
         refreshDashboard();
       };
 
@@ -59,6 +65,7 @@ export const useWebSocket = () => {
       };
 
       socket.onerror = () => {
+        setRealtimeStatus('polling', 'Realtime stream failed; dashboard is staying current through polling.');
         refreshDashboard();
       };
 
@@ -80,8 +87,9 @@ export const useWebSocket = () => {
       if (ws.current?.readyState === WebSocket.OPEN || ws.current?.readyState === WebSocket.CONNECTING) {
         ws.current.close();
       }
+      setRealtimeStatus('disconnected');
     };
-  }, [token, setDashboard]);
+  }, [token, setDashboard, setRealtimeStatus]);
 
   useEffect(() => {
     if (!token) return;

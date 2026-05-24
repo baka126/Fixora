@@ -1,20 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  Background,
-  Controls,
-  MarkerType,
-  MiniMap,
-  Panel,
-  Position,
-  ReactFlow,
-  type Edge,
-  type Node,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
-import {
+  Activity,
   AlertCircle,
   Boxes,
+  Brain,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -30,7 +20,6 @@ import {
   GitPullRequestArrow,
   Layers3,
   Loader2,
-  Maximize2,
   Network,
   RefreshCw,
   Server,
@@ -40,9 +29,10 @@ import {
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { useStore } from '../store/useStore';
+import { InteractiveGraph } from '../components/InteractiveGraph';
+import { RecurringIssuesWidget } from '../components/RecurringIssuesWidget';
+import { RemediationActions, remediationManualActions } from './DataPage';
 import type {
-  DashboardDependencyEdge,
-  DashboardDependencyNode,
   DashboardEvidence,
   DashboardGitOpsMapping,
   DashboardGuardrail,
@@ -50,8 +40,10 @@ import type {
   DashboardKPI,
   DashboardPipelineStage,
   DashboardRecommendedPR,
+  DashboardRemediation,
   DashboardState,
   DashboardWorkload,
+  InvestigationDetail,
 } from '../types';
 
 const toneStyles: Record<string, { text: string; border: string; bg: string; line: string }> = {
@@ -148,8 +140,8 @@ export const Dashboard = () => {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 items-start gap-0 2xl:grid-cols-[minmax(720px,1fr)_392px]">
-      <section className="min-w-0 self-start space-y-4 p-3 sm:p-4">
+    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 items-start gap-3 p-3 sm:p-4 xl:grid-cols-[minmax(760px,1fr)_minmax(340px,380px)] 2xl:grid-cols-[minmax(960px,1fr)_380px]">
+      <section className="min-w-0 self-start space-y-3 xl:pr-0">
         {!!dashboard?.availability?.length && <AvailabilityBanner availability={dashboard.availability} />}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
@@ -175,13 +167,23 @@ export const Dashboard = () => {
           onRefresh={() => refreshDashboard(true)}
         />
 
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(620px,1fr)_minmax(320px,420px)]">
           <RemediationPipeline stages={dashboard?.pipeline || []} />
-          <DependencyGraph incident={selectedIncident} />
+          <InteractiveGraph incident={selectedIncident} />
         </div>
+
+        <RecurringIssuesWidget remediations={dashboard?.remediations || []} />
       </section>
 
-      <IncidentDrawer incident={selectedIncident} />
+      <IncidentDrawer 
+        incident={selectedIncident} 
+        remediations={dashboard?.remediations || []}
+        onDashboardRefresh={(data) => {
+          if (data) {
+             setDashboard(data);
+          }
+        }}
+      />
     </div>
   );
 };
@@ -458,18 +460,18 @@ const IncidentTable = ({
         />
       ) : (
         <>
-          <div className="max-h-[348px] overflow-auto">
-            <table className="w-full min-w-[850px] border-collapse text-left text-[12px]">
+          <div className="max-h-[min(430px,calc(100vh-350px))] overflow-auto">
+            <table className="w-full min-w-[980px] table-fixed border-collapse text-left text-[12px]">
               <thead className="sticky top-0 z-[1] bg-[#f8fafc] text-[#111827]">
                 <tr>
                   <th className="w-8 px-3 py-3" />
-                  <th className="px-3 py-3 font-semibold">Workload</th>
-                  <th className="px-3 py-3 font-semibold">Namespace</th>
-                  <th className="px-3 py-3 font-semibold">Status</th>
-                  <th className="px-3 py-3 font-semibold">Root Cause</th>
-                  <th className="px-3 py-3 font-semibold">Confidence</th>
-                  <th className="px-3 py-3 font-semibold">Source</th>
-                  <th className="px-3 py-3 font-semibold">Age</th>
+                  <th className="w-[22%] px-3 py-3 font-semibold">Workload</th>
+                  <th className="w-[10%] px-3 py-3 font-semibold">Namespace</th>
+                  <th className="w-[12%] px-3 py-3 font-semibold">Status</th>
+                  <th className="w-[31%] px-3 py-3 font-semibold">Root Cause</th>
+                  <th className="w-[10%] px-3 py-3 font-semibold">Confidence</th>
+                  <th className="w-[10%] px-3 py-3 font-semibold">Source</th>
+                  <th className="w-[5%] px-3 py-3 font-semibold">Age</th>
                 </tr>
               </thead>
               <tbody>
@@ -481,25 +483,25 @@ const IncidentTable = ({
                       onClick={() => onSelect(incident.id)}
                       className={`cursor-pointer border-t border-[#e5e7eb] transition ${selected ? 'bg-[#fff1f2] shadow-[inset_3px_0_0_#ef4444]' : 'hover:bg-[#f9fafb]'}`}
                     >
-                      <td className="px-3 py-4">
+                      <td className="px-3 py-3">
                         {selected ? <Circle className="h-3.5 w-3.5 fill-white text-[#94a3b8]" /> : <Circle className="h-3.5 w-3.5 text-[#94a3b8]" />}
                       </td>
-                      <td className="px-3 py-4">
+                      <td className="px-3 py-3">
                         <div className="flex items-center gap-2 font-medium text-[#111827]">
                           <WorkloadIcon workload={incident.workload} />
                           <div className="min-w-0">
-                            <div className="truncate">{incident.workload.kind}/{incident.workload.name}</div>
+                            <div className="truncate" title={`${incident.workload.kind}/${incident.workload.name}`}>{incident.workload.kind}/{incident.workload.name}</div>
                             {incident.workload.podName && incident.workload.podName !== incident.workload.name && (
-                              <div className="truncate text-[11px] font-normal text-[#647084]">Pod/{incident.workload.podName}</div>
+                              <div className="truncate text-[11px] font-normal text-[#647084]" title={`Pod/${incident.workload.podName}`}>Pod/{incident.workload.podName}</div>
                             )}
                           </div>
                         </div>
                       </td>
-                      <td className="px-3 py-4 text-[#111827]">{incident.workload.namespace}</td>
-                      <td className="px-3 py-4">
+                      <td className="px-3 py-3 text-[#111827]" title={incident.workload.namespace}>{incident.workload.namespace}</td>
+                      <td className="px-3 py-3">
                         <StatusChip value={incident.status} severity={incident.severity} />
                       </td>
-                      <td className="max-w-[260px] px-3 py-4 text-[#111827]">
+                      <td className="px-3 py-3 text-[#111827]">
                         <ExpandableText
                           value={incident.cause || 'Pending root cause'}
                           collapsedClassName="line-clamp-3"
@@ -507,11 +509,11 @@ const IncidentTable = ({
                           alwaysExpandable
                         />
                       </td>
-                      <td className="px-3 py-4">
+                      <td className="px-3 py-3">
                         <Confidence value={incident.confidence} />
                       </td>
-                      <td className="px-3 py-4 text-[#111827]">{incident.source}</td>
-                      <td className={`px-3 py-4 font-medium ${incident.severity === 'critical' ? 'text-[#dc2626]' : 'text-[#f97316]'}`}>{incident.age}</td>
+                      <td className="px-3 py-3 text-[#111827]" title={incident.source}>{incident.source}</td>
+                      <td className={`px-3 py-3 font-medium ${incident.severity === 'critical' ? 'text-[#dc2626]' : 'text-[#f97316]'}`}>{incident.age}</td>
                     </tr>
                   );
                 })}
@@ -534,21 +536,45 @@ const IncidentTable = ({
   );
 };
 
-const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) => (
-  <aside className="self-start border-t border-[#e5e7eb] bg-white p-3 2xl:sticky 2xl:top-[76px] 2xl:max-h-[calc(100vh-76px)] 2xl:overflow-y-auto 2xl:border-l 2xl:border-t-0">
-    {!incident ? (
-      <EmptyState
-        icon={<FileText className="h-8 w-8" />}
-        title="Select an incident"
-        message="Incident evidence, GitOps mapping, recommended pull request, and guardrail status will appear here."
-      />
-    ) : (
+const IncidentDrawer = ({ 
+  incident, 
+  remediations,
+  onDashboardRefresh 
+}: { 
+  incident: DashboardIncident | null; 
+  remediations: DashboardRemediation[];
+  onDashboardRefresh: (data: DashboardState | null) => void;
+}) => {
+  const [runningAction, setRunningAction] = useState<string | null>(null);
+  const [actionError, setActionError] = useState('');
+
+  if (!incident) {
+    return (
+      <aside className="self-start border-t border-[#e5e7eb] bg-[#f8fafc] p-3 xl:sticky xl:top-[76px] xl:max-h-[calc(100vh-76px)] xl:overflow-y-auto xl:border-l xl:border-t-0">
+        <EmptyState
+          icon={<FileText className="h-8 w-8" />}
+          title="Select an incident"
+          message="Incident evidence, GitOps mapping, recommended pull request, and guardrail status will appear here."
+        />
+      </aside>
+    );
+  }
+
+  // Find the most recent active remediation for this incident's workload
+  const activeRemediation = remediations.find(r => r.workload.namespace === incident.workload.namespace && r.workload.name === incident.workload.name && remediationManualActions(r).length > 0);
+
+  return (
+    <aside className="self-start border-t border-[#e5e7eb] bg-[#f8fafc] p-3 xl:sticky xl:top-[76px] xl:max-h-[calc(100vh-76px)] xl:overflow-y-auto xl:border-l xl:border-t-0">
       <div className="space-y-3">
-        <div className="flex items-start justify-between gap-3 px-1 py-2">
+        {actionError && (
+          <div className="rounded-md border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-[12px] text-[#9a3412]">{actionError}</div>
+        )}
+        
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-[#e5e7eb] bg-white px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
           <div>
             <div className="flex items-center gap-2">
               <TriangleAlert className="h-5 w-5 text-[#dc2626]" />
-              <h2 className="text-[18px] font-semibold text-[#111827]">{incident.workload.kind}/{incident.workload.name}</h2>
+              <h2 className="line-clamp-2 text-[17px] font-semibold leading-6 text-[#111827]" title={`${incident.workload.kind}/${incident.workload.name}`}>{incident.workload.kind}/{incident.workload.name}</h2>
               <StatusChip value={incident.status} severity={incident.severity} />
             </div>
             <div className="mt-2 text-[12px] text-[#4b5563]">
@@ -562,6 +588,32 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {activeRemediation && (
+          <DrawerCard icon={<Activity className="h-4 w-4 text-[#2563eb]" />} title="Actionable Triage (ChatOps)">
+            <div className="px-3 pb-3">
+              <div className="mt-2 text-[11px] text-[#647084]">Execute remediation workflow actions directly from the dashboard:</div>
+              <RemediationActions
+                row={activeRemediation}
+                runningAction={runningAction}
+                onRun={async (action) => {
+                  const key = `${activeRemediation.id}:${action}`;
+                  setRunningAction(key);
+                  setActionError('');
+                  try {
+                    await apiClient.post(`/remediations/${activeRemediation.id}/actions/${action}`);
+                    const { data } = await apiClient.get<DashboardState>('/dashboard');
+                    onDashboardRefresh(data);
+                  } catch (err: any) {
+                    setActionError(err?.response?.data || err?.message || 'Failed to execute action.');
+                  } finally {
+                    setRunningAction(null);
+                  }
+                }}
+              />
+            </div>
+          </DrawerCard>
+        )}
 
         <DrawerCard icon={<Network className="h-4 w-4 text-[#2563eb]" />} title="Evidence Chain">
           {incident.evidence?.length ? (
@@ -581,6 +633,7 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
 
         <DrawerCard icon={<AlertCircle className="h-4 w-4 text-[#f97316]" />} title="RCA Explainability">
           <IncidentRCA incident={incident} />
+          <IncidentAIDebug incident={incident} />
         </DrawerCard>
 
         <DrawerCard icon={<FileCode2 className="h-4 w-4 text-[#2563eb]" />} title="GitOps Mapping">
@@ -627,14 +680,14 @@ const IncidentDrawer = ({ incident }: { incident: DashboardIncident | null }) =>
           <IncidentPolicy incident={incident} />
         </DrawerCard>
       </div>
-    )}
-  </aside>
-);
+    </aside>
+  );
+};
 
 const DrawerCard = ({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) => (
-  <section className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white">
-    <header className="flex h-12 items-center justify-between border-b border-[#e5e7eb] px-3">
-      <div className="flex items-center gap-2 text-[14px] font-semibold text-[#111827]">
+  <section className="overflow-hidden rounded-lg border border-[#e5e7eb] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+    <header className="flex h-10 items-center justify-between border-b border-[#e5e7eb] bg-white px-3">
+      <div className="flex items-center gap-2 text-[13px] font-semibold text-[#111827]">
         {icon}
         {title}
       </div>
@@ -645,7 +698,7 @@ const DrawerCard = ({ icon, title, children }: { icon: ReactNode; title: string;
 );
 
 const EvidenceRow = ({ item }: { item: DashboardEvidence }) => (
-  <div className="grid grid-cols-[84px_1fr_auto] items-start gap-3 px-3 py-3 text-[12px]">
+  <div className="grid grid-cols-[84px_minmax(0,1fr)_auto] items-start gap-3 px-3 py-2.5 text-[12px] hover:bg-[#f8fafc]">
     <div className="font-semibold text-[#111827]">{item.label}</div>
     <ExpandableText
       value={item.value}
@@ -761,6 +814,71 @@ const IncidentRCA = ({ incident }: { incident: DashboardIncident }) => (
     ) : null}
   </div>
 );
+
+const IncidentAIDebug = ({ incident }: { incident: DashboardIncident }) => {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<InvestigationDetail | null>(null);
+  const [error, setError] = useState('');
+
+  const handleToggle = async () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (data) return;
+
+    setLoading(true);
+    const investigationId = incident.id.replace(/^investigation-/, '');
+    try {
+      const response = await apiClient.get<InvestigationDetail>(`/audit/investigations/${investigationId}`);
+      setData(response.data);
+    } catch (err) {
+      setError('Failed to load AI interaction details.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-[#e5e7eb] px-3 py-3">
+      <button 
+        onClick={handleToggle}
+        className="flex w-full items-center justify-between text-[12px] font-semibold text-[#111827] hover:text-[#2563eb]"
+      >
+        <span className="flex items-center gap-2">
+          <Brain className="h-4 w-4" />
+          Debug AI Interaction
+        </span>
+        <ChevronDown className={`h-4 w-4 transform transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          {loading && <div className="text-[12px] text-[#647084]">Loading AI details...</div>}
+          {error && <div className="text-[12px] text-[#dc2626]">{error}</div>}
+          {data && (
+            <>
+              <div>
+                <div className="mb-1 text-[11px] font-semibold uppercase text-[#647084]">Input Content (Prompt)</div>
+                <div className="max-h-64 overflow-x-auto whitespace-pre-wrap rounded-md border border-[#1e293b] bg-[#0f172a] p-3 font-mono text-[11px] text-[#f8fafc]">
+                  {data.aiPrompt || 'No AI prompt captured.'}
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-[11px] font-semibold uppercase text-[#647084]">Raw AI Response</div>
+                <div className="max-h-64 overflow-x-auto whitespace-pre-wrap rounded-md border border-[#e2e8f0] bg-[#f1f5f9] p-3 font-mono text-[11px] text-[#334155]">
+                  {data.aiResponse || 'No AI response captured.'}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const IncidentPolicy = ({ incident }: { incident: DashboardIncident }) => {
   const requiresApproval = incident.pr?.approverRequired;
@@ -951,470 +1069,12 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
   </section>
 );
 
-const DependencyGraph = ({ incident }: { incident: DashboardIncident | null }) => {
-  const nodes = incident?.graph || [];
-  const edges = incident?.edges || [];
-  const incidentId = incident?.id || null;
-  const [graphState, setGraphState] = useState<GraphState>({ incidentId: null, selectedNodeId: null, collapsedNodeIds: new Set(), expanded: false });
-  const [graphKind, setGraphKind] = useState('all');
-
-  const activeGraphState = graphState.incidentId === incidentId
-    ? graphState
-    : { incidentId, selectedNodeId: preferredGraphNodeId(nodes), collapsedNodeIds: new Set<string>(), expanded: false };
-  const selectedNodeId = activeGraphState.selectedNodeId || preferredGraphNodeId(nodes);
-  const collapsedNodeIds = activeGraphState.collapsedNodeIds;
-  const expanded = activeGraphState.expanded;
-
-  const visibleNodeIds = visibleGraphNodeIds(nodes, edges, collapsedNodeIds);
-  const kindFilteredIds = new Set(nodes.filter((node) => graphKind === 'all' || normalizeGraphKind(node) === graphKind).map((node) => node.id));
-  const visibleNodes = nodes.filter((node) => visibleNodeIds.has(node.id) && kindFilteredIds.has(node.id));
-  const visibleEdges = edges.filter(([from, to]) => visibleNodeIds.has(from) && visibleNodeIds.has(to) && kindFilteredIds.has(from) && kindFilteredIds.has(to) && !collapsedNodeIds.has(from));
-  const selectedNode = nodes.find((node) => node.id === selectedNodeId) || visibleNodes[0] || null;
-  const hasChildren = !!selectedNode && edges.some(([from]) => from === selectedNode.id);
-  const graphKinds = Array.from(new Set(nodes.map(normalizeGraphKind).filter(Boolean))).sort();
-
-  const toggleSelectedChildren = () => {
-    if (!selectedNode) return;
-    setGraphState((current) => {
-      const existing = graphStateForIncident(current, incidentId, nodes);
-      const next = new Set(existing.collapsedNodeIds);
-      if (next.has(selectedNode.id)) {
-        next.delete(selectedNode.id);
-      } else {
-        next.add(selectedNode.id);
-      }
-      return { ...existing, collapsedNodeIds: next };
-    });
-  };
-
-  return (
-    <section className={`rounded-lg border border-[#e5e7eb] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${expanded ? 'fixed inset-2 z-40 sm:inset-4' : ''}`}>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 className="text-[14px] font-semibold text-[#111827]">Dependency Graph</h2>
-        <AlertCircle className="h-3.5 w-3.5 text-[#94a3b8]" />
-        {nodes.length > 0 && (
-          <select
-            value={graphKind}
-            onChange={(event) => setGraphKind(event.target.value)}
-            className="ml-auto h-8 rounded-md border border-[#e5e7eb] bg-white px-2 text-[11px] font-medium text-[#374151] outline-none"
-            title="Filter graph resources"
-          >
-            <option value="all">All resources</option>
-            {graphKinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
-          </select>
-        )}
-        <button
-          onClick={() => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { expanded: !expanded }))}
-          className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151] hover:bg-[#f8fafc]"
-          title={expanded ? 'Collapse graph' : 'Expand graph'}
-        >
-          {expanded ? <X className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-        </button>
-      </div>
-      {incident && nodes.length ? (
-        <div className={`grid gap-3 ${expanded ? 'h-[calc(100%-44px)] grid-cols-1 xl:grid-cols-[1fr_300px]' : 'grid-cols-1'}`}>
-          {nodes.length > 24 && !expanded && (
-            <div className="rounded-md border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-[11px] text-[#9a3412]">
-              Large graph detected. Use the resource filter or expanded view before inspecting dense dependency chains.
-            </div>
-          )}
-          <GraphCanvas
-            nodes={visibleNodes}
-            edges={visibleEdges}
-            selectedNodeId={selectedNode?.id || null}
-            onSelect={(id) => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { selectedNodeId: id }))}
-            expanded={expanded}
-          />
-          {!expanded && (
-            <GraphFooter
-              onExpand={() => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { expanded: true }))}
-            />
-          )}
-          <div className={expanded ? 'block min-h-0 overflow-y-auto' : 'hidden'}>
-            <ResourceDetailPanel
-              node={selectedNode}
-              nodes={nodes}
-              edges={edges}
-              incident={incident}
-              isCollapsed={!!selectedNode && collapsedNodeIds.has(selectedNode.id)}
-              hasChildren={hasChildren}
-              hiddenCount={nodes.length - visibleNodes.length}
-              onToggleChildren={toggleSelectedChildren}
-              onExpandAll={() => setGraphState((current) => graphStateForIncident(current, incidentId, nodes, { collapsedNodeIds: new Set() }))}
-            />
-          </div>
-        </div>
-      ) : (
-        <MiniEmpty message="No dependency graph has been captured for this workload yet." />
-      )}
-    </section>
-  );
-};
-
-const GraphFooter = ({ onExpand }: { onExpand: () => void }) => (
-  <div className="flex items-center justify-between px-1 pt-1">
-    <div className="flex items-center gap-2 text-[12px] text-[#647084]">
-      <span className="h-2 w-2 rounded-full bg-[#16a34a]" />
-      Live view
-    </div>
-    <div className="flex items-center gap-2">
-      <button
-        onClick={onExpand}
-        className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151] hover:bg-[#f8fafc]"
-        title="Expand graph"
-      >
-        <Maximize2 className="h-4 w-4" />
-      </button>
-      <button
-        className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151]"
-        title="Zoom controls are available in expanded view"
-        type="button"
-      >
-        +
-      </button>
-      <button
-        className="grid h-8 w-8 place-items-center rounded-md border border-[#e5e7eb] bg-white text-[#374151]"
-        title="Zoom controls are available in expanded view"
-        type="button"
-      >
-        -
-      </button>
-    </div>
-  </div>
-);
-
-const GraphCanvas = ({
-  nodes,
-  edges,
-  selectedNodeId,
-  onSelect,
-  expanded,
-}: {
-  nodes: DashboardDependencyNode[];
-  edges: DashboardDependencyEdge[];
-  selectedNodeId: string | null;
-  onSelect: (id: string) => void;
-  expanded: boolean;
-}) => {
-  const layouted = layoutGraph(nodes, edges);
-  const flowNodes = layouted.map<FlowNode>((node) => ({
-    id: node.id,
-    type: 'default',
-    position: { x: node.x, y: node.y },
-    data: { label: <FlowNodeLabel node={node} /> },
-    style: flowNodeStyle(node, node.id === selectedNodeId, expanded),
-    sourcePosition: Position.Bottom,
-    targetPosition: Position.Top,
-  }));
-  const flowEdges = edges.map<Edge>(([from, to]) => ({
-    id: `${from}-${to}`,
-    source: from,
-    target: to,
-    type: 'smoothstep',
-    animated: false,
-    markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' },
-    style: { stroke: '#94a3b8', strokeWidth: 1.5 },
-  }));
-
-  return (
-    <div className={`${expanded ? 'h-full min-h-[420px]' : 'h-[270px]'} overflow-hidden rounded-md border border-[#e5e7eb] bg-[#fbfdff]`}>
-      <ReactFlow
-        nodes={flowNodes}
-        edges={flowEdges}
-        onNodeClick={(_, node) => onSelect(node.id)}
-        fitView
-        fitViewOptions={{ padding: expanded ? 0.18 : 0.38, maxZoom: expanded ? 1.2 : 0.82 }}
-        minZoom={0.2}
-        maxZoom={expanded ? 1.8 : 0.95}
-        nodesDraggable={false}
-        panOnDrag={expanded}
-        panOnScroll={expanded}
-        zoomOnScroll={expanded}
-        zoomOnPinch={expanded}
-        zoomOnDoubleClick={expanded}
-        preventScrolling={expanded}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background color="#dbe3ef" gap={18} />
-        {expanded && (
-          <>
-            <Controls position="bottom-right" showInteractive={false} />
-            <MiniMap
-              position="bottom-left"
-              pannable
-              zoomable
-              nodeColor={(node) => {
-                const original = nodes.find((item) => item.id === node.id);
-                return graphNodeColor(original?.kind || original?.label || '');
-              }}
-              maskColor="rgba(241,245,249,0.72)"
-            />
-            <Panel position="top-left" className="rounded-md border border-[#e5e7eb] bg-white/90 px-2 py-1 text-[11px] font-medium text-[#475569] shadow-sm">
-              Auto-layout · pan · zoom · select resources
-            </Panel>
-          </>
-        )}
-      </ReactFlow>
-    </div>
-  );
-};
-
-type FlowNode = Node<{ label: ReactNode }>;
-type GraphState = {
-  incidentId: string | null;
-  selectedNodeId: string | null;
-  collapsedNodeIds: Set<string>;
-  expanded: boolean;
-};
-
-const graphStateForIncident = (
-  current: GraphState,
-  incidentId: string | null,
-  nodes: DashboardDependencyNode[],
-  patch?: Partial<GraphState>,
-): GraphState => {
-  const base = current.incidentId === incidentId
-    ? current
-    : { incidentId, selectedNodeId: preferredGraphNodeId(nodes), collapsedNodeIds: new Set<string>(), expanded: false };
-  return { ...base, ...patch, incidentId };
-};
-
-const preferredGraphNodeId = (nodes: DashboardDependencyNode[]) => (
-  nodes.find((node) => /helmrelease/i.test(`${node.label} ${node.kind}`))?.id
-  || nodes.find((node) => /helm/i.test(`${node.label} ${node.kind}`))?.id
-  || nodes[0]?.id
-  || null
-);
-
-const FlowNodeLabel = ({ node }: { node: DashboardDependencyNode }) => {
-  const color = graphNodeColor(node.kind || node.label);
-  return (
-    <div className="flex min-w-0 items-center gap-2 text-left text-[10px] leading-tight">
-      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-white" style={{ backgroundColor: color }}>
-        {renderWorkloadGlyph(node.label, 'h-4 w-4')}
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate font-semibold text-[#111827]">{node.label}</span>
-        <span className="block max-w-[92px] truncate text-[#475569]">{node.detail}</span>
-      </span>
-    </div>
-  );
-};
-
-const ResourceDetailPanel = ({
-  node,
-  nodes,
-  edges,
-  incident,
-  isCollapsed,
-  hasChildren,
-  hiddenCount,
-  onToggleChildren,
-  onExpandAll,
-}: {
-  node: DashboardDependencyNode | null;
-  nodes: DashboardDependencyNode[];
-  edges: DashboardDependencyEdge[];
-  incident: DashboardIncident;
-  isCollapsed: boolean;
-  hasChildren: boolean;
-  hiddenCount: number;
-  onToggleChildren: () => void;
-  onExpandAll: () => void;
-}) => {
-  if (!node) {
-    return <MiniEmpty message="Select a graph node to inspect its Kubernetes resource context." />;
-  }
-  const relatedIds = edges
-    .filter(([from, to]) => from === node.id || to === node.id)
-    .map(([from, to]) => (from === node.id ? to : from));
-  const relatedNodes = relatedIds
-    .map((id) => nodes.find((candidate) => candidate.id === id))
-    .filter((candidate): candidate is DashboardDependencyNode => !!candidate);
-
-  return (
-    <div className="rounded-md border border-[#e5e7eb] bg-white p-3 text-[12px]">
-      <div className="flex items-start gap-2">
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-white" style={{ backgroundColor: graphNodeColor(node.kind || node.label) }}>
-          {renderWorkloadGlyph(node.label, 'h-4 w-4')}
-        </span>
-        <div className="min-w-0">
-          <div className="font-semibold text-[#111827]">{node.label}</div>
-          <div className="truncate text-[#647084]">{node.detail}</div>
-        </div>
-      </div>
-      <div className="mt-3 space-y-2 border-t border-[#e5e7eb] pt-3">
-        <DetailLine label="Resource" value={`${node.label}/${node.detail}`} />
-        <DetailLine label="Namespace" value={incident.workload.namespace} />
-        <DetailLine label="Status" value={incident.status} />
-        <DetailLine label="Root cause" value={incident.cause || 'Pending'} />
-        <DetailLine label="Confidence" value={`${incident.confidence || 0}%`} />
-        <DetailLine label="Signal" value={incident.source || 'Unknown'} />
-        <DetailLine label="Risk" value={incident.risk || 'Unknown'} />
-        {incident.gitops && <DetailLine label="GitOps" value={`${incident.gitops.controller} · ${incident.gitops.path || incident.gitops.repo}`} />}
-        {incident.gitops?.helm && isHelmNode(node) && (
-          <>
-            <DetailLine label="Chart" value={helmChartLabel(incident.gitops)} />
-            <DetailLine label="Release" value={incident.gitops.helm.releaseName || incident.gitops.app || 'Unknown'} />
-            <DetailLine label="Values" value={(incident.gitops.helm.valueFiles || []).join(' → ') || 'Not reported'} />
-          </>
-        )}
-        {incident.pr && <DetailLine label="PR" value={incident.pr.branch || incident.pr.title} />}
-      </div>
-      <div className="mt-3 border-t border-[#e5e7eb] pt-3">
-        <div className="mb-2 font-semibold text-[#111827]">Related resources</div>
-        {relatedNodes.length ? (
-          <div className="space-y-1.5">
-            {relatedNodes.map((related) => (
-              <div key={related.id} className="flex items-center gap-2 rounded-md bg-[#f8fafc] px-2 py-1.5">
-                <span className="grid h-5 w-5 place-items-center rounded text-white" style={{ backgroundColor: graphNodeColor(related.kind || related.label) }}>
-                  {renderWorkloadGlyph(related.label, 'h-3 w-3')}
-                </span>
-                <span className="min-w-0 truncate text-[#475569]">{related.label}/{related.detail}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-[#647084]">No direct dependencies recorded.</div>
-        )}
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {hasChildren && (
-          <button onClick={onToggleChildren} className="rounded-md border border-[#e5e7eb] px-2 py-1 text-[11px] font-medium text-[#374151] hover:bg-[#f8fafc]">
-            {isCollapsed ? 'Expand children' : 'Collapse children'}
-          </button>
-        )}
-        {hiddenCount > 0 && (
-          <button onClick={onExpandAll} className="rounded-md border border-[#bfdbfe] bg-[#eff6ff] px-2 py-1 text-[11px] font-medium text-[#2563eb]">
-            Expand all ({hiddenCount} hidden)
-          </button>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const DetailLine = ({ label, value }: { label: string; value: string }) => (
-  <div className="grid grid-cols-[72px_1fr] gap-2">
-    <span className="font-semibold text-[#111827]">{label}</span>
-    <span className="min-w-0 truncate text-[#475569]">{value || 'Unknown'}</span>
-  </div>
-);
-
-const layoutGraph = (nodes: DashboardDependencyNode[], edges: DashboardDependencyEdge[]): DashboardDependencyNode[] => {
-  if (nodes.length === 0) return [];
-
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const outgoing = new Map<string, string[]>();
-  const incomingCount = new Map<string, number>();
-  nodes.forEach((node) => incomingCount.set(node.id, 0));
-
-  edges.forEach(([from, to]) => {
-    if (!nodeIds.has(from) || !nodeIds.has(to)) return;
-    outgoing.set(from, [...(outgoing.get(from) || []), to]);
-    incomingCount.set(to, (incomingCount.get(to) || 0) + 1);
-  });
-
-  const roots = nodes.filter((node) => (incomingCount.get(node.id) || 0) === 0);
-  const queue = roots.length ? roots.map((node) => node.id) : [nodes[0].id];
-  const levels = new Map<string, number>();
-  queue.forEach((id) => levels.set(id, 0));
-
-  for (let index = 0; index < queue.length; index += 1) {
-    const id = queue[index];
-    const level = levels.get(id) || 0;
-    for (const child of outgoing.get(id) || []) {
-      const nextLevel = level + 1;
-      if (!levels.has(child) || nextLevel > (levels.get(child) || 0)) {
-        levels.set(child, nextLevel);
-        queue.push(child);
-      }
-    }
-  }
-
-  nodes.forEach((node) => {
-    if (!levels.has(node.id)) {
-      levels.set(node.id, 0);
-    }
-  });
-
-  const grouped = new Map<number, DashboardDependencyNode[]>();
-  nodes.forEach((node) => {
-    const level = levels.get(node.id) || 0;
-    grouped.set(level, [...(grouped.get(level) || []), node]);
-  });
-
-  return nodes.map((node) => {
-    const level = levels.get(node.id) || 0;
-    const group = grouped.get(level) || [node];
-    const index = group.findIndex((item) => item.id === node.id);
-    const total = group.length;
-    const x = index * 190 - ((total - 1) * 190) / 2;
-    const y = level * 118;
-    return { ...node, x, y };
-  });
-};
-
-const visibleGraphNodeIds = (nodes: DashboardDependencyNode[], edges: DashboardDependencyEdge[], collapsed: Set<string>) => {
-  const visible = new Set(nodes.map((node) => node.id));
-  const children = new Map<string, string[]>();
-  edges.forEach(([from, to]) => {
-    children.set(from, [...(children.get(from) || []), to]);
-  });
-
-  const hideDescendants = (id: string) => {
-    for (const child of children.get(id) || []) {
-      if (!visible.has(child)) continue;
-      visible.delete(child);
-      hideDescendants(child);
-    }
-  };
-
-  collapsed.forEach(hideDescendants);
-  return visible;
-};
-
-const flowNodeStyle = (node: DashboardDependencyNode, selected: boolean, expanded: boolean) => ({
-  width: expanded ? 150 : 142,
-  minHeight: expanded ? 54 : 52,
-  padding: expanded ? '8px' : '7px',
-  borderRadius: 8,
-  border: selected ? '2px solid #2563eb' : '1px solid #dbe3ef',
-  boxShadow: selected ? '0 8px 24px rgba(37,99,235,0.16)' : '0 1px 2px rgba(15,23,42,0.04)',
-  background: node.kind === 'active' ? '#eff6ff' : '#ffffff',
-});
-
-const graphNodeColor = (kind: string) => {
-  const lower = kind.toLowerCase();
-  if (lower.includes('helm') || lower.includes('chart')) return '#2563eb';
-  if (lower.includes('active') || lower.includes('deployment')) return '#2563eb';
-  if (lower.includes('warning') || lower.includes('config') || lower.includes('secret')) return '#f97316';
-  if (lower.includes('stateful')) return '#0ea5e9';
-  if (lower.includes('service')) return '#16a34a';
-  return '#64748b';
-};
-
-const normalizeGraphKind = (node: DashboardDependencyNode) => {
-  const raw = `${node.kind || ''} ${node.label || ''}`.toLowerCase();
-  if (raw.includes('helm')) return 'Helm';
-  if (raw.includes('kustom')) return 'Kustomize';
-  if (raw.includes('deployment')) return 'Deployment';
-  if (raw.includes('stateful')) return 'StatefulSet';
-  if (raw.includes('daemon')) return 'DaemonSet';
-  if (raw.includes('config')) return 'ConfigMap';
-  if (raw.includes('secret')) return 'Secret';
-  if (raw.includes('service')) return 'Service';
-  if (raw.includes('ingress')) return 'Ingress';
-  if (raw.includes('pod')) return 'Pod';
-  return node.kind || node.label || 'Resource';
-};
-
 const KeyValueRows = ({ rows, compact = false }: { rows: [string, string | undefined][]; compact?: boolean }) => (
   <div className={`space-y-2 text-[12px] ${compact ? '' : 'px-3 py-3'}`}>
     {rows.filter(([, value]) => !!value).map(([label, value]) => (
       <div key={label} className="grid grid-cols-[84px_1fr] gap-3">
         <span className="font-semibold text-[#111827]">{label}</span>
-        <span className="min-w-0 truncate text-[#111827]">{value}</span>
+        <span className="min-w-0 break-words text-[#111827]">{value}</span>
       </div>
     ))}
   </div>
@@ -1531,13 +1191,6 @@ const renderWorkloadGlyph = (kind: string, className: string) => {
   return <Code2 className={className} />;
 };
 
-const isHelmNode = (node: DashboardDependencyNode) => /helm|chart|values|render/i.test(`${node.label} ${node.kind}`);
-
-const helmChartLabel = (gitops: DashboardGitOpsMapping) => {
-  const chart = gitops.helm?.chart || 'Unknown chart';
-  return gitops.helm?.chartVersion ? `${chart}@${gitops.helm.chartVersion}` : chart;
-};
-
 const workloadColor = (kind: string) => {
   const lower = kind.toLowerCase();
   if (lower.includes('stateful')) return '#0ea5e9';
@@ -1550,8 +1203,18 @@ const workloadColor = (kind: string) => {
 
 const StatusChip = ({ value, severity }: { value: string; severity?: string }) => {
   const critical = severity === 'critical' || /crash|fail|error|oom|pending/i.test(value || '');
+  const warning = /warn|degraded|unready|image|pull/i.test(value || '');
   return (
-    <span className={`inline-flex rounded px-2 py-0.5 text-[11px] font-medium ${critical ? 'border border-[#fca5a5] bg-[#fee2e2] text-[#dc2626]' : 'border border-[#fed7aa] bg-[#ffedd5] text-[#f97316]'}`}>
+    <span
+      className={`inline-flex max-w-[160px] truncate rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
+        critical
+          ? 'border-[#fca5a5] bg-[#fee2e2] text-[#dc2626]'
+          : warning
+            ? 'border-[#fed7aa] bg-[#ffedd5] text-[#f97316]'
+            : 'border-[#bfdbfe] bg-[#eff6ff] text-[#2563eb]'
+      }`}
+      title={value || 'Unknown'}
+    >
       {value || 'Unknown'}
     </span>
   );
@@ -1570,8 +1233,8 @@ const PagerButton = ({ label, icon, active, disabled, onClick }: { label?: strin
   <button
     disabled={disabled}
     onClick={onClick}
-    className={`grid h-8 min-w-8 place-items-center rounded-md border px-2 text-[12px] ${
-      active ? 'border-[#94a3b8] bg-white text-[#111827]' : 'border-[#e5e7eb] bg-white text-[#4b5563] disabled:text-[#cbd5e1]'
+    className={`grid h-8 min-w-8 place-items-center rounded-md border px-2 text-[12px] transition ${
+      active ? 'border-[#94a3b8] bg-white text-[#111827] shadow-sm' : 'border-[#e5e7eb] bg-white text-[#4b5563] hover:bg-[#f8fafc] disabled:text-[#cbd5e1] disabled:hover:bg-white'
     }`}
   >
     {icon || label}
@@ -1580,12 +1243,12 @@ const PagerButton = ({ label, icon, active, disabled, onClick }: { label?: strin
 
 const EmptyState = ({ icon, title, message }: { icon: ReactNode; title: string; message: string }) => (
   <div className="grid min-h-[180px] place-items-center px-6 py-10 text-center">
-    <div className="max-w-md text-[#647084]">
-      <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-full bg-[#f1f5f9] text-[#94a3b8]">{icon}</div>
+    <div className="max-w-md rounded-lg border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-6 py-6 text-[#647084]">
+      <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-lg bg-white text-[#94a3b8] shadow-sm">{icon}</div>
       <strong className="text-[14px] text-[#111827]">{title}</strong>
       <p className="mt-1 text-[13px] leading-5">{message}</p>
     </div>
   </div>
 );
 
-const MiniEmpty = ({ message }: { message: string }) => <div className="px-3 py-4 text-[12px] leading-5 text-[#647084]">{message}</div>;
+const MiniEmpty = ({ message }: { message: string }) => <div className="m-3 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-3 py-3 text-[12px] leading-5 text-[#647084]">{message}</div>;

@@ -21,6 +21,11 @@ Fixora emphasizes minimal privileges. It securely queries APIs (Prometheus, K8s 
 AI alone is not trusted. Alerts follow a rigorous visual logic tree:
 `[Metric Proof] + [Dependency Graph Context] + [Historical Pattern] = [Root Cause] & [Confidence Score]`
 
+### Failure Fingerprinting (Deduplication)
+To handle enterprise scale and noisy `CrashLoopBackOff` scenarios, Fixora implements a deterministic failure fingerprinting system.
+*   **Workload Context**: Fingerprints are calculated based on the workload identity (e.g., Deployment/api), container image, command/args, resource limits, environment variables, and termination messages.
+*   **Investigation Reuse**: If Fixora detects a failure with a fingerprint identical to a recent, successful remediation, it intelligently reuses the existing fix and skips the AI forensics phase, significantly reducing LLM costs and triage time.
+
 ### FinOps & Cost of Downtime (CoD)
 Every diagnostic report explicitly states the dollar impact. This includes both the cost change of the proposed fix and the **Cost of Downtime (CoD)** for application errors, aligning engineering fixes with financial practices.
 
@@ -47,6 +52,7 @@ Fixora ensures that every decision made by the AI is mathematically verifiable a
 - **Omni-Aware Diagnostics**: Handles a wide range of failures:
     - **K8s Infrastructure**: Scheduling (`Pending`), Capacity (`NodeNotReady`), Configuration (`ImagePullBackOff`).
     - **Application Layer**: HTTP 5xx spikes, latency degradation, and application panics.
+- **Failure Fingerprinting**: Hashes granular failure states to deduplicate investigations and reuse remediations.
 - **Real-time Event Streaming**: Actively watches the K8s Event stream to build real-time dependency graphs.
 - **AI Confidence Scoring**: Intelligent auto-downgrade logic. If AI confidence is below 85%, Fixora automatically switches from Auto-PR to Dry-Run mode.
 - **Pre-Flight Validation**: Before suggesting a GitOps PR, Fixora runs `helm template` or `kubectl diff` in a sandbox to ensure the fix is valid.

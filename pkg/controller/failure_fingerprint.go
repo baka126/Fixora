@@ -3,11 +3,21 @@ package controller
 import (
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+)
+
+var (
+	hexRegex       = regexp.MustCompile(`0x[a-f0-9]+`)
+	uuidRegex      = regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`)
+	timestampRegex = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(\.\d+)?(z|[+-]\d{2}:?\d{2})?`)
+	ipRegex        = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
+	// Pod names in error messages often look like "pod-name-7f6c5b4a-12345"
+	podSuffixRegex = regexp.MustCompile(`-[a-z0-9]{8,10}-[a-z0-9]{5}`)
 )
 
 type failureFingerprint struct {
@@ -277,6 +287,13 @@ func fingerprintVolumes(pod *v1.Pod) []string {
 
 func stableFailureMessage(message string) string {
 	message = strings.ToLower(strings.TrimSpace(message))
+	// Apply regex replacements to strip dynamic content
+	message = hexRegex.ReplaceAllString(message, "0xhex")
+	message = uuidRegex.ReplaceAllString(message, "uuid")
+	message = timestampRegex.ReplaceAllString(message, "timestamp")
+	message = ipRegex.ReplaceAllString(message, "ip")
+	message = podSuffixRegex.ReplaceAllString(message, "-suffix")
+
 	message = strings.Join(strings.Fields(message), " ")
 	if len(message) > 240 {
 		message = message[:240]

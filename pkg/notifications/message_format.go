@@ -8,6 +8,13 @@ import (
 type evidenceMessageView struct {
 	Title       string
 	Subtitle    string
+	Workload    string
+	Namespace   string
+	Status      string
+	Finding     string
+	Category    string
+	Confidence  string
+	Signal      string
 	Summary     string
 	RootCause   string
 	Remediation string
@@ -17,12 +24,13 @@ type evidenceMessageView struct {
 }
 
 func buildEvidenceMessageView(evidence EvidenceChain) evidenceMessageView {
-	workload := firstNonEmpty(evidence.PodName, contextValue(evidence.ClusterContext, "Pod"))
+	podName := firstNonEmpty(evidence.PodName, contextValue(evidence.ClusterContext, "Pod"))
 	namespace := firstNonEmpty(evidence.Namespace, contextValue(evidence.ClusterContext, "Namespace"))
-	if namespace != "" && workload != "" {
-		workload = namespace + "/" + workload
+	workloadKind, workloadName := ownerWorkloadFromNotificationContext(evidence.ClusterContext)
+	workloadRef := compactJoin("/", workloadKind, workloadName)
+	if workloadRef == "" && podName != "" {
+		workloadRef = "Pod/" + podName
 	}
-
 	category := contextValue(evidence.ClusterContext, "Category")
 	reason := contextValue(evidence.ClusterContext, "Reason")
 	diagnosis := contextValue(evidence.ClusterContext, "Diagnosis")
@@ -32,16 +40,25 @@ func buildEvidenceMessageView(evidence EvidenceChain) evidenceMessageView {
 	}
 	patchStrategy := contextValue(evidence.ClusterContext, "Recommended Patch Strategy")
 
-	title := "Fixora Incident Report"
-	subtitle := compactJoin(" - ", workload, titleCase(category))
+	title := "Fixora Incident"
+	if workloadRef != "" {
+		title += ": " + workloadRef
+	}
+	subtitle := compactJoin(" · ", namespace, reason, titleCase(category), confidence)
 	if evidence.PredictiveWarning {
-		title = "Fixora Predictive Risk Report"
-		subtitle = compactJoin(" - ", workload, "Memory growth risk")
+		title = "Fixora Predictive Risk"
+		if workloadRef != "" {
+			title += ": " + workloadRef
+		}
+		subtitle = compactJoin(" · ", namespace, "Memory growth risk", confidence)
 	}
 
 	summaryLines := []string{}
-	if workload != "" {
-		summaryLines = append(summaryLines, fmt.Sprintf("Workload: %s", workload))
+	if workloadRef != "" {
+		summaryLines = append(summaryLines, fmt.Sprintf("Workload: %s", workloadRef))
+	}
+	if namespace != "" {
+		summaryLines = append(summaryLines, fmt.Sprintf("Namespace: %s", namespace))
 	}
 	if reason != "" {
 		summaryLines = append(summaryLines, fmt.Sprintf("Status: %s", reason))
@@ -60,12 +77,34 @@ func buildEvidenceMessageView(evidence EvidenceChain) evidenceMessageView {
 	return evidenceMessageView{
 		Title:       title,
 		Subtitle:    subtitle,
+		Workload:    firstNonEmpty(workloadRef, podName),
+		Namespace:   namespace,
+		Status:      reason,
+		Finding:     diagnosis,
+		Category:    titleCase(category),
+		Confidence:  confidence,
+		Signal:      notificationSignal(evidence),
 		Summary:     strings.Join(summaryLines, "\n"),
-		RootCause:   truncateText(firstNonEmpty(evidence.RootCause, contextValue(evidence.ClusterContext, "Likely Cause"), "No root cause summary available."), 1200),
+		RootCause:   truncateText(firstSentence(firstNonEmpty(evidence.RootCause, contextValue(evidence.ClusterContext, "Likely Cause"), diagnosis, "No root cause summary available.")), 260),
 		Remediation: remediation,
-		Signals:     truncateText(evidence.MetricProof, 900),
+		Signals:     truncateText(evidence.MetricProof, 500),
 		History:     truncateText(evidence.HistoricalPattern, 500),
 		FinOps:      truncateText(firstNonEmpty(evidence.FinOpsImpact, "Not estimated."), 500),
+	}
+}
+
+func notificationSignal(evidence EvidenceChain) string {
+	hasMetrics := strings.TrimSpace(evidence.MetricProof) != ""
+	hasEvents := strings.TrimSpace(evidence.EventTimeline) != "" || contextValue(evidence.ClusterContext, "Evidence") != ""
+	switch {
+	case hasMetrics && hasEvents:
+		return "Metrics + Events"
+	case hasMetrics:
+		return "Metrics"
+	case hasEvents:
+		return "Events"
+	default:
+		return "Cluster"
 	}
 }
 
@@ -174,12 +213,88 @@ func titleCase(value string) string {
 	return strings.ToUpper(value[:1]) + value[1:]
 }
 
+func firstSentence(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	for _, marker := range []string{". ", "; "} {
+		if idx := strings.Index(value, marker); idx > 0 {
+			return strings.TrimSpace(value[:idx+1])
+		}
+	}
+	return value
+}
+
 func truncateText(value string, max int) string {
 	value = strings.TrimSpace(value)
 	if len(value) <= max {
 		return value
 	}
 	return strings.TrimSpace(value[:max]) + "..."
+}
+
+type notificationResourceRef struct {
+	Kind string
+	Name string
+}
+
+func ownerWorkloadFromNotificationContext(clusterContext string) (string, string) {
+	preferred := map[string]int{
+		"Deployment":  1,
+		"StatefulSet": 1,
+		"DaemonSet":   1,
+		"Job":         2,
+		"ReplicaSet":  3,
+	}
+	bestRank := 100
+	var best notificationResourceRef
+	for _, ref := range notificationResourceRefsFromContext(clusterContext) {
+		if rank, ok := preferred[ref.Kind]; ok && rank < bestRank {
+			bestRank = rank
+			best = ref
+		}
+	}
+	return best.Kind, best.Name
+}
+
+func notificationResourceRefsFromContext(clusterContext string) []notificationResourceRef {
+	var refs []notificationResourceRef
+	seen := map[string]bool{}
+	add := func(kind, name string) {
+		key := strings.ToLower(kind + "/" + name)
+		if seen[key] || kind == "" || name == "" {
+			return
+		}
+		seen[key] = true
+		refs = append(refs, notificationResourceRef{Kind: kind, Name: name})
+	}
+	for _, line := range strings.Split(clusterContext, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+		if strings.HasPrefix(line, "Owner chain:") {
+			for _, item := range strings.Split(strings.TrimPrefix(line, "Owner chain:"), "->") {
+				if kind, name, ok := splitNotificationKindName(item); ok {
+					add(kind, name)
+				}
+			}
+			continue
+		}
+		if kind, name, ok := splitNotificationKindName(line); ok {
+			add(kind, name)
+		}
+	}
+	return refs
+}
+
+func splitNotificationKindName(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, "/")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	kind := strings.TrimSpace(parts[0])
+	name := strings.TrimSpace(parts[1])
+	if kind == "" || name == "" || strings.Contains(name, " ") {
+		return "", "", false
+	}
+	return kind, name, true
 }
 
 func Haystack(evidence EvidenceChain, analyzerEvidence []string, likelyCause string) string {

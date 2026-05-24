@@ -3,6 +3,8 @@ package vcs
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/google/go-github/v50/github"
@@ -199,6 +201,40 @@ func (g *GitHubProvider) GetPullRequestStatus(ctx context.Context, repoOwner, re
 	}
 
 	return PullRequestStatus{State: "not_found"}, nil
+}
+
+func (g *GitHubProvider) GetPullRequestStatusByURL(ctx context.Context, prURL string) (PullRequestStatus, error) {
+	repoOwner, repoName, number, ok := parseGitHubPullRequestURL(prURL)
+	if !ok {
+		return PullRequestStatus{State: "not_found"}, nil
+	}
+
+	pr, _, err := g.client.PullRequests.Get(ctx, repoOwner, repoName, number)
+	if err != nil {
+		return PullRequestStatus{}, err
+	}
+	return PullRequestStatus{
+		URL:            pr.GetHTMLURL(),
+		State:          pr.GetState(),
+		Merged:         pr.GetMerged(),
+		MergeCommitSHA: pr.GetMergeCommitSHA(),
+	}, nil
+}
+
+func parseGitHubPullRequestURL(prURL string) (string, string, int, bool) {
+	parsed, err := url.Parse(prURL)
+	if err != nil {
+		return "", "", 0, false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) < 4 || parts[2] != "pull" {
+		return "", "", 0, false
+	}
+	number, err := strconv.Atoi(parts[3])
+	if err != nil || number <= 0 {
+		return "", "", 0, false
+	}
+	return parts[0], parts[1], number, true
 }
 
 func githubPRHeadMatches(pr *github.PullRequest, headBranch string) bool {

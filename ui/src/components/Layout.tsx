@@ -9,6 +9,7 @@ import {
   Check,
   ChevronDown,
   Boxes,
+  CircleDollarSign,
   Database,
   FileCode2,
   FileText,
@@ -19,19 +20,20 @@ import {
   Settings,
   ShieldCheck,
   TriangleAlert,
-} from 'lucide-react';
-import { apiClient } from '../api/client';
-import { useWebSocket } from '../hooks/useWebSocket';
-import { useStore } from '../store/useStore';
-import type { DashboardIntegration } from '../types';
+  } from 'lucide-react';
+  import { apiClient } from '../api/client';
+  import { useWebSocket } from '../hooks/useWebSocket';
+  import { useStore } from '../store/useStore';
+  import type { DashboardIntegration } from '../types';
 
-const navItems = [
+  const navItems = [
   { to: '/', icon: TriangleAlert, label: 'Incidents' },
   { to: '/workloads', icon: Boxes, label: 'Workloads' },
   { to: '/alerts', icon: Activity, label: 'Alerts' },
   { to: '/remediations', icon: GitPullRequestArrow, label: 'Remediations' },
   { to: '/gitops', icon: FileCode2, label: 'GitOps Sources' },
   { to: '/predictions', icon: LineChart, label: 'Predictions' },
+  { to: '/finops', icon: CircleDollarSign, label: 'FinOps' },
   { to: '/audit', icon: FileText, label: 'Audit' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
@@ -54,6 +56,8 @@ export const Layout = () => {
   const {
     user,
     dashboard,
+    realtimeStatus,
+    realtimeMessage,
     selectedCluster,
     searchQuery,
     timeRange,
@@ -64,12 +68,24 @@ export const Layout = () => {
     logout,
   } = useStore();
   const requestedDashboard = useRef(false);
+  const searchInput = useRef<HTMLInputElement | null>(null);
   const [clusterOpen, setClusterOpen] = useState(false);
   const [timeOpen, setTimeOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationsRead, setNotificationsRead] = useState(false);
   const navigate = useNavigate();
   useWebSocket();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        searchInput.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   useEffect(() => {
     if (dashboard || requestedDashboard.current) return;
@@ -200,6 +216,7 @@ export const Layout = () => {
           <div className="order-3 flex h-10 w-full flex-[1_0_100%] items-center gap-3 rounded-md border border-[#e5e7eb] bg-white px-3 text-[#6b7280] md:order-none md:w-auto md:flex-1">
             <Search className="h-4 w-4" />
             <input
+              ref={searchInput}
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
               className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-[#9ca3af]"
@@ -261,6 +278,14 @@ export const Layout = () => {
                 </div>
               );
             })}
+          </div>
+
+          <div
+            className={`hidden h-10 items-center gap-2 rounded-md border px-3 text-[11px] font-medium xl:flex ${realtimeStatusClass(realtimeStatus)}`}
+            title={realtimeMessage}
+          >
+            <span className={`h-2 w-2 rounded-full ${realtimeStatusDot(realtimeStatus)}`} />
+            {realtimeStatus === 'connected' ? 'Live' : realtimeStatus === 'polling' ? 'Polling' : realtimeStatus === 'connecting' ? 'Connecting' : 'Offline'}
           </div>
 
           <div className="relative ml-auto lg:ml-0">
@@ -360,6 +385,20 @@ const Popover = ({ className, children }: { className: string; children: ReactNo
     {children}
   </div>
 );
+
+const realtimeStatusClass = (status: ReturnType<typeof useStore.getState>['realtimeStatus']) => {
+  if (status === 'connected') return 'border-[#bbf7d0] bg-[#f0fdf4] text-[#15803d]';
+  if (status === 'polling') return 'border-[#fed7aa] bg-[#fff7ed] text-[#9a3412]';
+  if (status === 'connecting') return 'border-[#bfdbfe] bg-[#eff6ff] text-[#2563eb]';
+  return 'border-[#e5e7eb] bg-[#f8fafc] text-[#647084]';
+};
+
+const realtimeStatusDot = (status: ReturnType<typeof useStore.getState>['realtimeStatus']) => {
+  if (status === 'connected') return 'bg-[#16a34a]';
+  if (status === 'polling') return 'bg-[#f97316]';
+  if (status === 'connecting') return 'bg-[#2563eb]';
+  return 'bg-[#94a3b8]';
+};
 
 const buildNotifications = (dashboard: ReturnType<typeof useStore.getState>['dashboard']) => {
   const incidents = (dashboard?.incidents || []).slice(0, 5).map((incident) => ({
