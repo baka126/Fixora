@@ -218,6 +218,7 @@ func (h *historyCache) initDB() {
 			helm_values_from JSONB,
 			changed_files JSONB,
 			failure_reason TEXT,
+			failure_fingerprint TEXT,
 			revert_pr_url TEXT,
 			revert_head_branch TEXT,
 			workload_kind TEXT,
@@ -231,6 +232,7 @@ func (h *historyCache) initDB() {
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_kind TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_name TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS workload_selector TEXT;`,
+		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS failure_fingerprint TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS gitops_namespace TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_release_name TEXT;`,
 		`ALTER TABLE remediation_outcomes ADD COLUMN IF NOT EXISTS helm_namespace TEXT;`,
@@ -242,6 +244,7 @@ func (h *historyCache) initDB() {
 		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_pod ON remediation_outcomes (namespace, pod_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_status ON remediation_outcomes (status);`,
 		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_strategy ON remediation_outcomes (diagnosis_category, patch_strategy);`,
+		`CREATE INDEX IF NOT EXISTS idx_remediation_outcomes_fingerprint ON remediation_outcomes (namespace, failure_fingerprint, updated_at);`,
 		`CREATE TABLE IF NOT EXISTS dependency_graph (
 			id SERIAL PRIMARY KEY,
 			namespace VARCHAR(255) NOT NULL,

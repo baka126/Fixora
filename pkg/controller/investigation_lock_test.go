@@ -30,6 +30,68 @@ func TestDiagnosticLockNameIncludesFailureReason(t *testing.T) {
 	}
 }
 
+func TestFailureFingerprintChangesWhenImageChanges(t *testing.T) {
+	ctrl := &Controller{config: &config.Config{ClusterName: "prod"}}
+	identity := workloadIdentity{Kind: "Deployment", Name: "api"}
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-abc", Namespace: "default"},
+		Spec: v1.PodSpec{Containers: []v1.Container{{
+			Name:  "api",
+			Image: "example.com/api:x86-only",
+		}}},
+		Status: v1.PodStatus{ContainerStatuses: []v1.ContainerStatus{{
+			Name: "api",
+			State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{
+				Reason:  "ImagePullBackOff",
+				Message: "exec format error",
+			}},
+		}}},
+	}
+
+	first := ctrl.failureFingerprintForPod(pod, identity, "ImagePullBackOff")
+	pod.Spec.Containers[0].Image = "example.com/api:missing"
+	second := ctrl.failureFingerprintForPod(pod, identity, "ImagePullBackOff")
+
+	if first.Hash == "" || second.Hash == "" {
+		t.Fatalf("expected non-empty fingerprints, got %q and %q", first.Hash, second.Hash)
+	}
+	if first.Hash == second.Hash {
+		t.Fatalf("expected image change to produce a new fingerprint, got %q", first.Hash)
+	}
+}
+
+func TestFailureFingerprintIgnoresDeploymentPodReplicaName(t *testing.T) {
+	ctrl := &Controller{config: &config.Config{ClusterName: "prod"}}
+	identity := workloadIdentity{Kind: "Deployment", Name: "api"}
+	podA := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-abc", Namespace: "default"},
+		Spec: v1.PodSpec{Containers: []v1.Container{{
+			Name:  "api",
+			Image: "example.com/api:bad",
+		}}},
+		Status: v1.PodStatus{ContainerStatuses: []v1.ContainerStatus{{
+			Name: "api",
+			State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{
+				Reason:  "ImagePullBackOff",
+				Message: "manifest unknown",
+			}},
+		}}},
+	}
+	podB := podA.DeepCopy()
+	podB.Name = "api-def"
+	podB.Status.ContainerStatuses[0].State.Waiting.Reason = "ErrImagePull"
+
+	first := ctrl.failureFingerprintForPod(podA, identity, "ImagePullBackOff")
+	second := ctrl.failureFingerprintForPod(podB, identity, "ErrImagePull")
+
+	if first.Hash != second.Hash {
+		t.Fatalf("expected same workload failure fingerprint across replacement pods, got %q and %q", first.Hash, second.Hash)
+	}
+	if got := diagnosticLockNameWithFingerprint(diagnosticLockName(podA, identity, "ImagePullBackOff"), first); got != "deployment-api/image-pull/"+first.Hash {
+		t.Fatalf("unexpected fingerprint lock name %q", got)
+	}
+}
+
 func TestDiagnosticLockNameNormalizesWatcherAndAlertmanagerCrashLoop(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api-abc", Namespace: "default"}}
 	identity := workloadIdentity{Kind: "Deployment", Name: "api"}

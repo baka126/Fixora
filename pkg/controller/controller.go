@@ -585,7 +585,9 @@ func (c *Controller) scanForLeaks() {
 				PatchStrategy: PatchResources,
 				Evidence:      []string{evidence.MetricProof},
 			}
-			c.handleRemediation(ctx, &pod, evidence, diagnosis, invID)
+			identity := c.workloadIdentityForPod(ctx, &pod)
+			fingerprint := c.failureFingerprintForPod(&pod, identity, diagnosis.Symptom)
+			c.handleRemediation(ctx, &pod, evidence, diagnosis, invID, fingerprint)
 		}
 	}
 	slog.Debug("Memory leak scan finished")
@@ -746,7 +748,8 @@ func (c *Controller) reportRightSizingOpportunity(ctx context.Context, pod *v1.P
 		PatchStrategy: PatchResources,
 		Evidence:      []string{metricProof},
 	}
-	c.handleRemediation(ctx, pod, evidence, diagnosis, invID)
+	fingerprint := c.failureFingerprintForPod(pod, identity, diagnosis.Symptom)
+	c.handleRemediation(ctx, pod, evidence, diagnosis, invID, fingerprint)
 }
 
 func (c *Controller) rightSizingPeakThreshold() float64 {
@@ -1131,12 +1134,17 @@ func (c *Controller) processDiagnostic(work podWorkItem) error {
 	}
 	identity := c.workloadIdentityForPod(ctx, pod)
 	reason := firstNonEmpty(podDiagnosticReason(pod), work.reason)
-	lockName := diagnosticLockName(pod, identity, reason)
-	if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockName, c.investigationCooldown()) {
-		slog.Debug("Skipping diagnostic trigger: workload scenario is inside investigation cooldown", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", reason, "original_reason", work.reason, "cooldown", c.investigationCooldown())
+	fingerprint := c.failureFingerprintForPod(pod, identity, reason)
+	baseLockName := diagnosticLockName(pod, identity, reason)
+	if c.reuseExistingRemediationForFingerprint(ctx, pod, identity, reason, fingerprint, baseLockName) {
 		return nil
 	}
-	c.diagnosePod(ctx, pod, reason)
+	lockName := diagnosticLockNameWithFingerprint(baseLockName, fingerprint)
+	if c.history != nil && !c.history.CheckAndLockInvestigation(ctx, pod.Namespace, lockName, c.investigationCooldown()) {
+		slog.Debug("Skipping diagnostic trigger: workload scenario is inside investigation cooldown", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", reason, "original_reason", work.reason, "fingerprint", fingerprint.Hash, "cooldown", c.investigationCooldown())
+		return nil
+	}
+	c.diagnosePod(ctx, pod, reason, fingerprint)
 	return nil
 }
 
@@ -1144,6 +1152,40 @@ func diagnosticLockName(pod *v1.Pod, identity workloadIdentity, reason string) s
 	subject := slugify(remediationBranchSubject(pod, identity))
 	lockReason := diagnosticLockReason(reason)
 	return subject + "/" + lockReason
+}
+
+func (c *Controller) reuseExistingRemediationForFingerprint(ctx context.Context, pod *v1.Pod, identity workloadIdentity, reason string, fingerprint failureFingerprint, baseLockName string) bool {
+	if c == nil || c.history == nil || pod == nil || fingerprint.Hash == "" {
+		return false
+	}
+	rec, ok, err := c.history.ReusableRemediationForFingerprint(ctx, pod.Namespace, pod.Name, identity, fingerprint.Hash, 7*24*time.Hour)
+	if err != nil {
+		slog.Error("Failed to query reusable remediation fingerprint", "ns", pod.Namespace, "pod", pod.Name, "fingerprint", fingerprint.Hash, "error", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	notify := true
+	if c.history != nil {
+		notify = c.history.CheckAndLockInvestigation(ctx, pod.Namespace, repeatedNotificationLockName(baseLockName, fingerprint), repeatNotificationWindow(c.investigationCooldown()))
+	}
+	slog.Info("Reusing existing remediation for repeated failure fingerprint", "ns", pod.Namespace, "pod", pod.Name, "workload_kind", identity.Kind, "workload", identity.Name, "reason", reason, "fingerprint", fingerprint.Hash, "remediation_id", rec.ID, "status", rec.Status, "pr_url", rec.PRURL)
+	if notify {
+		c.notifyRepeatedFailureRemediation(pod, identity, reason, fingerprint, rec)
+	}
+	return true
+}
+
+func (c *Controller) notifyRepeatedFailureRemediation(pod *v1.Pod, identity workloadIdentity, reason string, fingerprint failureFingerprint, rec RemediationRecord) {
+	if c == nil || pod == nil {
+		return
+	}
+	workload := firstNonEmpty(identity.Kind, "Pod") + "/" + firstNonEmpty(identity.Name, pod.Name)
+	status := strings.ReplaceAll(string(rec.Status), "_", " ")
+	target := firstNonEmpty(rec.PRURL, rec.Options.Title, rec.Options.Head, fmt.Sprintf("remediation #%d", rec.ID))
+	msg := fmt.Sprintf("↩️ Repeated issue detected for %s/%s. Fixora reused the existing remediation (%s) and skipped a new AI investigation.\nReason: %s\nFingerprint: %s\nExisting remediation: %s", pod.Namespace, workload, status, reason, firstNonEmpty(fingerprint.Summary, fingerprint.Hash), target)
+	notifications.SendNotification(c.config, msg)
 }
 
 func (c *Controller) investigationCooldown() time.Duration {
@@ -1219,7 +1261,7 @@ func (c *Controller) DiagnosePodByName(namespace, podName, reason string) {
 }
 
 // diagnosePod performs the full forensic evidence gathering and AI correlation.
-func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string) {
+func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string, fingerprint failureFingerprint) {
 	slog.Info("Starting full forensics investigation", "ns", pod.Namespace, "pod", pod.Name, "reason", reason)
 
 	incidentWindow := ResolveIncidentWindow(pod, time.Now(), defaultIncidentLookback)
@@ -1258,6 +1300,9 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 		ClusterContext:           fmt.Sprintf("Namespace: %s, Pod: %s, Workload Kind: %s, Workload Name: %s, Reason: %s\n%s\n%s\n%s\n%s", pod.Namespace, pod.Name, workload.Kind, workload.Name, reason, incidentWindow.Summary(), diagnosisSummary, correlationSummary, orchestration.Summary()),
 		HistoricalPattern:        historySummary,
 		ShowEventButton:          true,
+	}
+	if fingerprint.Hash != "" {
+		evidence.ClusterContext += fmt.Sprintf("\nFailure Fingerprint: %s (%s)", fingerprint.Hash, fingerprint.Summary)
 	}
 	if c.history != nil {
 		c.history.SaveDependencyRefs(ctx, pod.Namespace, "Pod", pod.Name, orchestration.Related)
@@ -1430,7 +1475,7 @@ func (c *Controller) diagnosePod(ctx context.Context, pod *v1.Pod, reason string
 	notifications.SendAuditLog(c.config, evidence, "Diagnostic", "Completed", "Root Cause Analysis")
 
 	// Attempts automated remediation
-	c.handleRemediation(ctx, pod, evidence, diagnosis, invID)
+	c.handleRemediation(ctx, pod, evidence, diagnosis, invID, fingerprint)
 }
 
 // getGranularMetrics attempts to fetch RSS and Cache metrics from the provider.
@@ -1511,7 +1556,7 @@ func (c *Controller) recursiveGatherArgoContext(ctx context.Context, namespace s
 }
 
 // handleRemediation attempts to open Pull Requests with fixes by discovering the pod's source repositories and dependencies.
-func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain, diagnosis Diagnosis, investigationID int64) {
+func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidence notifications.EvidenceChain, diagnosis Diagnosis, investigationID int64, fingerprint failureFingerprint) {
 	if !c.config.PrivacySendGitToAI {
 		slog.Info("Skipping GitOps remediation: privacy settings prohibit sending Git context to AI", "ns", pod.Namespace, "pod", pod.Name)
 		return
@@ -1525,6 +1570,10 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	defer cancel()
 	ctx = remediationCtx
 	diagnosis = refineDiagnosisFromEvidence(diagnosis, evidence)
+	if fingerprint.Hash == "" {
+		identity := c.workloadIdentityForPod(ctx, pod)
+		fingerprint = c.failureFingerprintForPod(pod, identity, firstNonEmpty(diagnosis.Symptom, evidence.RootCause))
+	}
 
 	vcsType := pod.Annotations["fixora.io/vcs-type"]
 	if vcsType == "" {
@@ -1742,7 +1791,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			source = repoInfo.Source
 			if err := validateManifestAwarePatchSet(repoInfo.Source, changes); err != nil {
 				telemetry.IncValidation("manifest-aware", "failed")
-				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "manifest-aware patch validation failed: "+err.Error())
+				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "manifest-aware patch validation failed: "+err.Error(), fingerprint)
 				slog.Error("Manifest-aware patch validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Manifest-aware patch validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, err))
 				return
@@ -1751,14 +1800,14 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			if c.config.PolicyGuardrailsEnabled {
 				if err := enforceArchitectureImageGuardrail(diagnosis, changes, c.config.AllowedReplacementImages); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
-					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "policy guardrail rejected architecture image remediation patch: "+err.Error())
+					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "policy guardrail rejected architecture image remediation patch: "+err.Error(), fingerprint)
 					slog.Error("Policy guardrail rejected architecture image remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
 					return
 				}
 				if err := enforcePatchGuardrails(repoInfo.Source, changes, c.config.AllowedImageRegistries, c.config.AllowedReplacementImages, pod.Namespace, c.manifestGuardrailTargets(ctx, pod), c.config.ExcludedNamespaces); err != nil {
 					telemetry.IncPolicyRejection(policyRejectionReason(err))
-					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "policy guardrail rejected remediation patch: "+err.Error())
+					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "policy guardrail rejected remediation patch: "+err.Error(), fingerprint)
 					slog.Error("Policy guardrail rejected remediation patch", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", err)
 					notifications.SendNotification(c.config, notifications.RemediationBlockedMessage(repoKey, err.Error()))
 					return
@@ -1771,7 +1820,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			})
 			if !renderResult.Valid {
 				telemetry.IncValidation("render-sandbox", "failed")
-				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "render sandbox validation failed: "+validationMessage(renderResult))
+				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "render sandbox validation failed: "+validationMessage(renderResult), fingerprint)
 				slog.Error("Render sandbox validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", renderResult.Output)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Render sandbox validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, validationMessage(renderResult)))
 				return
@@ -1795,7 +1844,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			})
 			if !semanticResult.Valid {
 				telemetry.IncValidation("semantic-render", "failed")
-				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "semantic render validation failed: "+validationMessage(semanticResult))
+				c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "semantic render validation failed: "+validationMessage(semanticResult), fingerprint)
 				slog.Error("Semantic render validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "repo", repoKey, "error", semanticResult.Output)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Semantic render validation failed for %s. Fixora will not open PRs.\nError: %s", repoKey, validationMessage(semanticResult)))
 				return
@@ -1813,7 +1862,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 			if !vResult.Valid {
 				telemetry.IncValidation("file", "failed")
 				if repoInfo, ok := repoMap[repoKey]; ok {
-					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "pre-flight validation failed: "+validationMessage(vResult))
+					c.recordValidationFailure(ctx, pod, diagnosis, investigationID, vcsType, repoInfo, changes, "pre-flight validation failed: "+validationMessage(vResult), fingerprint)
 				}
 				slog.Error("Pre-flight validation failed; aborting remediation", "ns", pod.Namespace, "pod", pod.Name, "file", change.FilePath, "error", vResult.Output)
 				notifications.SendNotification(c.config, fmt.Sprintf("❌ Pre-flight validation failed for %s in %s. Fixora will not open PRs.\nError: %s", change.FilePath, repoKey, vResult.Output))
@@ -1879,7 +1928,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	case config.ClickToFix:
 		for i, plan := range prPlans {
 			callbackID := fmt.Sprintf("fix-%d-%d", time.Now().UnixNano(), i)
-			remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationPendingApproval, "")
+			remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationPendingApproval, "", fingerprint)
 			fix := PendingFix{
 				Options:       plan.Options,
 				VCSType:       vcsType,
@@ -1907,7 +1956,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	case config.DryRun:
 		dryRunReason := "Dry-run mode is enabled; no pull request was created. Set FIXORA_MODE=auto-fix or click-to-fix to create PRs."
 		for _, plan := range prPlans {
-			c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationDryRun, dryRunReason)
+			c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationDryRun, dryRunReason, fingerprint)
 			telemetry.IncRemediation("dry-run", string(diagnosis.PatchStrategy))
 		}
 		slog.Info("Dry-run mode: remediation generated but no PR created", "ns", pod.Namespace, "pod", pod.Name)
@@ -1924,7 +1973,7 @@ func (c *Controller) handleRemediation(ctx context.Context, pod *v1.Pod, evidenc
 	var creationFailures []string
 	for _, plan := range prPlans {
 		opts := plan.Options
-		remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "")
+		remediationID := c.saveRemediationPlan(ctx, pod, diagnosis, investigationID, vcsType, plan, RemediationGenerated, "", fingerprint)
 		if remediationID <= 0 && c.history != nil && c.history.HasDB() {
 			creationFailures = append(creationFailures, fmt.Sprintf("%s/%s: failed to persist remediation workflow", opts.RepoOwner, opts.RepoName))
 			slog.Error("Failed to persist remediation workflow before PR creation", "ns", pod.Namespace, "pod", pod.Name, "repo", opts.RepoName, "head", opts.Head)

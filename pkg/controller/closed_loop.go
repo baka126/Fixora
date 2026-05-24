@@ -32,25 +32,26 @@ const (
 )
 
 type RemediationRecord struct {
-	ID                int64
-	InvestigationID   int64
-	Namespace         string
-	PodName           string
-	DiagnosisCategory string
-	PatchStrategy     string
-	Status            RemediationStatus
-	VCSType           string
-	Options           vcs.PullRequestOptions
-	Source            gitops.WorkloadSource
-	PRURL             string
-	FailureReason     string
-	UpdatedAt         time.Time
-	ChangedFiles      []remediationChangedFile
-	RevertPRURL       string
-	RevertHeadBranch  string
-	WorkloadKind      string
-	WorkloadName      string
-	WorkloadSelector  string
+	ID                 int64
+	InvestigationID    int64
+	Namespace          string
+	PodName            string
+	DiagnosisCategory  string
+	PatchStrategy      string
+	Status             RemediationStatus
+	VCSType            string
+	Options            vcs.PullRequestOptions
+	Source             gitops.WorkloadSource
+	PRURL              string
+	FailureReason      string
+	FailureFingerprint string
+	UpdatedAt          time.Time
+	ChangedFiles       []remediationChangedFile
+	RevertPRURL        string
+	RevertHeadBranch   string
+	WorkloadKind       string
+	WorkloadName       string
+	WorkloadSelector   string
 }
 
 type remediationChangedFile struct {
@@ -93,7 +94,7 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 			gitops_path, manifest_type, overlay_role, environment, region,
 			helm_release_name, helm_namespace, helm_repo_url, helm_chart, helm_chart_version,
 			helm_value_files, helm_values_from,
-			changed_files, failure_reason, workload_kind, workload_name, workload_selector,
+			changed_files, failure_reason, failure_fingerprint, workload_kind, workload_name, workload_selector,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5,
@@ -102,7 +103,7 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 			$17, $18, $19, $20, $21,
 			$22, $23, $24, $25, $26,
 			$27, $28, $29, $30, $31,
-			$32, $33, $34, $35, $36
+			$32, $33, $34, $35, $36, $37
 		)
 		RETURNING id
 	`
@@ -114,7 +115,7 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 		rec.Source.Path, string(rec.Source.ManifestType), string(rec.Source.OverlayRole), rec.Source.Environment, rec.Source.Region,
 		rec.Source.Helm.ReleaseName, rec.Source.Helm.Namespace, rec.Source.Helm.RepoURL, rec.Source.Helm.Chart, rec.Source.Helm.ChartVersion,
 		helmValueFilesJSON, helmValuesFromJSON,
-		changedFilesJSON, rec.FailureReason, rec.WorkloadKind, rec.WorkloadName, rec.WorkloadSelector,
+		changedFilesJSON, rec.FailureReason, rec.FailureFingerprint, rec.WorkloadKind, rec.WorkloadName, rec.WorkloadSelector,
 		now, now,
 	).Scan(&id)
 	if err != nil {
@@ -124,25 +125,26 @@ func (h *historyCache) SaveRemediation(ctx context.Context, rec RemediationRecor
 	return id
 }
 
-func (c *Controller) saveRemediationPlan(ctx context.Context, pod *v1.Pod, diagnosis Diagnosis, investigationID int64, vcsType string, plan remediationPROption, status RemediationStatus, failureReason string) int64 {
+func (c *Controller) saveRemediationPlan(ctx context.Context, pod *v1.Pod, diagnosis Diagnosis, investigationID int64, vcsType string, plan remediationPROption, status RemediationStatus, failureReason string, fingerprint failureFingerprint) int64 {
 	if c == nil || c.history == nil {
 		return 0
 	}
 	identity := c.workloadIdentityForPod(ctx, pod)
 	id := c.history.SaveRemediation(ctx, RemediationRecord{
-		InvestigationID:   investigationID,
-		Namespace:         pod.Namespace,
-		PodName:           pod.Name,
-		DiagnosisCategory: string(diagnosis.Category),
-		PatchStrategy:     string(diagnosis.PatchStrategy),
-		Status:            status,
-		VCSType:           vcsType,
-		Options:           plan.Options,
-		Source:            plan.Source,
-		FailureReason:     failureReason,
-		WorkloadKind:      identity.Kind,
-		WorkloadName:      identity.Name,
-		WorkloadSelector:  identity.Selector,
+		InvestigationID:    investigationID,
+		Namespace:          pod.Namespace,
+		PodName:            pod.Name,
+		DiagnosisCategory:  string(diagnosis.Category),
+		PatchStrategy:      string(diagnosis.PatchStrategy),
+		Status:             status,
+		VCSType:            vcsType,
+		Options:            plan.Options,
+		Source:             plan.Source,
+		FailureReason:      failureReason,
+		FailureFingerprint: fingerprint.Hash,
+		WorkloadKind:       identity.Kind,
+		WorkloadName:       identity.Name,
+		WorkloadSelector:   identity.Selector,
 	})
 	c.saveRemediationWorkloadSnapshot(ctx, id, "pre_pr", pod.Namespace, identity.Kind, identity.Name)
 	return id
@@ -159,7 +161,7 @@ func (c *Controller) saveRemediationWorkloadSnapshot(ctx context.Context, remedi
 	c.history.SaveRemediationSnapshot(ctx, remediationID, stage, snapshot)
 }
 
-func (c *Controller) recordValidationFailure(ctx context.Context, pod *v1.Pod, diagnosis Diagnosis, investigationID int64, vcsType string, repo discoveredRepo, changes []vcs.FileChange, failureReason string) int64 {
+func (c *Controller) recordValidationFailure(ctx context.Context, pod *v1.Pod, diagnosis Diagnosis, investigationID int64, vcsType string, repo discoveredRepo, changes []vcs.FileChange, failureReason string, fingerprint failureFingerprint) int64 {
 	if c == nil || c.history == nil || pod == nil {
 		return 0
 	}
@@ -179,11 +181,12 @@ func (c *Controller) recordValidationFailure(ctx context.Context, pod *v1.Pod, d
 			Title:     fmt.Sprintf("Fixora: validation blocked remediation for %s/%s", pod.Namespace, pod.Name),
 			Files:     changes,
 		},
-		Source:           repo.Source,
-		FailureReason:    failureReason,
-		WorkloadKind:     identity.Kind,
-		WorkloadName:     identity.Name,
-		WorkloadSelector: identity.Selector,
+		Source:             repo.Source,
+		FailureReason:      failureReason,
+		FailureFingerprint: fingerprint.Hash,
+		WorkloadKind:       identity.Kind,
+		WorkloadName:       identity.Name,
+		WorkloadSelector:   identity.Selector,
 	})
 }
 
@@ -289,6 +292,53 @@ func (h *historyCache) ActiveRemediationForPlan(ctx context.Context, namespace, 
 		return RemediationRecord{}, false, err
 	}
 	rec.Status = RemediationStatus(status)
+	return rec, true, nil
+}
+
+func (h *historyCache) ReusableRemediationForFingerprint(ctx context.Context, namespace, podName string, identity workloadIdentity, fingerprint string, maxAge time.Duration) (RemediationRecord, bool, error) {
+	if h == nil || h.db == nil || strings.TrimSpace(fingerprint) == "" {
+		return RemediationRecord{}, false, nil
+	}
+	if maxAge <= 0 {
+		maxAge = 7 * 24 * time.Hour
+	}
+	query := `
+		SELECT id, COALESCE(investigation_id, 0), namespace, pod_name,
+		       COALESCE(diagnosis_category, ''), COALESCE(patch_strategy, ''),
+		       status, COALESCE(vcs_type, ''), repo_owner, repo_name,
+		       base_branch, head_branch, COALESCE(pr_url, ''), COALESCE(pr_title, ''),
+		       COALESCE(failure_reason, ''), updated_at
+		FROM remediation_outcomes
+		WHERE namespace = $1
+		  AND failure_fingerprint = $2
+		  AND (
+		    pod_name = $3
+		    OR (COALESCE(workload_kind, '') = $4 AND COALESCE(workload_name, '') = $5)
+		  )
+		  AND updated_at > $6
+		  AND (
+		    status IN ('pending_approval', 'pr_opened', 'observing', 'succeeded')
+		    OR (status IN ('generated', 'dry_run') AND updated_at > $7)
+		  )
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`
+	var rec RemediationRecord
+	var status string
+	err := h.db.QueryRowContext(ctx, query, namespace, fingerprint, podName, identity.Kind, identity.Name, time.Now().Add(-maxAge), time.Now().Add(-30*time.Minute)).Scan(
+		&rec.ID, &rec.InvestigationID, &rec.Namespace, &rec.PodName,
+		&rec.DiagnosisCategory, &rec.PatchStrategy, &status, &rec.VCSType,
+		&rec.Options.RepoOwner, &rec.Options.RepoName, &rec.Options.Base, &rec.Options.Head,
+		&rec.PRURL, &rec.Options.Title, &rec.FailureReason, &rec.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return RemediationRecord{}, false, nil
+	}
+	if err != nil {
+		return RemediationRecord{}, false, err
+	}
+	rec.Status = RemediationStatus(status)
+	rec.FailureFingerprint = fingerprint
 	return rec, true, nil
 }
 
