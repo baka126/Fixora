@@ -293,6 +293,20 @@ export interface DashboardPrediction {
   risk: string;
   preventionCostMo?: number;
   downtimeRiskHr?: number;
+  workload?: DashboardWorkload;
+  signalType?: string;
+  confidence?: number;
+  evidence?: DashboardEvidence[];
+  timeToImpact?: string;
+  recommendedAction?: string;
+  autoFixEligible?: boolean;
+  status?: string;
+  outcome?: string;
+  metricCoverage?: string;
+  forecastSeries?: number[];
+  metricSeries?: number[];
+  confidenceReason?: string;
+  lastScanAt?: string;
 }
 
 export interface DashboardNodeCost {

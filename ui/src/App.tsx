@@ -9,6 +9,7 @@ import { DataPage } from './pages/DataPage';
 import { Alerts } from './pages/Alerts';
 import { Workloads, WorkloadDetails } from './pages/Workloads';
 import { FinOps } from './pages/FinOps';
+import { Predictions, PredictionDetails } from './pages/Predictions';
 import { apiClient } from './api/client';
 import { Loader2 } from 'lucide-react';
 
@@ -79,7 +80,8 @@ function App() {
             <Route path="alerts" element={<Alerts />} />
             <Route path="remediations" element={<DataPage kind="remediations" />} />
             <Route path="gitops" element={<DataPage kind="gitops" />} />
-            <Route path="predictions" element={<DataPage kind="predictions" />} />
+            <Route path="predictions" element={<Predictions />} />
+            <Route path="predictions/:predictionId" element={<PredictionDetails />} />
             <Route path="finops" element={<FinOps />} />
             <Route path="audit" element={<DataPage kind="audit" />} />
             <Route path="settings" element={<DataPage kind="settings" />} />

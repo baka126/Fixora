@@ -172,10 +172,7 @@ export const Dashboard = () => {
           onRefresh={() => refreshDashboard(true)}
         />
 
-        <div className="grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(620px,1fr)_minmax(320px,420px)]">
-          <RemediationPipeline stages={dashboard?.pipeline || []} />
-          <InteractiveGraph incident={selectedIncident} />
-        </div>
+        <RemediationPipeline stages={dashboard?.pipeline || []} />
 
         <RecurringIssuesWidget remediations={dashboard?.remediations || []} />
       </section>
