@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Activity,
   AlertCircle,
@@ -25,13 +26,13 @@ import {
   Server,
   ShieldCheck,
   TriangleAlert,
-  X,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { useStore } from '../store/useStore';
 import { InteractiveGraph } from '../components/InteractiveGraph';
 import { RecurringIssuesWidget } from '../components/RecurringIssuesWidget';
-import { RemediationActions, remediationManualActions } from './DataPage';
+import { RemediationActions } from '../components/RemediationActions';
+import { remediationManualActions } from '../utils/remediationActions';
 import type {
   DashboardEvidence,
   DashboardGitOpsMapping,
@@ -55,6 +56,7 @@ const toneStyles: Record<string, { text: string; border: string; bg: string; lin
 
 export const Dashboard = () => {
   const { dashboard, selectedCluster, searchQuery, timeRange, setDashboard } = useStore();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(!dashboard);
   const [error, setError] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(dashboard?.incidents?.[0]?.id || null);
@@ -140,11 +142,11 @@ export const Dashboard = () => {
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 items-start gap-3 p-3 sm:p-4 xl:grid-cols-[minmax(760px,1fr)_minmax(340px,380px)] 2xl:grid-cols-[minmax(960px,1fr)_380px]">
-      <section className="min-w-0 self-start space-y-3 xl:pr-0">
+    <div className="min-h-[calc(100vh-76px)] p-3 sm:p-4">
+      <section className="min-w-0 self-start space-y-3">
         {!!dashboard?.availability?.length && <AvailabilityBanner availability={dashboard.availability} />}
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
           {(dashboard?.kpis || []).map((kpi) => (
             <KpiCard key={kpi.label} kpi={kpi} />
           ))}
@@ -154,7 +156,10 @@ export const Dashboard = () => {
           incidents={filteredIncidents}
           totalIncidents={incidents.length}
           selectedId={selectedIncident?.id || null}
-          onSelect={setSelectedId}
+          onSelect={(id) => {
+            setSelectedId(id);
+            navigate(`/incidents/${encodeURIComponent(id)}`);
+          }}
           page={incidentPage}
           onPageChange={setIncidentPage}
           severityFilter={severityFilter}
@@ -167,23 +172,80 @@ export const Dashboard = () => {
           onRefresh={() => refreshDashboard(true)}
         />
 
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(620px,1fr)_minmax(320px,420px)]">
+        <div className="grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(620px,1fr)_minmax(320px,420px)]">
           <RemediationPipeline stages={dashboard?.pipeline || []} />
           <InteractiveGraph incident={selectedIncident} />
         </div>
 
         <RecurringIssuesWidget remediations={dashboard?.remediations || []} />
       </section>
+    </div>
+  );
+};
 
-      <IncidentDrawer 
-        incident={selectedIncident} 
-        remediations={dashboard?.remediations || []}
-        onDashboardRefresh={(data) => {
-          if (data) {
-             setDashboard(data);
-          }
-        }}
-      />
+export const IncidentDetails = () => {
+  const { incidentId = '' } = useParams();
+  const navigate = useNavigate();
+  const { dashboard, setDashboard } = useStore();
+  const [loading, setLoading] = useState(!dashboard);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (dashboard) return;
+    let mounted = true;
+    apiClient
+      .get('/dashboard')
+      .then(({ data }: { data: DashboardState }) => {
+        if (!mounted) return;
+        setDashboard(data);
+        setError('');
+      })
+      .catch(() => {
+        if (mounted) setError('Failed to load incident details.');
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [dashboard, setDashboard]);
+
+  const decodedId = decodeURIComponent(incidentId);
+  const incident = (dashboard?.incidents || []).find((item) => item.id === decodedId) || null;
+
+  if (loading && !dashboard) {
+    return (
+      <div className="grid min-h-[calc(100vh-76px)] place-items-center text-[#647084]">
+        <div className="flex items-center gap-2 text-[14px]">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          Loading incident details...
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-[calc(100vh-76px)] space-y-4 p-3 sm:p-4">
+      <button
+        type="button"
+        onClick={() => navigate('/')}
+        className="inline-flex h-9 items-center gap-2 rounded-md border border-[#e5e7eb] bg-white px-3 text-[12px] font-semibold text-[#374151] hover:bg-[#f8fafc]"
+      >
+        <ChevronLeft className="h-4 w-4" />
+        Back to incidents
+      </button>
+
+      {error && !dashboard ? (
+        <div className="rounded-lg border border-[#fecaca] bg-[#fef2f2] p-4 text-[13px] text-[#b91c1c]">{error}</div>
+      ) : (
+        <IncidentDetailContent
+          incident={incident}
+          remediations={dashboard?.remediations || []}
+          onDashboardRefresh={setDashboard}
+          mode="page"
+        />
+      )}
     </div>
   );
 };
@@ -276,15 +338,40 @@ const ageToMinutes = (age: string) => {
   return value;
 };
 
+const displayIncidentCause = (incident: DashboardIncident) => {
+  const cause = (incident.rca?.summary || incident.cause || '').trim();
+  if (isPlaceholderCause(cause)) return 'Root cause pending';
+  return cause;
+};
+
+const isPlaceholderCause = (value?: string) => {
+  const normalized = (value || '').trim();
+  return !normalized || normalized === '{' || normalized === '}' || normalized === '{}' || normalized === '[]' || /^null$/i.test(normalized);
+};
+
+const shouldExpandIncidentCause = (value?: string) => {
+  const normalized = (value || '').trim();
+  return !isPlaceholderCause(normalized) && (normalized.length > 130 || normalized.includes('\n'));
+};
+
+const dashboardActionErrorMessage = (err: unknown) => {
+  if (typeof err === 'object' && err && 'response' in err) {
+    const response = (err as { response?: { data?: unknown } }).response;
+    if (typeof response?.data === 'string' && response.data.trim()) return response.data.trim();
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return 'Failed to execute action.';
+};
+
 const KpiCard = ({ kpi }: { kpi: DashboardKPI }) => {
   const tone = toneStyles[kpi.tone || 'info'] || toneStyles.info;
   return (
-    <div className="min-h-[124px] rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+    <div className="min-h-[108px] rounded-lg border border-[#e5e7eb] bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <div className="text-[13px] font-semibold text-[#111827]">{kpi.label}</div>
       <div className="mt-3 flex items-end justify-between gap-3">
         <div>
-          <div className={`text-[28px] font-semibold leading-none ${tone.text}`}>{kpi.value}</div>
-          <div className="mt-3 text-[11px] text-[#6b7280]">
+          <div className={`text-[26px] font-semibold leading-none ${tone.text}`}>{kpi.value}</div>
+          <div className="mt-2 text-[11px] leading-4 text-[#6b7280]">
             <span className={tone.text}>{kpi.delta ? '↑ ' : ''}{kpi.delta || ''}</span>
             {kpi.detail ? <span> {kpi.detail}</span> : null}
           </div>
@@ -461,16 +548,15 @@ const IncidentTable = ({
       ) : (
         <>
           <div className="max-h-[min(430px,calc(100vh-350px))] overflow-auto">
-            <table className="w-full min-w-[980px] table-fixed border-collapse text-left text-[12px]">
+            <table className="w-full min-w-[760px] table-fixed border-collapse text-left text-[12px]">
               <thead className="sticky top-0 z-[1] bg-[#f8fafc] text-[#111827]">
                 <tr>
                   <th className="w-8 px-3 py-3" />
-                  <th className="w-[22%] px-3 py-3 font-semibold">Workload</th>
+                  <th className="w-[25%] px-3 py-3 font-semibold">Workload</th>
                   <th className="w-[10%] px-3 py-3 font-semibold">Namespace</th>
-                  <th className="w-[12%] px-3 py-3 font-semibold">Status</th>
-                  <th className="w-[31%] px-3 py-3 font-semibold">Root Cause</th>
-                  <th className="w-[10%] px-3 py-3 font-semibold">Confidence</th>
-                  <th className="w-[10%] px-3 py-3 font-semibold">Source</th>
+                  <th className="w-[15%] px-3 py-3 font-semibold">Status</th>
+                  <th className="w-[33%] px-3 py-3 font-semibold">Root Cause</th>
+                  <th className="w-[11%] px-3 py-3 font-semibold">Signal</th>
                   <th className="w-[5%] px-3 py-3 font-semibold">Age</th>
                 </tr>
               </thead>
@@ -502,17 +588,21 @@ const IncidentTable = ({
                         <StatusChip value={incident.status} severity={incident.severity} />
                       </td>
                       <td className="px-3 py-3 text-[#111827]">
+                        {isPlaceholderCause(displayIncidentCause(incident)) ? (
+                          <span className="text-[#94a3b8]">Root cause pending</span>
+                        ) : (
                         <ExpandableText
-                          value={incident.cause || 'Pending root cause'}
+                          value={displayIncidentCause(incident)}
                           collapsedClassName="line-clamp-3"
                           buttonLabel="More"
-                          alwaysExpandable
+                          alwaysExpandable={shouldExpandIncidentCause(displayIncidentCause(incident))}
                         />
+                        )}
                       </td>
                       <td className="px-3 py-3">
                         <Confidence value={incident.confidence} />
+                        <div className="mt-1 truncate text-[11px] text-[#647084]" title={incident.source}>{incident.source}</div>
                       </td>
-                      <td className="px-3 py-3 text-[#111827]" title={incident.source}>{incident.source}</td>
                       <td className={`px-3 py-3 font-medium ${incident.severity === 'critical' ? 'text-[#dc2626]' : 'text-[#f97316]'}`}>{incident.age}</td>
                     </tr>
                   );
@@ -536,45 +626,51 @@ const IncidentTable = ({
   );
 };
 
-const IncidentDrawer = ({ 
-  incident, 
+const IncidentDetailContent = ({
+  incident,
   remediations,
-  onDashboardRefresh 
+  onDashboardRefresh,
+  mode = 'drawer',
 }: { 
   incident: DashboardIncident | null; 
   remediations: DashboardRemediation[];
   onDashboardRefresh: (data: DashboardState | null) => void;
+  mode?: 'drawer' | 'page';
 }) => {
   const [runningAction, setRunningAction] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
 
   if (!incident) {
     return (
-      <aside className="self-start border-t border-[#e5e7eb] bg-[#f8fafc] p-3 xl:sticky xl:top-[76px] xl:max-h-[calc(100vh-76px)] xl:overflow-y-auto xl:border-l xl:border-t-0">
+      <section className="rounded-lg border border-[#e5e7eb] bg-white">
         <EmptyState
           icon={<FileText className="h-8 w-8" />}
-          title="Select an incident"
-          message="Incident evidence, GitOps mapping, recommended pull request, and guardrail status will appear here."
+          title="Incident not found"
+          message="The incident may have aged out of the dashboard window or been resolved. Return to the incident list to select a current item."
         />
-      </aside>
+      </section>
     );
   }
 
   // Find the most recent active remediation for this incident's workload
   const activeRemediation = remediations.find(r => r.workload.namespace === incident.workload.namespace && r.workload.name === incident.workload.name && remediationManualActions(r).length > 0);
+  const detailGrid = mode === 'page'
+    ? 'grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.85fr)]'
+    : 'space-y-3';
 
   return (
-    <aside className="self-start border-t border-[#e5e7eb] bg-[#f8fafc] p-3 xl:sticky xl:top-[76px] xl:max-h-[calc(100vh-76px)] xl:overflow-y-auto xl:border-l xl:border-t-0">
-      <div className="space-y-3">
+    <section className="space-y-4">
+      <div className={detailGrid}>
+        <div className="space-y-3">
         {actionError && (
           <div className="rounded-md border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-[12px] text-[#9a3412]">{actionError}</div>
         )}
         
         <div className="flex items-start justify-between gap-3 rounded-lg border border-[#e5e7eb] bg-white px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-          <div>
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-start gap-2">
               <TriangleAlert className="h-5 w-5 text-[#dc2626]" />
-              <h2 className="line-clamp-2 text-[17px] font-semibold leading-6 text-[#111827]" title={`${incident.workload.kind}/${incident.workload.name}`}>{incident.workload.kind}/{incident.workload.name}</h2>
+              <h2 className="min-w-0 flex-1 text-[17px] font-semibold leading-6 text-[#111827]" title={`${incident.workload.kind}/${incident.workload.name}`}>{incident.workload.kind}/{incident.workload.name}</h2>
               <StatusChip value={incident.status} severity={incident.severity} />
             </div>
             <div className="mt-2 text-[12px] text-[#4b5563]">
@@ -584,36 +680,7 @@ const IncidentDrawer = ({
               )}
             </div>
           </div>
-          <button className="grid h-8 w-8 place-items-center rounded-md hover:bg-[#f3f4f6]" title="Close">
-            <X className="h-4 w-4" />
-          </button>
         </div>
-
-        {activeRemediation && (
-          <DrawerCard icon={<Activity className="h-4 w-4 text-[#2563eb]" />} title="Actionable Triage (ChatOps)">
-            <div className="px-3 pb-3">
-              <div className="mt-2 text-[11px] text-[#647084]">Execute remediation workflow actions directly from the dashboard:</div>
-              <RemediationActions
-                row={activeRemediation}
-                runningAction={runningAction}
-                onRun={async (action) => {
-                  const key = `${activeRemediation.id}:${action}`;
-                  setRunningAction(key);
-                  setActionError('');
-                  try {
-                    await apiClient.post(`/remediations/${activeRemediation.id}/actions/${action}`);
-                    const { data } = await apiClient.get<DashboardState>('/dashboard');
-                    onDashboardRefresh(data);
-                  } catch (err: any) {
-                    setActionError(err?.response?.data || err?.message || 'Failed to execute action.');
-                  } finally {
-                    setRunningAction(null);
-                  }
-                }}
-              />
-            </div>
-          </DrawerCard>
-        )}
 
         <DrawerCard icon={<Network className="h-4 w-4 text-[#2563eb]" />} title="Evidence Chain">
           {incident.evidence?.length ? (
@@ -635,6 +702,36 @@ const IncidentDrawer = ({
           <IncidentRCA incident={incident} />
           <IncidentAIDebug incident={incident} />
         </DrawerCard>
+
+        {mode === 'page' && <InteractiveGraph incident={incident} />}
+        </div>
+
+        <div className="space-y-3">
+        {activeRemediation && (
+          <DrawerCard icon={<Activity className="h-4 w-4 text-[#2563eb]" />} title="Actionable Triage">
+            <div className="px-3 pb-3">
+              <div className="mt-2 text-[11px] text-[#647084]">Execute remediation workflow actions directly from the dashboard:</div>
+              <RemediationActions
+                row={activeRemediation}
+                runningAction={runningAction}
+                onRun={async (action) => {
+                  const key = `${activeRemediation.id}:${action}`;
+                  setRunningAction(key);
+                  setActionError('');
+                  try {
+                    await apiClient.post(`/remediations/${activeRemediation.id}/actions/${action}`);
+                    const { data } = await apiClient.get<DashboardState>('/dashboard');
+                    onDashboardRefresh(data);
+                  } catch (err: unknown) {
+                    setActionError(dashboardActionErrorMessage(err));
+                  } finally {
+                    setRunningAction(null);
+                  }
+                }}
+              />
+            </div>
+          </DrawerCard>
+        )}
 
         <DrawerCard icon={<FileCode2 className="h-4 w-4 text-[#2563eb]" />} title="GitOps Mapping">
           {incident.gitops ? (
@@ -679,8 +776,9 @@ const IncidentDrawer = ({
         <DrawerCard icon={<SlidersIcon />} title="Policy & SLO">
           <IncidentPolicy incident={incident} />
         </DrawerCard>
+        </div>
       </div>
-    </aside>
+    </section>
   );
 };
 
@@ -698,7 +796,7 @@ const DrawerCard = ({ icon, title, children }: { icon: ReactNode; title: string;
 );
 
 const EvidenceRow = ({ item }: { item: DashboardEvidence }) => (
-  <div className="grid grid-cols-[84px_minmax(0,1fr)_auto] items-start gap-3 px-3 py-2.5 text-[12px] hover:bg-[#f8fafc]">
+  <div className="grid grid-cols-[104px_minmax(0,1fr)_auto] items-start gap-3 px-3 py-2.5 text-[12px] hover:bg-[#f8fafc]">
     <div className="font-semibold text-[#111827]">{item.label}</div>
     <ExpandableText
       value={item.value}
@@ -834,7 +932,7 @@ const IncidentAIDebug = ({ incident }: { incident: DashboardIncident }) => {
     try {
       const response = await apiClient.get<InvestigationDetail>(`/audit/investigations/${investigationId}`);
       setData(response.data);
-    } catch (err) {
+    } catch {
       setError('Failed to load AI interaction details.');
     } finally {
       setLoading(false);
@@ -1008,8 +1106,8 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
       <MiniEmpty message="No remediation workflow state has been recorded yet." />
     ) : (
       <div className="overflow-x-auto rounded-md border border-[#e5e7eb] bg-white">
-        <div className="min-w-[760px]">
-          <div className="relative grid grid-cols-7 border-b border-[#e5e7eb] px-2 pb-2 pt-5">
+        <div style={{ minWidth: Math.max(stages.length * 132, 760) }}>
+          <div className="relative grid border-b border-[#e5e7eb] px-2 pb-2 pt-5" style={{ gridTemplateColumns: `repeat(${stages.length}, minmax(118px, 1fr))` }}>
             <div className="absolute left-3 right-3 top-[30px] h-0.5 bg-[#d1d5db]" />
             {stages.map((stage) => {
               const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
@@ -1021,7 +1119,7 @@ const RemediationPipeline = ({ stages }: { stages: DashboardPipelineStage[] }) =
               );
             })}
           </div>
-          <div className="grid grid-cols-7">
+          <div className="grid" style={{ gridTemplateColumns: `repeat(${stages.length}, minmax(118px, 1fr))` }}>
             {stages.map((stage) => {
               const stageTone = stage.state === 'failed' ? '#ef4444' : stage.state === 'succeeded' ? '#16a34a' : '#f97316';
               const visibleItems = stage.items?.slice(0, 2) || [];
@@ -1206,7 +1304,7 @@ const StatusChip = ({ value, severity }: { value: string; severity?: string }) =
   const warning = /warn|degraded|unready|image|pull/i.test(value || '');
   return (
     <span
-      className={`inline-flex max-w-[160px] truncate rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
+      className={`inline-flex max-w-[220px] shrink-0 truncate rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
         critical
           ? 'border-[#fca5a5] bg-[#fee2e2] text-[#dc2626]'
           : warning

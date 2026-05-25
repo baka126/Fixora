@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Activity,
   AlertCircle,
   Boxes,
   Brain,
+  ChevronLeft,
   Container,
   Database,
   FileCode2,
@@ -12,6 +14,7 @@ import {
   GitPullRequestArrow,
   Layers3,
   LineChart,
+  Loader2,
   Network,
   Search,
   Server,
@@ -21,6 +24,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { InteractiveGraph } from '../components/InteractiveGraph';
+import { apiClient } from '../api/client';
 import type {
   DashboardEvidence,
   DashboardGitOpsMapping,
@@ -65,6 +69,7 @@ type WorkloadRecord = {
 };
 
 export const Workloads = () => {
+  const navigate = useNavigate();
   const dashboard = useStore((state) => state.dashboard);
   const globalSearch = useStore((state) => state.searchQuery);
   const selectedCluster = useStore((state) => state.selectedCluster);
@@ -112,11 +117,9 @@ export const Workloads = () => {
       ...(item.remediations || []).map((remediation) => `${remediation.status} ${remediation.strategy} ${remediation.repository}`),
     ]);
   });
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const selected = filtered.find((item) => item.key === selectedKey) || filtered[0] || null;
 
   return (
-    <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 gap-3 p-3 sm:p-4 xl:grid-cols-[minmax(760px,1fr)_minmax(340px,390px)] 2xl:grid-cols-[minmax(960px,1fr)_390px]">
+    <div className="min-h-[calc(100vh-76px)] p-3 sm:p-4">
       <section className="min-w-0 space-y-4">
         <div className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -179,8 +182,7 @@ export const Workloads = () => {
                     <WorkloadRow
                       key={item.key}
                       record={item}
-                      selected={selected?.key === item.key}
-                      onSelect={() => setSelectedKey(item.key)}
+                      onSelect={() => navigate(`/workloads/${encodeURIComponent(item.key)}`)}
                     />
                   ))}
                 </tbody>
@@ -191,15 +193,76 @@ export const Workloads = () => {
           )}
         </div>
       </section>
+    </div>
+  );
+};
 
-      <WorkloadDetail record={selected} policyMode={dashboard?.policy?.mode || ''} />
+export const WorkloadDetails = () => {
+  const { workloadId = '' } = useParams();
+  const navigate = useNavigate();
+  const { dashboard, setDashboard } = useStore();
+  const [loading, setLoading] = useState(!dashboard);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (dashboard) return;
+    let mounted = true;
+    apiClient
+      .get('/dashboard')
+      .then(({ data }: { data: DashboardState }) => {
+        if (!mounted) return;
+        setDashboard(data);
+        setError('');
+      })
+      .catch(() => {
+        if (mounted) setError('Failed to load workload details.');
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [dashboard, setDashboard]);
+
+  const records = useMemo(() => buildWorkloadRecords(dashboard), [dashboard]);
+  const decodedId = decodeURIComponent(workloadId);
+  const record = records.find((item) => item.key === decodedId) || null;
+
+  if (loading && !dashboard) {
+    return (
+      <div className="grid min-h-[calc(100vh-76px)] place-items-center text-[#647084]">
+        <div className="flex items-center gap-2 text-[14px]">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          Loading workload details...
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-[calc(100vh-76px)] space-y-4 p-3 sm:p-4">
+      <button
+        type="button"
+        onClick={() => navigate('/workloads')}
+        className="inline-flex h-9 items-center gap-2 rounded-md border border-[#e5e7eb] bg-white px-3 text-[12px] font-semibold text-[#374151] hover:bg-[#f8fafc]"
+      >
+        <ChevronLeft className="h-4 w-4" />
+        Back to workloads
+      </button>
+
+      {error && !dashboard ? (
+        <div className="rounded-lg border border-[#fecaca] bg-[#fef2f2] p-4 text-[13px] text-[#b91c1c]">{error}</div>
+      ) : (
+        <WorkloadDetail record={record} policyMode={dashboard?.policy?.mode || ''} />
+      )}
     </div>
   );
 };
 
 const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null; policyMode: string }) => {
   if (!record) {
-    return <aside className="rounded-lg border border-[#e5e7eb] bg-white"><EmptyState title="Select a workload" message="Workload evidence, logs, remediation history, GitOps mapping, and policy context will appear here." /></aside>;
+    return <section className="rounded-lg border border-[#e5e7eb] bg-white"><EmptyState title="Workload not found" message="This workload is not present in the current dashboard snapshot. Refreshing the dashboard may discover it again if the resource still exists." /></section>;
   }
   const latestIncident = record.incidents[0];
   const evidence = record.evidence?.length ? record.evidence : latestIncident?.evidence || [];
@@ -209,7 +272,7 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
   const workload = displayWorkload(record);
 
   return (
-    <aside className="min-w-0 space-y-3 xl:sticky xl:top-[92px] xl:max-h-[calc(100vh-92px)] xl:overflow-y-auto">
+    <section className="min-w-0 space-y-4">
       <section className="rounded-lg border border-[#e5e7eb] bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
         <div className="flex items-start gap-3">
           <WorkloadIcon workload={workload} large />
@@ -235,101 +298,107 @@ const WorkloadDetail = ({ record, policyMode }: { record: WorkloadRecord | null;
         )}
       </section>
 
-      <DetailCard icon={<Layers3 className="h-4 w-4" />} title="Owner Chain & Runtime">
-        <div className="space-y-3 p-3 text-[12px]">
-          <KeyValue label="Top level" value={`${workload.kind}/${workload.name}`} />
-          <KeyValue label="Namespace" value={workload.namespace || 'Unknown'} />
-          <KeyValue label="Owner chain" value={ownerChainText(record)} />
-          {record.children?.length ? <KeyValue label="Children" value={`${record.children.length} rendered Kubernetes workloads`} /> : null}
-          {record.pods?.length ? <KeyValue label="Pods" value={record.pods.slice(0, 6).join(', ') + overflowSuffix(record.pods.length, 6)} /> : null}
-          {record.services?.length ? <KeyValue label="Services" value={record.services.slice(0, 6).join(', ') + overflowSuffix(record.services.length, 6)} /> : null}
-          {record.ingresses?.length ? <KeyValue label="Ingresses" value={record.ingresses.slice(0, 6).join(', ') + overflowSuffix(record.ingresses.length, 6)} /> : null}
-          {record.nodes?.length ? <KeyValue label="Nodes" value={record.nodes.slice(0, 5).join(', ') + overflowSuffix(record.nodes.length, 5)} /> : null}
-          <KeyValue label="Cost" value={formatWorkloadCost(record.cost) || 'Node pricing unavailable'} />
-        </div>
-      </DetailCard>
-
-      <DetailCard icon={<FileText className="h-4 w-4" />} title="Evidence & Log Patterns">
-        {evidence.length ? (
-          <div className="divide-y divide-[#e5e7eb]">
-            {evidence.slice(0, 6).map((item) => <EvidenceLine key={`${item.label}-${item.value}`} item={item} />)}
-          </div>
-        ) : <MiniEmpty message="No evidence has been captured for this workload yet." />}
-        {logEvidence.length > 0 && (
-          <div className="border-t border-[#e5e7eb] p-3">
-            <div className="mb-2 text-[11px] font-semibold uppercase text-[#647084]">Evidence snippets</div>
-            <div className="space-y-2">
-              {logEvidence.slice(0, 3).map((item) => (
-                <pre key={`log-${item.label}-${item.value}`} className="max-h-28 overflow-auto rounded-md bg-[#0f172a] p-2 text-[11px] leading-5 text-[#f8fafc]">{item.value}</pre>
-              ))}
-            </div>
-          </div>
-        )}
-        {logPatterns.length > 0 && (
-          <div className="border-t border-[#e5e7eb] p-3">
-            <div className="mb-2 text-[11px] font-semibold uppercase text-[#647084]">Backend log patterns</div>
-            <div className="space-y-2">
-              {logPatterns.slice(0, 4).map((item) => (
-                <div key={`${item.source}-${item.pattern}`} className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2 text-[12px]">
-                  <div className="flex items-center justify-between gap-2 font-semibold text-[#111827]">
-                    <span>{item.label}</span>
-                    {!!item.count && <span className="rounded-full bg-[#dbeafe] px-2 py-0.5 text-[11px] text-[#2563eb]">{item.count}</span>}
-                  </div>
-                  <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-[#0f172a] p-2 text-[11px] leading-5 text-[#f8fafc]">{item.pattern}</pre>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
+        <div className="min-w-0 space-y-4">
+          <DetailCard icon={<FileText className="h-4 w-4" />} title="Evidence & Log Patterns">
+            {evidence.length ? (
+              <div className="divide-y divide-[#e5e7eb]">
+                {evidence.slice(0, 6).map((item) => <EvidenceLine key={`${item.label}-${item.value}`} item={item} />)}
+              </div>
+            ) : <MiniEmpty message="No evidence has been captured for this workload yet." />}
+            {logEvidence.length > 0 && (
+              <div className="border-t border-[#e5e7eb] p-3">
+                <div className="mb-2 text-[11px] font-semibold uppercase text-[#647084]">Evidence snippets</div>
+                <div className="space-y-2">
+                  {logEvidence.slice(0, 3).map((item) => (
+                    <pre key={`log-${item.label}-${item.value}`} className="max-h-28 overflow-auto rounded-md bg-[#0f172a] p-2 text-[11px] leading-5 text-[#f8fafc]">{item.value}</pre>
+                  ))}
                 </div>
-              ))}
+              </div>
+            )}
+            {logPatterns.length > 0 && (
+              <div className="border-t border-[#e5e7eb] p-3">
+                <div className="mb-2 text-[11px] font-semibold uppercase text-[#647084]">Backend log patterns</div>
+                <div className="space-y-2">
+                  {logPatterns.slice(0, 4).map((item) => (
+                    <div key={`${item.source}-${item.pattern}`} className="rounded-md border border-[#e5e7eb] bg-[#f8fafc] p-2 text-[12px]">
+                      <div className="flex items-center justify-between gap-2 font-semibold text-[#111827]">
+                        <span>{item.label}</span>
+                        {!!item.count && <span className="rounded-full bg-[#dbeafe] px-2 py-0.5 text-[11px] text-[#2563eb]">{item.count}</span>}
+                      </div>
+                      <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-[#0f172a] p-2 text-[11px] leading-5 text-[#f8fafc]">{item.pattern}</pre>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </DetailCard>
+
+          <DetailCard icon={<Brain className="h-4 w-4" />} title="RCA & Remediation Explainability">
+            {record.rca || latestIncident ? (
+              <div className="space-y-3 p-3 text-[12px]">
+                <KeyValue label="Root cause" value={record.rca?.summary || latestIncident?.cause || 'Pending'} />
+                <KeyValue label="Confidence" value={`${record.rca?.confidence ?? latestIncident?.confidence ?? 0}%`} />
+                <KeyValue label="Source" value={record.rca?.signal || latestIncident?.source || 'Unknown'} />
+                <KeyValue label="Risk" value={record.rca?.risk || latestIncident?.risk || 'Unknown'} />
+                {record.rca?.recommendedAction && <KeyValue label="Action" value={record.rca.recommendedAction} />}
+                {record.rca?.negativeFeedback && <KeyValue label="Feedback" value={record.rca.negativeFeedback} />}
+                {latestIncident?.pr?.reason && <KeyValue label="PR reason" value={latestIncident.pr.reason} />}
+              </div>
+            ) : <MiniEmpty message="RCA details appear after Fixora investigates this workload." />}
+          </DetailCard>
+
+          <DetailCard icon={<Network className="h-4 w-4 text-[#2563eb]" />} title="Dependency Topology">
+            <div className="p-3">
+              <InteractiveGraph incident={latestIncident || null} />
             </div>
-          </div>
-        )}
-      </DetailCard>
+          </DetailCard>
 
-      <DetailCard icon={<Brain className="h-4 w-4" />} title="RCA & Remediation Explainability">
-        {record.rca || latestIncident ? (
-          <div className="space-y-3 p-3 text-[12px]">
-            <KeyValue label="Root cause" value={record.rca?.summary || latestIncident?.cause || 'Pending'} />
-            <KeyValue label="Confidence" value={`${record.rca?.confidence ?? latestIncident?.confidence ?? 0}%`} />
-            <KeyValue label="Source" value={record.rca?.signal || latestIncident?.source || 'Unknown'} />
-            <KeyValue label="Risk" value={record.rca?.risk || latestIncident?.risk || 'Unknown'} />
-            {record.rca?.recommendedAction && <KeyValue label="Action" value={record.rca.recommendedAction} />}
-            {record.rca?.negativeFeedback && <KeyValue label="Feedback" value={record.rca.negativeFeedback} />}
-            {latestIncident?.pr?.reason && <KeyValue label="PR reason" value={latestIncident.pr.reason} />}
-          </div>
-        ) : <MiniEmpty message="RCA details appear after Fixora investigates this workload." />}
-      </DetailCard>
-
-      <DetailCard icon={<FileCode2 className="h-4 w-4" />} title="GitOps Topology">
-        {record.gitops ? <GitOpsSummary gitops={record.gitops} /> : record.helm ? <HelmSummary helm={record.helm} children={record.children || []} /> : <MiniEmpty message="No GitOps source has been mapped for this workload." />}
-      </DetailCard>
-
-      <DetailCard icon={<Network className="h-4 w-4 text-[#2563eb]" />} title="Dependency Topology">
-        <div className="p-3">
-          <InteractiveGraph incident={latestIncident || null} />
         </div>
-      </DetailCard>
+        <div className="min-w-0 space-y-4">
+          <DetailCard icon={<Layers3 className="h-4 w-4" />} title="Owner Chain & Runtime">
+            <div className="space-y-3 p-3 text-[12px]">
+              <KeyValue label="Top level" value={`${workload.kind}/${workload.name}`} />
+              <KeyValue label="Namespace" value={workload.namespace || 'Unknown'} />
+              <KeyValue label="Owner chain" value={ownerChainText(record)} />
+              {record.children?.length ? <KeyValue label="Children" value={`${record.children.length} rendered Kubernetes workloads`} /> : null}
+              {record.pods?.length ? <KeyValue label="Pods" value={record.pods.slice(0, 6).join(', ') + overflowSuffix(record.pods.length, 6)} /> : null}
+              {record.services?.length ? <KeyValue label="Services" value={record.services.slice(0, 6).join(', ') + overflowSuffix(record.services.length, 6)} /> : null}
+              {record.ingresses?.length ? <KeyValue label="Ingresses" value={record.ingresses.slice(0, 6).join(', ') + overflowSuffix(record.ingresses.length, 6)} /> : null}
+              {record.nodes?.length ? <KeyValue label="Nodes" value={record.nodes.slice(0, 5).join(', ') + overflowSuffix(record.nodes.length, 5)} /> : null}
+              <KeyValue label="Cost" value={formatWorkloadCost(record.cost) || 'Node pricing unavailable'} />
+            </div>
+          </DetailCard>
 
-      <DetailCard icon={<GitPullRequestArrow className="h-4 w-4" />} title="Remediation Flow">
-        {activeRemediation ? (
-          <div className="space-y-2 p-3 text-[12px]">
-            <KeyValue label="Status" value={activeRemediation.status} />
-            <KeyValue label="Strategy" value={activeRemediation.strategy || 'Pending'} />
-            <KeyValue label="Repository" value={activeRemediation.repository || 'Unknown'} />
-            <KeyValue label="Branch" value={activeRemediation.headBranch || activeRemediation.baseBranch || 'Pending'} />
-            {activeRemediation.prUrl && <a className="inline-flex items-center gap-1 font-medium text-[#2563eb]" href={activeRemediation.prUrl} target="_blank" rel="noreferrer">Open PR <GitPullRequestArrow className="h-3.5 w-3.5" /></a>}
-          </div>
-        ) : <MiniEmpty message="No remediation workflow is attached to this workload yet." />}
-      </DetailCard>
+          <DetailCard icon={<FileCode2 className="h-4 w-4" />} title="GitOps Topology">
+            {record.gitops ? <GitOpsSummary gitops={record.gitops} /> : record.helm ? <HelmSummary helm={record.helm} children={record.children || []} /> : <MiniEmpty message="No GitOps source has been mapped for this workload." />}
+          </DetailCard>
 
-      <DetailCard icon={<ShieldCheck className="h-4 w-4" />} title="Policy & SLO">
-        <div className="space-y-2 p-3 text-[12px]">
-          <KeyValue label="Fixora mode" value={record.policyState?.mode || policyMode || 'Unknown'} />
-          <KeyValue label="Auto-fix gate" value={record.policyState?.autoFix ? 'Enabled by policy' : 'Requires policy or approval'} />
-          <KeyValue label="Approval" value={record.policyState?.approvalRequired ? 'Required' : 'Not required'} />
-          <KeyValue label="Availability SLO" value={record.policyState?.availabilitySlo ? `${(record.policyState.availabilitySlo * 100).toFixed(2)}%` : 'Not configured'} />
-          <KeyValue label="Burn rate" value={record.policyState?.burnRateThreshold ? `${record.policyState.burnRateThreshold}x` : 'Not configured'} />
-          <p className="rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-2 text-[#647084]">Policy edits still require safe settings APIs before the UI mutates remediation behavior.</p>
+          <DetailCard icon={<GitPullRequestArrow className="h-4 w-4" />} title="Remediation Flow">
+            {activeRemediation ? (
+              <div className="space-y-2 p-3 text-[12px]">
+                <KeyValue label="Status" value={activeRemediation.status} />
+                <KeyValue label="Strategy" value={activeRemediation.strategy || 'Pending'} />
+                <KeyValue label="Repository" value={activeRemediation.repository || 'Unknown'} />
+                <KeyValue label="Branch" value={activeRemediation.headBranch || activeRemediation.baseBranch || 'Pending'} />
+                {activeRemediation.prUrl && <a className="inline-flex items-center gap-1 font-medium text-[#2563eb]" href={activeRemediation.prUrl} target="_blank" rel="noreferrer">Open PR <GitPullRequestArrow className="h-3.5 w-3.5" /></a>}
+              </div>
+            ) : <MiniEmpty message="No remediation workflow is attached to this workload yet." />}
+          </DetailCard>
+
+          <DetailCard icon={<ShieldCheck className="h-4 w-4" />} title="Policy & SLO">
+            <div className="space-y-2 p-3 text-[12px]">
+              <KeyValue label="Fixora mode" value={record.policyState?.mode || policyMode || 'Unknown'} />
+              <KeyValue label="Auto-fix gate" value={record.policyState?.autoFix ? 'Enabled by policy' : 'Requires policy or approval'} />
+              <KeyValue label="Approval" value={record.policyState?.approvalRequired ? 'Required' : 'Not required'} />
+              <KeyValue label="Availability SLO" value={record.policyState?.availabilitySlo ? `${(record.policyState.availabilitySlo * 100).toFixed(2)}%` : 'Not configured'} />
+              <KeyValue label="Burn rate" value={record.policyState?.burnRateThreshold ? `${record.policyState.burnRateThreshold}x` : 'Not configured'} />
+              <p className="rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-2 text-[#647084]">Policy edits still require safe settings APIs before the UI mutates remediation behavior.</p>
+            </div>
+          </DetailCard>
         </div>
-      </DetailCard>
-    </aside>
+      </div>
+    </section>
   );
 };
 
@@ -472,12 +541,12 @@ const DetailCard = ({ icon, title, children }: { icon: ReactNode; title: string;
   </section>
 );
 
-const WorkloadRow = ({ record, selected, onSelect }: { record: WorkloadRecord; selected: boolean; onSelect: () => void }) => {
+const WorkloadRow = ({ record, onSelect }: { record: WorkloadRecord; onSelect: () => void }) => {
   const workload = displayWorkload(record);
   return (
     <tr
       onClick={onSelect}
-      className={`cursor-pointer border-t border-[#e5e7eb] hover:bg-[#f8fafc] ${selected ? 'bg-[#eff6ff] shadow-[inset_3px_0_0_#2563eb]' : ''}`}
+      className="cursor-pointer border-t border-[#e5e7eb] hover:bg-[#f8fafc]"
     >
       <td className="px-4 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
@@ -568,11 +637,12 @@ const GitOpsCell = ({ record }: { record: WorkloadRecord }) => {
 const CostCell = ({ cost }: { cost?: DashboardWorkloadCost }) => {
   if (!cost || (!cost.monthlyCost && !cost.requestedMonthlyCost)) return <span className="text-[#94a3b8]">No pricing</span>;
   const label = formatWorkloadCost(cost);
+  const allocated = cost.allocatedMonthlyCost || cost.monthlyCost || 0;
   return (
     <div className="max-w-[170px]" title={label}>
-      <div className="font-semibold text-[#111827]">{formatCurrency(cost.monthlyCost || cost.requestedMonthlyCost || 0)}/mo</div>
+      <div className="font-semibold text-[#111827]">{formatCurrency(allocated || cost.requestedMonthlyCost || 0)}/mo</div>
       <div className="truncate text-[11px] text-[#647084]">
-        {cost.requestedMonthlyCost ? `${formatCurrency(cost.requestedMonthlyCost)} requested` : 'live node cost'}
+        {cost.requestedMonthlyCost ? `${formatCurrency(cost.requestedMonthlyCost)} requested` : 'allocated node share'}
         {cost.pricingSource ? ` · ${cost.pricingSource}` : ''}
       </div>
     </div>
@@ -711,10 +781,10 @@ const matchesQuery = (query: string, values: Array<string | undefined>) => {
 
 const formatWorkloadCost = (cost?: DashboardWorkloadCost) => {
   if (!cost || (!cost.monthlyCost && !cost.requestedMonthlyCost)) return '';
-  const live = cost.monthlyCost ? `${formatCurrency(cost.monthlyCost)}/mo live` : '';
+  const allocated = (cost.allocatedMonthlyCost || cost.monthlyCost) ? `${formatCurrency(cost.allocatedMonthlyCost || cost.monthlyCost || 0)}/mo allocated share` : '';
   const requested = cost.requestedMonthlyCost ? `${formatCurrency(cost.requestedMonthlyCost)}/mo requested` : '';
   const source = cost.pricingSource ? `source ${cost.pricingSource}` : '';
-  return [live, requested, source].filter(Boolean).join(' · ');
+  return [allocated, requested, source].filter(Boolean).join(' · ');
 };
 
 const formatCurrency = (value: number) => {

@@ -31,23 +31,27 @@ type WorldSnapshot struct {
 }
 
 type WorldWorkload struct {
-	ID          string
-	Cluster     string
-	Namespace   string
-	Kind        string
-	Name        string
-	Selector    string
-	Status      string
-	Desired     int32
-	Ready       int32
-	Available   int32
-	Updated     int32
-	Pods        []string
-	Services    []string
-	Ingresses   []string
-	NodeNames   []string
-	Labels      map[string]string
-	Annotations map[string]string
+	ID                    string
+	Cluster               string
+	Namespace             string
+	Kind                  string
+	Name                  string
+	Selector              string
+	Status                string
+	Desired               int32
+	Ready                 int32
+	Available             int32
+	Updated               int32
+	Pods                  []string
+	Services              []string
+	Ingresses             []string
+	NodeNames             []string
+	Labels                map[string]string
+	Annotations           map[string]string
+	CPURequestedCores     float64
+	MemoryRequestedBytes  float64
+	CPURequestedByNode    map[string]float64
+	MemoryRequestedByNode map[string]float64
 }
 
 type WorldPod struct {
@@ -166,8 +170,19 @@ func (c *Controller) BuildWorldSnapshot(ctx context.Context) (*WorldSnapshot, []
 			p.WorkloadID = w.ID
 			world.Pods[p.ID] = p
 			w.Pods = appendUnique(w.Pods, p.ID)
+			cpuReq, memReq := podRequestedResources(*pod)
+			w.CPURequestedCores += cpuReq
+			w.MemoryRequestedBytes += memReq
 			if p.NodeName != "" {
 				w.NodeNames = appendUnique(w.NodeNames, p.NodeName)
+				if w.CPURequestedByNode == nil {
+					w.CPURequestedByNode = map[string]float64{}
+				}
+				if w.MemoryRequestedByNode == nil {
+					w.MemoryRequestedByNode = map[string]float64{}
+				}
+				w.CPURequestedByNode[p.NodeName] += cpuReq
+				w.MemoryRequestedByNode[p.NodeName] += memReq
 				nodeID := worldNodeID(p.NodeName)
 				addEdge(p.ID, nodeID, "scheduled_on")
 			}
@@ -266,7 +281,7 @@ func (c *Controller) addWorldServices(ctx context.Context, world *WorldSnapshot,
 			continue
 		}
 		selector := k8slabels.SelectorFromSet(k8slabels.Set(svc.Spec.Selector))
-		
+
 		// Only check pods in the same namespace to avoid O(Services * TotalPods)
 		for _, pod := range podsByNS[svc.Namespace] {
 			if !selector.Matches(k8slabels.Set(pod.Labels)) {

@@ -41,8 +41,8 @@ type GraphState = {
 };
 
 export const InteractiveGraph = ({ incident }: InteractiveGraphProps) => {
-  const nodes = incident?.graph || [];
-  const edges = incident?.edges || [];
+  const nodes = useMemo(() => incident?.graph || [], [incident?.graph]);
+  const edges = useMemo(() => incident?.edges || [], [incident?.edges]);
   const [state, setState] = useState<GraphState>({
     selectedNodeId: null,
     collapsedNodeIds: new Set(),

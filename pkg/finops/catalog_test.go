@@ -27,6 +27,16 @@ func TestCatalogPricingProviderUsesCorootStyleUnitAllocation(t *testing.T) {
 	if total < 0.095 || total > 0.097 {
 		t.Fatalf("reconstructed hourly total = %.6f, want about 0.096", total)
 	}
+	if got := CalculateMonthlyNodeCost(*profile); got < 70 || got > 71 {
+		t.Fatalf("monthly node cost = %.2f, want about 70.08", got)
+	}
+	xlarge, err := NewCatalogPricingProvider().GetProfileForInstance("aws", "us-east-1", "m6i.xlarge")
+	if err != nil {
+		t.Fatalf("GetProfileForInstance(xlarge) error = %v", err)
+	}
+	if got := CalculateMonthlyNodeCost(*xlarge); got < 140 || got > 141 {
+		t.Fatalf("xlarge monthly node cost = %.2f, want about 140.16", got)
+	}
 }
 
 func TestCatalogPricingProviderFallsBackToDefaultVendorRegion(t *testing.T) {

@@ -160,6 +160,9 @@ func (c *InfracostClient) GetProfileForInstance(vendor, region, instanceType str
 		Name:              fmt.Sprintf("Infracost %s %s (%s)", vendor, instanceType, region),
 		CPURatePerHour:    (hourlyPrice * 0.5) / vcpus,
 		MemoryRatePerHour: (hourlyPrice * 0.5) / memoryGiB,
+		VCPUs:             vcpus,
+		MemoryGiB:         memoryGiB,
+		HourlyRateUSD:     hourlyPrice,
 	}
 
 	c.mu.Lock()

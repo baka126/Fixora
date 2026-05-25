@@ -162,7 +162,10 @@ type DashboardWorkloadPolicy struct {
 
 type DashboardWorkloadCost struct {
 	MonthlyCost          float64 `json:"monthlyCost,omitempty"`
+	AllocatedMonthlyCost float64 `json:"allocatedMonthlyCost,omitempty"`
 	RequestedMonthlyCost float64 `json:"requestedMonthlyCost,omitempty"`
+	CPURequestedCores    float64 `json:"cpuRequestedCores,omitempty"`
+	MemoryRequestedMiB   float64 `json:"memoryRequestedMiB,omitempty"`
 	PricingSource        string  `json:"pricingSource,omitempty"`
 }
 
@@ -1498,7 +1501,7 @@ func dashboardWorkloadViews(world *WorldSnapshot, incidents []DashboardIncident,
 			view.Ingresses = dashboardWorldIngressNames(world.Ingresses, workload.Ingresses)
 			view.Nodes = append([]string{}, workload.NodeNames...)
 			sort.Strings(view.Nodes)
-			view.Cost = dashboardWorkloadCost(workload.NodeNames, nodeCosts)
+			view.Cost = dashboardWorkloadCost(workload, nodeCosts)
 		}
 	}
 
@@ -1614,12 +1617,6 @@ func collapseDashboardHelmWorkloads(records map[string]*DashboardWorkloadView, n
 		}
 		mergeDashboardHelmChild(parent, record)
 	}
-	for _, record := range collapsed {
-		if record == nil || record.Helm == nil || len(record.Nodes) == 0 {
-			continue
-		}
-		record.Cost = dashboardWorkloadCost(record.Nodes, nodeCosts)
-	}
 	return collapsed
 }
 
@@ -1634,6 +1631,7 @@ func mergeDashboardHelmChild(parent, child *DashboardWorkloadView) {
 	parent.Services = appendUniqueStrings(parent.Services, child.Services...)
 	parent.Ingresses = appendUniqueStrings(parent.Ingresses, child.Ingresses...)
 	parent.Nodes = appendUniqueStrings(parent.Nodes, child.Nodes...)
+	parent.Cost = mergeDashboardWorkloadCost(parent.Cost, child.Cost)
 	if parent.Cluster == "" {
 		parent.Cluster = child.Cluster
 	}
@@ -1863,30 +1861,46 @@ func dashboardGitOpsMappingFromSource(source DashboardGitOpsSource) *DashboardGi
 	}
 }
 
-func dashboardWorkloadCost(nodeNames []string, nodeCosts []DashboardNodeCost) DashboardWorkloadCost {
-	if len(nodeNames) == 0 || len(nodeCosts) == 0 {
+func dashboardWorkloadCost(workload *WorldWorkload, nodeCosts []DashboardNodeCost) DashboardWorkloadCost {
+	if workload == nil || len(workload.NodeNames) == 0 || len(nodeCosts) == 0 {
 		return DashboardWorkloadCost{}
 	}
-	nodeSet := map[string]bool{}
-	for _, name := range nodeNames {
-		nodeSet[name] = true
+	nodeByName := map[string]DashboardNodeCost{}
+	for _, node := range nodeCosts {
+		nodeByName[node.Name] = node
 	}
 	var cost DashboardWorkloadCost
 	sources := map[string]bool{}
-	for _, node := range nodeCosts {
-		if !nodeSet[node.Name] {
+	for _, nodeName := range workload.NodeNames {
+		node, ok := nodeByName[nodeName]
+		if !ok {
 			continue
 		}
+		workloadCPU := workload.CPURequestedByNode[nodeName]
+		workloadMemGiB := workload.MemoryRequestedByNode[nodeName] / 1024 / 1024 / 1024
+		nodeMemGiB := node.MemoryRequestedMiB / 1024
+		nodeWeight := node.CPURequestedCores + nodeMemGiB
+		workloadWeight := workloadCPU + workloadMemGiB
+		if workloadWeight <= 0 || nodeWeight <= 0 {
+			continue
+		}
+		share := workloadWeight / nodeWeight
+		if share > 1 {
+			share = 1
+		}
 		if node.RequestedMonthlyCost > 0 {
-			cost.RequestedMonthlyCost += node.RequestedMonthlyCost
+			cost.RequestedMonthlyCost += node.RequestedMonthlyCost * share
 		}
 		if node.MonthlyCost > 0 {
-			cost.MonthlyCost += node.MonthlyCost
+			cost.AllocatedMonthlyCost += node.MonthlyCost * share
 		}
 		if node.PricingSource != "" {
 			sources[node.PricingSource] = true
 		}
 	}
+	cost.MonthlyCost = cost.AllocatedMonthlyCost
+	cost.CPURequestedCores = workload.CPURequestedCores
+	cost.MemoryRequestedMiB = workload.MemoryRequestedBytes / 1024 / 1024
 	if len(sources) > 0 {
 		keys := make([]string, 0, len(sources))
 		for source := range sources {
@@ -1896,6 +1910,37 @@ func dashboardWorkloadCost(nodeNames []string, nodeCosts []DashboardNodeCost) Da
 		cost.PricingSource = strings.Join(keys, ", ")
 	}
 	return cost
+}
+
+func mergeDashboardWorkloadCost(a, b DashboardWorkloadCost) DashboardWorkloadCost {
+	a.MonthlyCost += b.MonthlyCost
+	a.AllocatedMonthlyCost += b.AllocatedMonthlyCost
+	a.RequestedMonthlyCost += b.RequestedMonthlyCost
+	a.CPURequestedCores += b.CPURequestedCores
+	a.MemoryRequestedMiB += b.MemoryRequestedMiB
+	a.PricingSource = mergeCSVLabels(a.PricingSource, b.PricingSource)
+	return a
+}
+
+func mergeCSVLabels(values ...string) string {
+	seen := map[string]bool{}
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				seen[part] = true
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
 }
 
 func dashboardRemediationClosed(status string) bool {
@@ -3469,7 +3514,7 @@ func (c *Controller) calculateClusterCostSnapshot(ctx context.Context, pods []v1
 			row.Status = "pricing_not_configured"
 		default:
 			if profile, err := c.pricingProvider.GetProfileForInstance(vendor, region, instanceType); err == nil && profile != nil {
-				row.MonthlyCost = ((profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)) * 730
+				row.MonthlyCost = finops.CalculateMonthlyNodeCost(*profile)
 				row.RequestedMonthlyCost = ((profile.CPURatePerHour * cpuReq) + (profile.MemoryRatePerHour * (memReq / 1024 / 1024 / 1024))) * 730
 				row.PricingSource = profile.Name
 				row.Status = "priced"
@@ -3527,7 +3572,7 @@ func (c *Controller) calculateClusterCostSnapshotFromWorld(world *WorldSnapshot,
 			row.Status = "pricing_not_configured"
 		default:
 			if profile, err := c.pricingProvider.GetProfileForInstance(node.Vendor, node.Region, node.InstanceType); err == nil && profile != nil {
-				row.MonthlyCost = ((profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)) * 730
+				row.MonthlyCost = finops.CalculateMonthlyNodeCost(*profile)
 				row.RequestedMonthlyCost = ((profile.CPURatePerHour * cpuReq) + (profile.MemoryRatePerHour * (memReq / 1024 / 1024 / 1024))) * 730
 				row.PricingSource = profile.Name
 				row.Status = "priced"
@@ -3541,18 +3586,27 @@ func (c *Controller) calculateClusterCostSnapshotFromWorld(world *WorldSnapshot,
 
 func nodeRequestedResources(pods []v1.Pod) (cpuCores float64, memoryBytes float64) {
 	for _, pod := range pods {
-		for _, container := range pod.Spec.InitContainers {
-			cpuCores += container.Resources.Requests.Cpu().AsApproximateFloat64()
-			if value, ok := container.Resources.Requests.Memory().AsInt64(); ok {
-				memoryBytes += float64(value)
-			}
-		}
-		for _, container := range pod.Spec.Containers {
-			cpuCores += container.Resources.Requests.Cpu().AsApproximateFloat64()
-			if value, ok := container.Resources.Requests.Memory().AsInt64(); ok {
-				memoryBytes += float64(value)
-			}
-		}
+		podCPU, podMemory := podRequestedResources(pod)
+		cpuCores += podCPU
+		memoryBytes += podMemory
 	}
 	return cpuCores, memoryBytes
+}
+
+func podRequestedResources(pod v1.Pod) (cpuCores float64, memoryBytes float64) {
+	var appCPU, appMemory float64
+	for _, container := range pod.Spec.Containers {
+		appCPU += container.Resources.Requests.Cpu().AsApproximateFloat64()
+		if value, ok := container.Resources.Requests.Memory().AsInt64(); ok {
+			appMemory += float64(value)
+		}
+	}
+	var initCPU, initMemory float64
+	for _, container := range pod.Spec.InitContainers {
+		initCPU = maxFloat(initCPU, container.Resources.Requests.Cpu().AsApproximateFloat64())
+		if value, ok := container.Resources.Requests.Memory().AsInt64(); ok {
+			initMemory = maxFloat(initMemory, float64(value))
+		}
+	}
+	return maxFloat(appCPU, initCPU), maxFloat(appMemory, initMemory)
 }

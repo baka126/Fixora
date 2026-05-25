@@ -20,6 +20,9 @@ type PricingProfile struct {
 	Name              string
 	CPURatePerHour    float64 // Cost per vCPU hour
 	MemoryRatePerHour float64 // Cost per GiB hour
+	VCPUs             float64 // Instance vCPU capacity when known
+	MemoryGiB         float64 // Instance memory capacity when known
+	HourlyRateUSD     float64 // Full instance hourly price when known
 }
 
 // RiskMetrics represents the data needed to calculate smart financial impact.
@@ -44,6 +47,21 @@ func CalculateMonthlyCost(cpu float64, memBytes float64, profile PricingProfile,
 	memGiB := memBytes / (1024 * 1024 * 1024)
 	hourlyCost := (cpu * profile.CPURatePerHour) + (memGiB * profile.MemoryRatePerHour)
 	return hourlyCost * 730 * float64(replicas)
+}
+
+func CalculateMonthlyNodeCost(profile PricingProfile) float64 {
+	if profile.HourlyRateUSD > 0 {
+		return profile.HourlyRateUSD * 730
+	}
+	vcpus := profile.VCPUs
+	if vcpus <= 0 {
+		vcpus = 2
+	}
+	memoryGiB := profile.MemoryGiB
+	if memoryGiB <= 0 {
+		memoryGiB = 8
+	}
+	return ((profile.CPURatePerHour * vcpus) + (profile.MemoryRatePerHour * memoryGiB)) * 730
 }
 
 // FormatImpact returns a human-readable FinOps impact string.
@@ -165,14 +183,7 @@ func CalculateClusterCost(nodes []NodeInfo, provider PricingProvider) (float64, 
 			continue // Skip if pricing isn't available
 		}
 
-		// Reconstruct the total hourly cost from the split rates
-		// Infracost splits the total instance price 50/50 and divides by heuristics.
-		// Since we don't have the exact vcpu/mem here, we will trust that the UI only needs an approximation
-		// Or better, we can assume typical sizes if we must.
-		// Actually, let's just use a fallback heuristic here if we don't change infracost.go
-		hourlyCost := (profile.CPURatePerHour * 2.0) + (profile.MemoryRatePerHour * 8.0)
-
-		totalMonthlyCost += hourlyCost * 730
+		totalMonthlyCost += CalculateMonthlyNodeCost(*profile)
 	}
 
 	return totalMonthlyCost, nil

@@ -95,7 +95,10 @@ export interface DashboardWorkloadPolicy {
 
 export interface DashboardWorkloadCost {
   monthlyCost?: number;
+  allocatedMonthlyCost?: number;
   requestedMonthlyCost?: number;
+  cpuRequestedCores?: number;
+  memoryRequestedMiB?: number;
   pricingSource?: string;
 }
 

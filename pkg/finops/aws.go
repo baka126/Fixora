@@ -83,9 +83,12 @@ func (c *AWSPricingClient) GetProfileForInstance(vendor, region, instanceType st
 	memRate := (p.OnDemandPrice * 0.5) / p.MemoryGiB
 
 	profile := &PricingProfile{
-		Name:             fmt.Sprintf("AWS %s (%s)", instanceType, region),
-		CPURatePerHour:   cpuRate,
+		Name:              fmt.Sprintf("AWS %s (%s)", instanceType, region),
+		CPURatePerHour:    cpuRate,
 		MemoryRatePerHour: memRate,
+		VCPUs:             p.Vcpus,
+		MemoryGiB:         p.MemoryGiB,
+		HourlyRateUSD:     p.OnDemandPrice,
 	}
 
 	c.mu.Lock()

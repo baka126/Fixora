@@ -49,6 +49,9 @@ func (p *CatalogPricingProvider) GetProfileForInstance(vendor, region, instanceT
 		Name:              fmt.Sprintf("Catalog %s %s (%s)", strings.ToUpper(price.Vendor), price.InstanceType, price.Region),
 		CPURatePerHour:    perUnit,
 		MemoryRatePerHour: perUnit,
+		VCPUs:             price.VCPUs,
+		MemoryGiB:         price.MemoryGiB,
+		HourlyRateUSD:     price.HourlyUSD,
 	}, nil
 }
 

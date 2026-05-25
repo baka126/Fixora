@@ -239,15 +239,17 @@ func TestDashboardWorkloadViewsCollapseHelmChildren(t *testing.T) {
 		Cluster: "prod",
 		Workloads: map[string]*WorldWorkload{
 			workloadID: {
-				ID:        workloadID,
-				Cluster:   "prod",
-				Namespace: "checkout",
-				Kind:      "Deployment",
-				Name:      "api",
-				Status:    "desired=2 ready=1 available=1 updated=2",
-				Desired:   2,
-				Ready:     1,
-				NodeNames: []string{"node-a"},
+				ID:                 workloadID,
+				Cluster:            "prod",
+				Namespace:          "checkout",
+				Kind:               "Deployment",
+				Name:               "api",
+				Status:             "desired=2 ready=1 available=1 updated=2",
+				Desired:            2,
+				Ready:              1,
+				NodeNames:          []string{"node-a"},
+				CPURequestedCores:  1,
+				CPURequestedByNode: map[string]float64{"node-a": 1},
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": "Helm",
 					"app.kubernetes.io/instance":   "checkout-api",
@@ -277,9 +279,37 @@ func TestDashboardWorkloadViewsCollapseHelmChildren(t *testing.T) {
 	if got[0].Desired != 2 || got[0].Ready != 1 || got[0].Health != "degraded" {
 		t.Fatalf("rollup = desired %d ready %d health %q, want 2/1/degraded", got[0].Desired, got[0].Ready, got[0].Health)
 	}
-	got = dashboardWorkloadViews(world, nil, nil, nil, nil, []DashboardNodeCost{{Name: "node-a", MonthlyCost: 42.5, RequestedMonthlyCost: 21.25, PricingSource: "catalog"}}, DashboardPolicy{Mode: "Dry-run"}, 0.99, 14.4)
+	got = dashboardWorkloadViews(world, nil, nil, nil, nil, []DashboardNodeCost{{Name: "node-a", MonthlyCost: 42.5, RequestedMonthlyCost: 21.25, CPURequestedCores: 1, PricingSource: "catalog"}}, DashboardPolicy{Mode: "Dry-run"}, 0.99, 14.4)
 	if got[0].Cost.MonthlyCost != 42.5 || got[0].Cost.RequestedMonthlyCost != 21.25 || got[0].Cost.PricingSource != "catalog" {
 		t.Fatalf("cost = %#v, want grouped Helm release node cost", got[0].Cost)
+	}
+}
+
+func TestDashboardWorkloadCostProratesNodeCostByRequests(t *testing.T) {
+	workload := &WorldWorkload{
+		NodeNames:            []string{"node-a"},
+		CPURequestedCores:    1,
+		MemoryRequestedBytes: 1024 * 1024 * 1024,
+		CPURequestedByNode: map[string]float64{
+			"node-a": 1,
+		},
+		MemoryRequestedByNode: map[string]float64{
+			"node-a": 1024 * 1024 * 1024,
+		},
+	}
+	got := dashboardWorkloadCost(workload, []DashboardNodeCost{{
+		Name:                 "node-a",
+		MonthlyCost:          100,
+		RequestedMonthlyCost: 50,
+		CPURequestedCores:    2,
+		MemoryRequestedMiB:   2048,
+		PricingSource:        "catalog",
+	}})
+	if got.MonthlyCost != 50 || got.AllocatedMonthlyCost != 50 || got.RequestedMonthlyCost != 25 {
+		t.Fatalf("cost = %#v, want 50 allocated and 25 requested", got)
+	}
+	if got.CPURequestedCores != 1 || got.MemoryRequestedMiB != 1024 {
+		t.Fatalf("requests = cpu %.2f memory %.2fMiB, want 1/1024", got.CPURequestedCores, got.MemoryRequestedMiB)
 	}
 }
 
